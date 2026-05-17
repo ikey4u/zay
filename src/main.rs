@@ -9,8 +9,9 @@ use std::{
 };
 
 use anyhow::{Context, bail};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use clash::TokioRuntime;
+use serde_yaml::Value;
 use tracing_subscriber::{EnvFilter, fmt::time::LocalTime};
 
 #[derive(Parser, Debug)]
@@ -21,37 +22,36 @@ use tracing_subscriber::{EnvFilter, fmt::time::LocalTime};
     long_about = None
 )]
 struct Cli {
-    /// Subscription URL (clash/mihomo-compatible YAML proxy list).
-    ///
-    /// The URL is fetched once at startup and cached locally.  The proxy
-    /// provider will also re-fetch it on the configured `--interval`.
+    #[clap(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    Serve(Args),
+    Dump(Args),
+}
+
+#[derive(Parser, Debug)]
+struct Args {
     #[clap(short, long, value_name = "URL")]
     subscription: String,
 
-    /// Directory used to store the generated config, provider cache, and
-    /// GeoIP/GeoSite databases.  Defaults to the OS config dir under
-    /// `zay/` (e.g. `~/.config/zay`), falling back to a temp dir.
     #[clap(short, long, value_name = "DIR")]
     data_dir: Option<PathBuf>,
 
-    /// HTTP + SOCKS5 mixed-mode proxy listen port.
     #[clap(long, default_value = "7890", value_name = "PORT")]
     mixed_port: u16,
 
-    /// External REST API listen address (`host:port`).
-    /// Omit to disable the API server.
     #[clap(long, value_name = "ADDR")]
     controller: Option<String>,
 
-    /// Secret token for the REST API.
     #[clap(long, value_name = "TOKEN")]
     secret: Option<String>,
 
-    /// Seconds between subscription re-fetches by the proxy provider.
     #[clap(long, default_value = "3600", value_name = "SECS")]
     interval: u64,
 
-    /// URL used for proxy latency tests / health-checks.
     #[clap(
         long,
         default_value = "http://cp.cloudflare.com/generate_204",
@@ -59,22 +59,18 @@ struct Cli {
     )]
     health_check_url: String,
 
-    /// Log verbosity: trace | debug | info | warning | error | silent.
     #[clap(long, default_value = "info", value_name = "LEVEL")]
     log_level: String,
 
-    /// Allow connections from LAN (sets `allow-lan: true`).
     #[clap(long, default_value_t = false)]
     allow_lan: bool,
 
-    /// Enable TUN mode (requires root / CAP_NET_ADMIN on Linux).
     #[clap(long, default_value_t = false)]
     tun: bool,
-}
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+    #[clap(long, value_name = "FILE")]
+    mixin: Option<PathBuf>,
+}
 
 fn default_data_dir() -> PathBuf {
     dirs_next::config_dir()
@@ -82,7 +78,6 @@ fn default_data_dir() -> PathBuf {
         .unwrap_or_else(|| std::env::temp_dir().join("zay"))
 }
 
-/// User-Agent sent when fetching subscription URLs.
 const SUBSCRIPTION_UA: &str =
     concat!("clash-verge/v", env!("CARGO_PKG_VERSION"));
 
@@ -93,8 +88,6 @@ fn http_client() -> anyhow::Result<reqwest::blocking::Client> {
         .context("building HTTP client")
 }
 
-/// Fetch `url` and write the body to `dest`, skipping if `dest` already exists.
-/// Returns `true` if the file was (re-)downloaded, `false` if skipped.
 fn fetch_if_missing(
     client: &reqwest::blocking::Client,
     label: &str,
@@ -131,8 +124,6 @@ fn fetch_if_missing(
     Ok(true)
 }
 
-/// Best-effort variant of [`fetch_if_missing`]: logs a warning on failure.
-/// Returns `true` if the file is available (pre-existing or just fetched).
 fn try_fetch_if_missing(
     client: &reqwest::blocking::Client,
     label: &str,
@@ -150,8 +141,6 @@ fn try_fetch_if_missing(
     }
 }
 
-/// If `path` is a full clash config, rewrite it in-place to contain only the
-/// `proxies:` block so it can be used as a clash proxy-provider file.
 fn normalize_subscription(path: &Path) -> anyhow::Result<()> {
     let raw = fs::read_to_string(path)
         .with_context(|| format!("reading {}", path.display()))?;
@@ -174,10 +163,8 @@ fn normalize_subscription(path: &Path) -> anyhow::Result<()> {
     for line in raw.lines() {
         if line.starts_with("proxies:") {
             in_proxies = true;
-            // Inline sequence on same line e.g. "proxies: []" — keep as-is.
             let rest = line["proxies:".len()..].trim();
             if !rest.is_empty() && rest != "~" && rest != "null" {
-                // Rare: all proxies on one line. Just keep the whole thing.
                 out = line.to_string();
                 out.push('\n');
             }
@@ -185,7 +172,6 @@ fn normalize_subscription(path: &Path) -> anyhow::Result<()> {
         }
 
         if in_proxies {
-            // A new top-level key ends the proxies block.
             if !line.is_empty()
                 && !line.starts_with(' ')
                 && !line.starts_with('\t')
@@ -214,26 +200,52 @@ fn normalize_subscription(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn extract_proxy_servers(path: &Path) -> Vec<String> {
+    let raw = match fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(_) => return vec![],
+    };
+    let doc: Value = match serde_yaml::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => return vec![],
+    };
+    let proxies = match doc.get("proxies").and_then(|v| v.as_sequence()) {
+        Some(s) => s,
+        None => return vec![],
+    };
+    let mut servers: Vec<String> = Vec::new();
+    for proxy in proxies {
+        if let Some(server) = proxy.get("server").and_then(|v| v.as_str()) {
+            let s = server.to_string();
+            if !servers.contains(&s) {
+                servers.push(s);
+            }
+        }
+    }
+    servers
+}
+
 fn build_config(
-    cli: &Cli,
+    args: &Args,
     sub_cache_rel: &str,
     has_mmdb: bool,
     has_geosite: bool,
+    proxy_servers: &[String],
 ) -> String {
-    let mixed_port = cli.mixed_port;
-    let log_level = &cli.log_level;
-    let allow_lan = cli.allow_lan;
-    let hc_url = &cli.health_check_url;
+    let mixed_port = args.mixed_port;
+    let log_level = &args.log_level;
+    let allow_lan = args.allow_lan;
+    let hc_url = &args.health_check_url;
 
-    let controller_line = match &cli.controller {
+    let controller_line = match &args.controller {
         Some(addr) => format!("external-controller: \"{addr}\"\n"),
         None => String::new(),
     };
-    let secret_line = match &cli.secret {
+    let secret_line = match &args.secret {
         Some(s) => format!("secret: \"{s}\"\n"),
         None => String::new(),
     };
-    let tun_block = if cli.tun {
+    let tun_block = if args.tun {
         "\ntun:\n  enable: true\n  device-id: \"utun1989\"\n  route-all: true\n  dns-hijack: true\n"
             .to_string()
     } else {
@@ -251,27 +263,40 @@ fn build_config(
         ""
     };
 
-    // Only add GEOIP rules when the mmdb file is available.
+    let server_rules: String = proxy_servers
+        .iter()
+        .map(|s| {
+            if s.parse::<std::net::IpAddr>().is_ok() {
+                format!("  - IP-CIDR,{s}/32,DIRECT,no-resolve\n")
+            } else {
+                format!("  - DOMAIN-SUFFIX,{s},DIRECT\n")
+            }
+        })
+        .collect();
+
     let geoip_rules = if has_mmdb {
         "  - GEOIP,PRIVATE,DIRECT\n  - GEOIP,CN,DIRECT\n"
     } else {
         ""
     };
 
-    let dns_block = if cli.tun {
+    let dns_block = if args.tun {
         r#"
 dns:
   enable: true
   listen: 0.0.0.0:53533
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.1/16
+  fake-ip-filter:
+    - "*.lan"
+    - "*.local"
+    - "*.internal"
   default-nameserver:
     - 114.114.114.114
     - 223.5.5.5
   nameserver:
     - 114.114.114.114
     - 223.5.5.5
-  fallback:
-    - https://8.8.8.8/dns-query
-    - https://1.1.1.1/dns-query
 "#
         .to_string()
     } else {
@@ -313,36 +338,45 @@ proxy-groups:
       - subscription
 
 rules:
-{geoip_rules}  - MATCH,Proxy
+{server_rules}{geoip_rules}  - MATCH,Proxy
 "#
     )
 }
 
-fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
+fn merge_yaml(base: &mut Value, overlay: Value) {
+    match (base, overlay) {
+        (Value::Mapping(b), Value::Mapping(o)) => {
+            for (k, v) in o {
+                merge_yaml(b.entry(k).or_insert(Value::Null), v);
+            }
+        }
+        (base, overlay) => *base = overlay,
+    }
+}
 
-    // Install our own tracing subscriber before clash-rs starts so we control
-    // the format.  clash-rs's setup_logging uses a Once-guard + set_global_default;
-    // since the global is already set it will silently no-op and our format wins.
-    let timer = LocalTime::new(time::macros::format_description!(
-        "[year repr:last_two]-[month]-[day] [hour]:[minute]:[second]"
-    ));
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        EnvFilter::new(format!("warn,clash={}", cli.log_level))
-    });
-    let _ = tracing_subscriber::fmt()
-        .with_timer(timer)
-        .with_env_filter(filter)
-        .with_file(false)
-        .with_line_number(false)
-        .with_target(false)
-        .compact()
-        .try_init();
+fn apply_mixin(config_yaml: &str, mixin_path: &Path) -> anyhow::Result<String> {
+    let mixin_raw = fs::read_to_string(mixin_path)
+        .with_context(|| format!("reading mixin {}", mixin_path.display()))?;
 
-    let data_dir = cli.data_dir.clone().unwrap_or_else(default_data_dir);
+    let mut base: Value = serde_yaml::from_str(config_yaml)
+        .context("parsing generated config as YAML")?;
+    let overlay: Value = serde_yaml::from_str(&mixin_raw)
+        .with_context(|| format!("parsing mixin {}", mixin_path.display()))?;
+
+    merge_yaml(&mut base, overlay);
+
+    serde_yaml::to_string(&base).context("serializing merged config")
+}
+
+struct PreparedConfig {
+    config_yaml: String,
+    data_dir: PathBuf,
+}
+
+fn prepare(args: &Args) -> anyhow::Result<PreparedConfig> {
+    let data_dir = args.data_dir.clone().unwrap_or_else(default_data_dir);
     fs::create_dir_all(&data_dir)
         .with_context(|| format!("creating data dir {}", data_dir.display()))?;
-    eprintln!("zay: data dir → {}", data_dir.display());
 
     let client = http_client()?;
 
@@ -364,26 +398,87 @@ fn main() -> anyhow::Result<()> {
     fetch_if_missing(
         &client,
         "subscription",
-        &cli.subscription,
+        &args.subscription,
         &sub_cache_abs,
     )?;
     normalize_subscription(&sub_cache_abs)?;
 
-    let config_yaml = build_config(&cli, sub_cache_rel, has_mmdb, has_geosite);
-    let config_path = data_dir.join("config.yaml");
-    fs::write(&config_path, &config_yaml).with_context(|| {
-        format!("writing config to {}", config_path.display())
-    })?;
-    eprintln!("zay: config → {}", config_path.display());
-    eprintln!("zay: starting – mixed proxy on 0.0.0.0:{}", cli.mixed_port);
+    let proxy_servers = extract_proxy_servers(&sub_cache_abs);
+    let mut config_yaml = build_config(
+        args,
+        sub_cache_rel,
+        has_mmdb,
+        has_geosite,
+        &proxy_servers,
+    );
 
-    clash::start_scaffold(clash::Options {
-        config: clash::Config::Str(config_yaml),
-        cwd: Some(data_dir.to_string_lossy().into_owned()),
-        rt: Some(TokioRuntime::MultiThread),
-        log_file: None,
+    let mixin_path = args
+        .mixin
+        .clone()
+        .unwrap_or_else(|| data_dir.join("mixin.yaml"));
+    if mixin_path.exists() {
+        eprintln!("zay: applying mixin from {}", mixin_path.display());
+        config_yaml = apply_mixin(&config_yaml, &mixin_path)?;
+    }
+
+    Ok(PreparedConfig {
+        config_yaml,
+        data_dir,
     })
-    .inspect_err(|err| eprintln!("zay: fatal: {err}"))?;
+}
+
+fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+
+    let args = match &cli.command {
+        Command::Serve(a) | Command::Dump(a) => a,
+    };
+
+    let timer = LocalTime::new(time::macros::format_description!(
+        "[year repr:last_two]-[month]-[day] [hour]:[minute]:[second]"
+    ));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new(format!("warn,clash={}", args.log_level))
+    });
+    let _ = tracing_subscriber::fmt()
+        .with_timer(timer)
+        .with_env_filter(filter)
+        .with_file(false)
+        .with_line_number(false)
+        .with_target(false)
+        .compact()
+        .try_init();
+
+    match &cli.command {
+        Command::Dump(args) => {
+            let PreparedConfig { config_yaml, .. } = prepare(args)?;
+            print!("{config_yaml}");
+        }
+        Command::Serve(args) => {
+            let PreparedConfig {
+                config_yaml,
+                data_dir,
+            } = prepare(args)?;
+
+            let config_path = data_dir.join("config.yaml");
+            fs::write(&config_path, &config_yaml).with_context(|| {
+                format!("writing config to {}", config_path.display())
+            })?;
+            eprintln!("zay: config → {}", config_path.display());
+            eprintln!(
+                "zay: starting – mixed proxy on 0.0.0.0:{}",
+                args.mixed_port
+            );
+
+            clash::start_scaffold(clash::Options {
+                config: clash::Config::Str(config_yaml),
+                cwd: Some(data_dir.to_string_lossy().into_owned()),
+                rt: Some(TokioRuntime::MultiThread),
+                log_file: None,
+            })
+            .inspect_err(|err| eprintln!("zay: fatal: {err}"))?;
+        }
+    }
 
     Ok(())
 }
