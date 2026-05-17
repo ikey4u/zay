@@ -1,3 +1,3 @@
-# Zay - A simple network proxy based on clash
+# Zay - A simple network proxy
 
 See `zay --help` for usage.

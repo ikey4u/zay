@@ -24,14 +24,6 @@ pub fn build_config(
     let allow_lan = settings.allow_lan;
     let hc_url = &settings.health_check_url;
 
-    let controller_line = match &settings.controller {
-        Some(addr) => format!("external-controller: \"{addr}\"\n"),
-        None => String::new(),
-    };
-    let secret_line = match &settings.secret {
-        Some(s) => format!("secret: \"{s}\"\n"),
-        None => String::new(),
-    };
     let tun_block = if settings.tun {
         r#"
 tun:
@@ -93,7 +85,7 @@ allow-lan: {allow_lan}
 ipv6: false
 mode: rule
 log-level: {log_level}
-{controller_line}{secret_line}{mmdb_line}{geosite_line}{tun_block}{dns_block}
+{mmdb_line}{geosite_line}{tun_block}{dns_block}
 proxy-providers:
   subscription:
     type: http
@@ -157,6 +149,96 @@ fn apply_mixin(config_yaml: &str, mixin_path: &Path) -> Result<String> {
     serde_yaml::to_string(&base).context("serializing merged config")
 }
 
+fn proxy_names(proxies: &Value) -> Vec<String> {
+    proxies
+        .as_sequence()
+        .into_iter()
+        .flatten()
+        .filter_map(|p| {
+            p.get("name").and_then(|n| n.as_str()).map(str::to_string)
+        })
+        .collect()
+}
+
+fn load_cached_proxies(cache_path: &Path) -> Option<Value> {
+    let raw = fs::read_to_string(cache_path).ok()?;
+    let doc: Value = serde_yaml::from_str(&raw).ok()?;
+    doc.get("proxies").cloned()
+}
+
+fn expand_proxy_groups(groups: &mut Value, proxy_names: &[String]) {
+    let Some(seq) = groups.as_sequence_mut() else {
+        return;
+    };
+    for group in seq {
+        let Some(map) = group.as_mapping_mut() else {
+            continue;
+        };
+        let uses_subscription = map
+            .get(Value::from("use"))
+            .and_then(|u| u.as_sequence())
+            .is_some_and(|uses| {
+                uses.iter().any(|v| v.as_str() == Some("subscription"))
+            });
+        if !uses_subscription {
+            continue;
+        }
+        map.remove(Value::from("use"));
+
+        let mut names: Vec<Value> = map
+            .get(Value::from("proxies"))
+            .and_then(|p| p.as_sequence())
+            .map(|seq| seq.to_vec())
+            .unwrap_or_default();
+
+        for name in proxy_names {
+            let v = Value::from(name.as_str());
+            if !names.iter().any(|n| n == &v) {
+                names.push(v);
+            }
+        }
+        map.insert(Value::from("proxies"), Value::Sequence(names));
+    }
+}
+
+/// Inline cached subscription proxies into a full config (no proxy-providers).
+pub fn expand_runtime_config(
+    config_yaml: &str,
+    data_dir: &Path,
+) -> Result<String> {
+    let cache_path = data_dir.join("providers/subscription.yaml");
+    let Some(proxies) = load_cached_proxies(&cache_path) else {
+        return Ok(config_yaml.to_string());
+    };
+
+    let mut config: Value =
+        serde_yaml::from_str(config_yaml).context("parsing config as YAML")?;
+    let Some(mapping) = config.as_mapping_mut() else {
+        return Ok(config_yaml.to_string());
+    };
+
+    let names = proxy_names(&proxies);
+    mapping.insert(Value::from("proxies"), proxies);
+    mapping.remove(Value::from("proxy-providers"));
+
+    if let Some(groups) = mapping.get_mut(Value::from("proxy-groups")) {
+        expand_proxy_groups(groups, &names);
+    }
+
+    serde_yaml::to_string(&config).context("serializing expanded config")
+}
+
+pub fn config_has_tun(config_yaml: &str) -> bool {
+    let doc: Value = match serde_yaml::from_str(config_yaml) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    doc.get("tun")
+        .and_then(|t| t.get("enable"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
 pub fn finalize_config(
     settings: &Settings,
     mut config_yaml: String,
@@ -170,7 +252,7 @@ pub fn finalize_config(
             .lines()
             .all(|l| l.trim().is_empty() || l.trim_start().starts_with('#'))
         {
-            eprintln!("zay: applying mixin from {}", mixin_path.display());
+            eprintln!("merging mixin from {}", mixin_path.display());
             config_yaml = apply_mixin(&config_yaml, &mixin_path)?;
         }
     }

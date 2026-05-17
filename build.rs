@@ -108,6 +108,7 @@ fn artifact_for_target(target: &str) -> Option<(&'static str, &'static str)> {
         "riscv64gc-unknown-linux-gnu" => ("mihomo-linux-riscv64", "gz"),
         "loongarch64-unknown-linux-gnu" => ("mihomo-linux-loong64", "gz"),
         "x86_64-pc-windows-msvc"
+        | "x86_64-pc-windows-gnu"
         | "i686-pc-windows-msvc"
         | "aarch64-pc-windows-msvc" => (windows_artifact(target)?, "zip"),
         _ => return None,
@@ -116,7 +117,7 @@ fn artifact_for_target(target: &str) -> Option<(&'static str, &'static str)> {
 
 fn windows_artifact(target: &str) -> Option<&'static str> {
     Some(match target {
-        "x86_64-pc-windows-msvc" => "mihomo-windows-amd64-v2",
+        "x86_64-pc-windows-msvc" | "x86_64-pc-windows-gnu" => "mihomo-windows-amd64-v2",
         "i686-pc-windows-msvc" => "mihomo-windows-386",
         "aarch64-pc-windows-msvc" => "mihomo-windows-arm64",
         _ => return None,
