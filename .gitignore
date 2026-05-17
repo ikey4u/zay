@@ -1,4 +1,5 @@
 /target
+/dist
 /bin/
 .DS_Store
 Makefile.local
