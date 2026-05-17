@@ -35,11 +35,14 @@ ring      = ["clash-lib/ring"]
 [dependencies]
 clash-lib = { git = "https://github.com/Watfaq/clash-rs.git", rev = "5a024ffcb74df64959b556acf76665be6746c96e", package = "clash-lib", default-features = false }
 
-clap      = { version = "4", features = ["derive"] }
-anyhow    = "1"
-reqwest   = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking"] }
-dirs-next = "2"
-aws-lc-rs = { version = "1", optional = true, default-features = false }
+clap                 = { version = "4", features = ["derive"] }
+anyhow               = "1"
+reqwest              = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking"] }
+dirs-next            = "2"
+tracing              = "0.1"
+tracing-subscriber   = { version = "0.3", features = ["env-filter", "local-time"] }
+time                 = { version = "0.3", features = ["macros"] }
+aws-lc-rs            = { version = "1", optional = true, default-features = false }
 
 [patch.crates-io]
 rustls       = { git = "https://github.com/Watfaq/rustls.git",       rev = "e6e8e7e1a0d65f2f273eb7b5b6179896536ac174" }

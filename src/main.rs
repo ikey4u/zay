@@ -11,6 +11,7 @@ use std::{
 use anyhow::{Context, bail};
 use clap::Parser;
 use clash::TokioRuntime;
+use tracing_subscriber::{EnvFilter, fmt::time::LocalTime};
 
 #[derive(Parser, Debug)]
 #[clap(
@@ -319,6 +320,24 @@ rules:
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+
+    // Install our own tracing subscriber before clash-rs starts so we control
+    // the format.  clash-rs's setup_logging uses a Once-guard + set_global_default;
+    // since the global is already set it will silently no-op and our format wins.
+    let timer = LocalTime::new(time::macros::format_description!(
+        "[year repr:last_two]-[month]-[day] [hour]:[minute]:[second]"
+    ));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new(format!("warn,clash={}", cli.log_level))
+    });
+    let _ = tracing_subscriber::fmt()
+        .with_timer(timer)
+        .with_env_filter(filter)
+        .with_file(false)
+        .with_line_number(false)
+        .with_target(false)
+        .compact()
+        .try_init();
 
     let data_dir = cli.data_dir.clone().unwrap_or_else(default_data_dir);
     fs::create_dir_all(&data_dir)

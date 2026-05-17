@@ -10824,6 +10824,9 @@ dependencies = [
  "clash-lib",
  "dirs-next",
  "reqwest",
+ "time",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
