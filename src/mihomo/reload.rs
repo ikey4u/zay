@@ -16,10 +16,9 @@ const RELOAD_RETRY_INTERVAL: Duration = Duration::from_millis(750);
 
 pub fn reload_running_config(settings: &Settings) -> Result<()> {
     let config_path = settings
-        .data_dir
-        .join("config.yaml")
+        .config_path()
         .canonicalize()
-        .unwrap_or_else(|_| settings.data_dir.join("config.yaml"));
+        .unwrap_or_else(|_| settings.config_path());
     let path = config_path
         .to_str()
         .context("config path must be valid UTF-8")?;

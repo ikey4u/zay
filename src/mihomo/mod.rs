@@ -269,7 +269,7 @@ fn merge_cached_subscription_proxies(settings: &Settings) -> Option<Value> {
     }
 
     if settings.subscriptions.len() == 1 && merged.is_empty() {
-        let legacy = settings.data_dir.join("providers/subscription.yaml");
+        let legacy = settings.mihomo_dir().join("providers/subscription.yaml");
         if let Some(seq) =
             load_cached_proxies(&legacy).and_then(|p| p.as_sequence().cloned())
         {
@@ -354,7 +354,7 @@ pub fn publish_config(
     should_reload: bool,
 ) -> Result<String> {
     let config_yaml = finalize_config(settings, base_config)?;
-    let config_path = settings.data_dir.join("config.yaml");
+    let config_path = settings.config_path();
     fs::write(&config_path, &config_yaml).with_context(|| {
         format!("writing config to {}", config_path.display())
     })?;

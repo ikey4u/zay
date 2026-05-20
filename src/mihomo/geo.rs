@@ -33,10 +33,10 @@ const GEOSITE_SHA256_URL: &str = concat!(
 const SUBSCRIPTION_UA: &str =
     concat!("clash-verge/v", env!("CARGO_PKG_VERSION"));
 
-pub fn files_present(data_dir: &Path) -> (bool, bool) {
+pub fn files_present(mihomo_dir: &Path) -> (bool, bool) {
     (
-        data_dir.join("Country.mmdb").is_file(),
-        data_dir.join("geosite.dat").is_file(),
+        mihomo_dir.join("Country.mmdb").is_file(),
+        mihomo_dir.join("geosite.dat").is_file(),
     )
 }
 
@@ -194,8 +194,8 @@ pub fn refresh_config_on_disk(
     settings: &Settings,
     config_snapshot: Option<Arc<RwLock<String>>>,
 ) -> Result<String> {
-    let (has_mmdb, has_geosite) = files_present(&settings.data_dir);
-    let has_rules = rules::files_present(&settings.data_dir);
+    let (has_mmdb, has_geosite) = files_present(&settings.mihomo_dir());
+    let has_rules = rules::files_present(&settings.mihomo_dir());
     let yaml = super::publish_config(
         settings,
         super::build_config(settings, has_mmdb, has_geosite, has_rules)?,
@@ -206,7 +206,7 @@ pub fn refresh_config_on_disk(
     }
     eprintln!(
         "config updated (mmdb={has_mmdb}, geosite={has_geosite}, rules={has_rules}) → {}",
-        settings.data_dir.join("config.yaml").display()
+        settings.config_path().display()
     );
     Ok(yaml)
 }
@@ -215,7 +215,7 @@ fn download_when_ready(
     settings: &Settings,
     config_snapshot: Option<Arc<RwLock<String>>>,
 ) -> Result<()> {
-    let (has_mmdb, has_geosite) = files_present(&settings.data_dir);
+    let (has_mmdb, has_geosite) = files_present(&settings.mihomo_dir());
     if has_mmdb && has_geosite {
         return Ok(());
     }
@@ -224,8 +224,8 @@ fn download_when_ready(
     rules::wait_for_fetch_outbound(settings, Duration::from_secs(180))?;
     let clients = http_clients_via_proxy(settings.mixed_port)?;
 
-    let mmdb_path = settings.data_dir.join("Country.mmdb");
-    let geosite_path = settings.data_dir.join("geosite.dat");
+    let mmdb_path = settings.mihomo_dir().join("Country.mmdb");
+    let geosite_path = settings.mihomo_dir().join("geosite.dat");
 
     if !has_mmdb {
         fetch_file(

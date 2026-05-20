@@ -11,10 +11,13 @@ use toml::Value as TomlValue;
 use crate::{Cli, bootstrap::proxy};
 
 pub const ZAY_TOML_FILE: &str = "zay.toml";
+/// Mihomo runtime home under the Zay config directory (`config.yaml`, geo, ruleset, providers, …).
+pub const MIHOMO_DIR: &str = "mihomo";
 
 pub const DEFAULT_ZAY_TOML: &str = r#"# Zay – simple settings (edit this file, then: zay -s <url>)
 # Subscription URL(s) on the CLI: zay -s "https://..." [-s "https://..."]
-# YAML mixin (merged into config.yaml): see mixin.yaml
+# YAML mixin (merged into mihomo/config.yaml): see mixin.yaml in this directory
+# Mihomo runtime files (config, geo, ruleset, providers) live in ./mihomo/
 
 mixed_port = 7890
 allow_lan = false
@@ -43,7 +46,7 @@ pub const DEFAULT_MIXIN: &str = r#"# ===========================================
 # mixin.yaml — 合并进 Zay 生成的 config.yaml（可选）
 # =============================================================================
 #
-# 位置：<数据目录>/mixin.yaml（默认 ~/.config/zay/mixin.yaml）
+# 位置：<数据目录>/mixin.yaml（默认 ~/.config/zay/mixin.yaml；Mihomo 文件在 mihomo/ 子目录）
 #
 # 用法：
 #   1. 取消下方示例的行首 #，或自行添加 YAML
@@ -70,7 +73,7 @@ pub const DEFAULT_MIXIN: &str = r#"# ===========================================
 # rule-providers — 外部规则集
 # =============================================================================
 #
-# 本地列表（在 ruleset/ 新建 my-direct.txt，每行一个域名）：
+# 本地列表（在 mihomo/ruleset/ 新建 my-direct.txt，每行一个域名）：
 #
 # rule-providers:
 #   my-direct:
@@ -184,6 +187,15 @@ pub struct Settings {
 }
 
 impl Settings {
+    /// Directory passed to Mihomo `-d` (generated config, geo, rules, subscription cache).
+    pub fn mihomo_dir(&self) -> PathBuf {
+        self.data_dir.join(MIHOMO_DIR)
+    }
+
+    pub fn config_path(&self) -> PathBuf {
+        self.mihomo_dir().join("config.yaml")
+    }
+
     pub fn mixin_path(&self) -> PathBuf {
         self.mixin
             .clone()
@@ -202,7 +214,7 @@ impl Settings {
     }
 
     pub fn subscription_cache_path(&self, index: usize) -> PathBuf {
-        self.data_dir
+        self.mihomo_dir()
             .join("providers")
             .join(format!("sub{index}.yaml"))
     }
@@ -411,8 +423,8 @@ fn is_invalid_subscription_body(raw: &str) -> bool {
         || trimmed.starts_with("<!DOCTYPE")
 }
 
-pub fn cleanup_stale_subscription_cache(data_dir: &Path, sub_count: usize) {
-    let providers = data_dir.join("providers");
+pub fn cleanup_stale_subscription_cache(mihomo_dir: &Path, sub_count: usize) {
+    let providers = mihomo_dir.join("providers");
     let mut paths: Vec<PathBuf> = (0..sub_count)
         .map(|i| providers.join(format!("sub{i}.yaml")))
         .collect();

@@ -64,7 +64,7 @@ pub fn build(
         ..Default::default()
     };
 
-    // Geo files (`Country.mmdb`, `geosite.dat`) are placed in the data dir; Mihomo loads them from `-d`.
+    // Geo files live under `<data-dir>/mihomo/`; Mihomo loads them from `-d` pointing at that directory.
     if settings.tun {
         cfg.tun = Some(TunConfig {
             enable: Some(true),

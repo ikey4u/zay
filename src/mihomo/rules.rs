@@ -1,6 +1,6 @@
 //! [Loyalsoldier/clash-rules](https://github.com/Loyalsoldier/clash-rules) — downloaded at runtime via the local mixed proxy.
 //!
-//! Files land in `<data-dir>/ruleset/*.txt` and are referenced from `rule-providers` (`type: file`).
+//! Files land in `<data-dir>/mihomo/ruleset/*.txt` and are referenced from `rule-providers` (`type: file`).
 
 use std::{
     fs,
@@ -85,17 +85,17 @@ pub const RULE_SETS: &[RuleSetDef] = &[
     },
 ];
 
-pub fn ruleset_dir(data_dir: &Path) -> PathBuf {
-    data_dir.join(RULESET_DIR)
+pub fn ruleset_dir(mihomo_dir: &Path) -> PathBuf {
+    mihomo_dir.join(RULESET_DIR)
 }
 
-pub fn rule_file_path(data_dir: &Path, id: &str) -> PathBuf {
-    ruleset_dir(data_dir).join(format!("{id}.txt"))
+pub fn rule_file_path(mihomo_dir: &Path, id: &str) -> PathBuf {
+    ruleset_dir(mihomo_dir).join(format!("{id}.txt"))
 }
 
-pub fn files_present(data_dir: &Path) -> bool {
+pub fn files_present(mihomo_dir: &Path) -> bool {
     RULE_SETS.iter().all(|def| {
-        let path = rule_file_path(data_dir, def.id);
+        let path = rule_file_path(mihomo_dir, def.id);
         path.is_file() && fs::metadata(&path).is_ok_and(|m| m.len() > 0)
     })
 }
@@ -239,7 +239,7 @@ pub fn download_when_ready(
     settings: &Settings,
     config_snapshot: Option<Arc<RwLock<String>>>,
 ) -> Result<()> {
-    if files_present(&settings.data_dir) {
+    if files_present(&settings.mihomo_dir()) {
         return Ok(());
     }
 
@@ -251,18 +251,23 @@ pub fn download_when_ready(
     thread::sleep(Duration::from_millis(800));
 
     let clients = geo::http_clients_via_proxy(settings.mixed_port)?;
-    fs::create_dir_all(ruleset_dir(&settings.data_dir)).with_context(|| {
-        format!("creating {}", ruleset_dir(&settings.data_dir).display())
-    })?;
+    fs::create_dir_all(ruleset_dir(&settings.mihomo_dir())).with_context(
+        || {
+            format!(
+                "creating {}",
+                ruleset_dir(&settings.mihomo_dir()).display()
+            )
+        },
+    )?;
 
     for def in RULE_SETS {
-        let dest = rule_file_path(&settings.data_dir, def.id);
+        let dest = rule_file_path(&settings.mihomo_dir(), def.id);
         if let Err(e) = fetch_rule(&clients, def.id, &dest) {
             eprintln!("clash-rules {id}: {e:#}", id = def.id);
         }
     }
 
-    if !files_present(&settings.data_dir) {
+    if !files_present(&settings.mihomo_dir()) {
         bail!("clash-rules download incomplete");
     }
 

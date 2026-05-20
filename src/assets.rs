@@ -94,7 +94,7 @@ pub fn terminate_process(pid: u32) {
 
 pub fn spawn(
     binary: &Path,
-    data_dir: &Path,
+    mihomo_dir: &Path,
     config_path: &Path,
     quiet: bool,
     privileged: bool,
@@ -114,7 +114,7 @@ pub fn spawn(
                 "-f",
                 config_path.to_str().context("non-UTF8 config path")?,
             ],
-            data_dir,
+            mihomo_dir,
             quiet,
         );
     }
@@ -129,7 +129,7 @@ pub fn spawn(
         .arg(config_dir)
         .arg("-f")
         .arg(config_path)
-        .current_dir(data_dir)
+        .current_dir(mihomo_dir)
         .stdin(Stdio::null());
 
     if quiet {

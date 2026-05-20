@@ -30,34 +30,36 @@ pub fn prepare(cli: &Cli) -> Result<Prepared> {
     std::fs::create_dir_all(&settings.data_dir).with_context(|| {
         format!("creating data dir {}", settings.data_dir.display())
     })?;
-    std::fs::create_dir_all(settings.data_dir.join("providers")).with_context(
-        || {
-            format!(
-                "creating {}",
-                settings.data_dir.join("providers").display()
-            )
-        },
-    )?;
-    std::fs::create_dir_all(rules::ruleset_dir(&settings.data_dir))
+    std::fs::create_dir_all(settings.mihomo_dir()).with_context(|| {
+        format!("creating {}", settings.mihomo_dir().display())
+    })?;
+    std::fs::create_dir_all(settings.mihomo_dir().join("providers"))
         .with_context(|| {
             format!(
                 "creating {}",
-                rules::ruleset_dir(&settings.data_dir).display()
+                settings.mihomo_dir().join("providers").display()
+            )
+        })?;
+    std::fs::create_dir_all(rules::ruleset_dir(&settings.mihomo_dir()))
+        .with_context(|| {
+            format!(
+                "creating {}",
+                rules::ruleset_dir(&settings.mihomo_dir()).display()
             )
         })?;
 
     zay_settings::cleanup_stale_subscription_cache(
-        &settings.data_dir,
+        &settings.mihomo_dir(),
         settings.subscriptions.len(),
     );
     zay_settings::ensure_default_mixin(&settings)?;
 
-    let has_rules = rules::files_present(&settings.data_dir);
+    let has_rules = rules::files_present(&settings.mihomo_dir());
     if !has_rules {
         eprintln!("clash-rules missing; will download via proxy after startup");
     }
 
-    let (has_mmdb, has_geosite) = geo::files_present(&settings.data_dir);
+    let (has_mmdb, has_geosite) = geo::files_present(&settings.mihomo_dir());
     if !has_mmdb || !has_geosite {
         eprintln!("geo rules missing; will download after proxy is ready");
     }
@@ -71,7 +73,7 @@ pub fn prepare(cli: &Cli) -> Result<Prepared> {
         mihomo::build_config(&settings, has_mmdb, has_geosite, has_rules)?,
     )?;
 
-    let config_path = settings.data_dir.join("config.yaml");
+    let config_path = settings.config_path();
     std::fs::write(&config_path, &config_yaml).with_context(|| {
         format!("writing config to {}", config_path.display())
     })?;

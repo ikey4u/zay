@@ -72,7 +72,7 @@ async fn health() -> Json<HealthResponse> {
 async fn config_dump(
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let config_path = state.settings.data_dir.join("config.yaml");
+    let config_path = state.settings.config_path();
     let base = fs::read_to_string(&config_path)
         .unwrap_or_else(|_| state.config_yaml_text());
     let full = mihomo::expand_runtime_config(&base, &state.settings)?;

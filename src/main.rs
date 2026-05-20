@@ -46,7 +46,7 @@ pub struct Cli {
     #[clap(short, long = "subscription", value_name = "URL", action = clap::ArgAction::Append)]
     pub subscriptions: Vec<String>,
 
-    /// Data directory (default: $XDG_CONFIG_HOME/zay or ~/.config/zay on Linux)
+    /// Zay config directory — zay.toml & mixin.yaml at top level; Mihomo files under mihomo/
     #[clap(short, long, value_name = "DIR")]
     pub data_dir: Option<std::path::PathBuf>,
 
@@ -97,7 +97,8 @@ fn main() -> anyhow::Result<()> {
         bail!("at least one subscription URL is required (-s URL)");
     }
     let prepared = bootstrap::prepare(&cli)?;
-    eprintln!("data dir → {}", prepared.settings.data_dir.display());
+    eprintln!("config dir → {}", prepared.settings.data_dir.display());
+    eprintln!("mihomo dir → {}", prepared.settings.mihomo_dir().display());
 
     let state = Arc::new(api::AppState::from(prepared));
     let api_listen = format!("127.0.0.1:{}", cli.api_port);
@@ -109,13 +110,13 @@ fn main() -> anyhow::Result<()> {
         state.settings.mixed_port
     );
 
-    let config_path = state.settings.data_dir.join("config.yaml");
+    let config_path = state.settings.config_path();
     if state.tun_enabled {
         eprintln!("TUN enabled – elevated privileges required for proxy");
     }
     let mut child = assets::spawn(
         &engine,
-        &state.settings.data_dir,
+        &state.settings.mihomo_dir(),
         &config_path,
         false,
         state.tun_enabled,
