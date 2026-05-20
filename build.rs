@@ -11,11 +11,17 @@ const CONFIG_DOCS_URL: &str = "https://raw.githubusercontent.com/MetaCubeX/mihom
 const RELEASE_BASE: &str =
     "https://github.com/MetaCubeX/mihomo/releases/download";
 
+/// Strip zig/cargo glibc suffix (e.g. `.2.17`) so Mihomo artifact lookup matches `*-linux-gnu`.
+fn normalize_target(target: &str) -> &str {
+    target.split_once('.').map(|(base, _)| base).unwrap_or(target)
+}
+
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=TARGET");
 
-    let target = env::var("TARGET").expect("TARGET not set by cargo");
+    let target_raw = env::var("TARGET").expect("TARGET not set by cargo");
+    let target = normalize_target(&target_raw);
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"));
 
     fetch_config_docs_template(&out_dir);

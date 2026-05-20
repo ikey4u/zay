@@ -1,12 +1,16 @@
-.PHONY: fmt build pkg macos.build-linux-x64 macos.build-for-window-x64 macos.build-for-macos-arm64 setup
+.PHONY: fmt build pkg cross-build macos.build-linux-x64 macos.build-for-window-x64 macos.build-for-macos-arm64 setup check-zig
 
 CARGO_HOME_DIR = /tmp/cargo-tmp
 REMAP = --remap-path-prefix=$(CARGO_HOME_DIR)=~ --remap-path-prefix=$(CURDIR)=.
+CARGO = CARGO_HOME=$(CARGO_HOME_DIR) RUSTFLAGS="$(REMAP)"
 
 VERSION := $(shell sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 
 DIST_DIR = dist
 TARGET_MACOS_ARM64 = aarch64-apple-darwin
+# zig/cargo-zigbuild glibc 2.17 ABI (CentOS 7+, old distros)
+ZIG_LINUX_TARGET = x86_64-unknown-linux-gnu.2.17
+# Artifact directory (no glibc suffix in path)
 TARGET_LINUX_X64 = x86_64-unknown-linux-gnu
 TARGET_WINDOWS_X64 = x86_64-pc-windows-gnu
 BIN_MACOS_ARM64 = target/$(TARGET_MACOS_ARM64)/release/zay
@@ -18,7 +22,11 @@ ZIP_WINDOWS_X64 = zay-windows-x64-v$(VERSION).zip
 
 -include Makefile.local
 
-setup:
+check-zig:
+	@command -v zig >/dev/null || (echo "Install zig: https://ziglang.org/" >&2; exit 1)
+	@command -v cargo-zigbuild >/dev/null || (echo "Install cargo-zigbuild: cargo install cargo-zigbuild" >&2; exit 1)
+
+setup: check-zig
 	mkdir -p $(CARGO_HOME_DIR)
 	ln -sf $(CARGO_HOME_DIR) $(HOME)/.cargo
 	rustup target add x86_64-unknown-linux-gnu x86_64-pc-windows-gnu aarch64-apple-darwin
@@ -27,27 +35,35 @@ fmt:
 	cargo +nightly fmt
 
 build: setup
-	CARGO_HOME=$(CARGO_HOME_DIR) RUSTFLAGS="$(REMAP)" cargo build --release
+	$(CARGO) cargo build --release
 
 macos.build-linux-x64: setup
-	CARGO_HOME=$(CARGO_HOME_DIR) RUSTFLAGS="$(REMAP)" cargo zigbuild --release --target x86_64-unknown-linux-gnu.2.17
+	$(CARGO) cargo zigbuild --release --target $(ZIG_LINUX_TARGET)
+	@test -f $(BIN_LINUX_X64) || (echo "missing $(BIN_LINUX_X64) (zig target $(ZIG_LINUX_TARGET))" >&2; exit 1)
 
 macos.build-for-window-x64: setup
-	CARGO_HOME=$(CARGO_HOME_DIR) RUSTFLAGS="$(REMAP)" cargo zigbuild --release --target x86_64-pc-windows-gnu
+	$(CARGO) cargo zigbuild --release --target $(TARGET_WINDOWS_X64)
+	@test -f $(BIN_WINDOWS_X64)
 
 macos.build-for-macos-arm64: setup
-	CARGO_HOME=$(CARGO_HOME_DIR) RUSTFLAGS="$(REMAP)" cargo zigbuild --release --target aarch64-apple-darwin
+	$(CARGO) cargo zigbuild --release --target $(TARGET_MACOS_ARM64)
+	@test -f $(BIN_MACOS_ARM64)
 
 $(DIST_DIR):
 	mkdir -p $(DIST_DIR)
 
 # $(1) zip name under dist/, $(2) path to binary
 define zip_binary
+	@test -f $(2) || (echo "missing binary: $(2)" >&2; exit 1)
 	rm -f $(DIST_DIR)/$(1)
 	cd $(dir $(2)) && zip -j $(CURDIR)/$(DIST_DIR)/$(1) $(notdir $(2))
 endef
 
-pkg: macos.build-for-macos-arm64 macos.build-linux-x64 macos.build-for-window-x64 | $(DIST_DIR)
+# Sequential cross-builds (avoid parallel cargo/zig races); Linux uses glibc 2.17 via zig.
+pkg: | $(DIST_DIR)
+	$(MAKE) macos.build-for-macos-arm64
+	$(MAKE) macos.build-linux-x64
+	$(MAKE) macos.build-for-window-x64
 	$(call zip_binary,$(ZIP_MACOS_ARM64),$(BIN_MACOS_ARM64))
 	$(call zip_binary,$(ZIP_LINUX_X64),$(BIN_LINUX_X64))
 	$(call zip_binary,$(ZIP_WINDOWS_X64),$(BIN_WINDOWS_X64))
