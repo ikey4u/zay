@@ -5,8 +5,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const VERSION_URL: &str =
-    "https://github.com/MetaCubeX/mihomo/releases/latest/download/version.txt";
+/// Pinned Mihomo release embedded by Zay (must match `mihomo::config` types).
+const PINNED_MIHOMO_VERSION: &str = "v1.19.25";
+const CONFIG_DOCS_URL: &str = "https://raw.githubusercontent.com/MetaCubeX/mihomo/v1.19.25/docs/config.yaml";
 const RELEASE_BASE: &str =
     "https://github.com/MetaCubeX/mihomo/releases/download";
 
@@ -16,13 +17,14 @@ fn main() {
 
     let target = env::var("TARGET").expect("TARGET not set by cargo");
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"));
+
+    fetch_config_docs_template(&out_dir);
+
     let (artifact, ext) = artifact_for_target(&target).unwrap_or_else(|| {
         panic!("unsupported build target for embedded Mihomo: {target}")
     });
 
-    let version = read_latest_version().unwrap_or_else(|e| {
-        panic!("failed to resolve Mihomo release version: {e}");
-    });
+    let version = PINNED_MIHOMO_VERSION.to_string();
 
     let exe_name = if target.contains("windows") {
         "mihomo.exe"
@@ -66,6 +68,24 @@ fn main() {
 
     write_stamp(&stamp_path, &version, &target).expect("write mihomo.stamp");
     emit_rustc_env(&embed_path, &version);
+}
+
+fn fetch_config_docs_template(out_dir: &Path) {
+    let dest = out_dir.join("mihomo-docs-config.yaml");
+    let body = fetch_bytes(CONFIG_DOCS_URL).unwrap_or_else(|e| {
+        panic!("failed to download Mihomo config template from {CONFIG_DOCS_URL}: {e}");
+    });
+    fs::write(&dest, &body)
+        .unwrap_or_else(|e| panic!("write {}: {e}", dest.display()));
+    println!("cargo:rerun-if-changed={}", dest.display());
+    println!(
+        "cargo:rustc-env=MIHOMO_CONFIG_TAG={}",
+        PINNED_MIHOMO_VERSION
+    );
+    println!(
+        "cargo:rustc-env=MIHOMO_CONFIG_TEMPLATE={}",
+        dest.to_string_lossy()
+    );
 }
 
 fn emit_rustc_env(embed_path: &Path, version: &str) {
@@ -117,23 +137,13 @@ fn artifact_for_target(target: &str) -> Option<(&'static str, &'static str)> {
 
 fn windows_artifact(target: &str) -> Option<&'static str> {
     Some(match target {
-        "x86_64-pc-windows-msvc" | "x86_64-pc-windows-gnu" => "mihomo-windows-amd64-v2",
+        "x86_64-pc-windows-msvc" | "x86_64-pc-windows-gnu" => {
+            "mihomo-windows-amd64-v2"
+        }
         "i686-pc-windows-msvc" => "mihomo-windows-386",
         "aarch64-pc-windows-msvc" => "mihomo-windows-arm64",
         _ => return None,
     })
-}
-
-fn read_latest_version() -> Result<String, String> {
-    let body = fetch_bytes(VERSION_URL)?;
-    let version = std::str::from_utf8(&body)
-        .map_err(|e| format!("version.txt is not utf-8: {e}"))?
-        .trim()
-        .to_string();
-    if version.is_empty() {
-        return Err("empty Mihomo version".into());
-    }
-    Ok(version)
 }
 
 fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {

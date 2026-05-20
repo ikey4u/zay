@@ -3,15 +3,17 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
+use serde_yaml::Value;
+use toml::Value as TomlValue;
 
-use crate::Cli;
+use crate::{Cli, bootstrap::proxy};
 
 pub const ZAY_TOML_FILE: &str = "zay.toml";
 
 pub const DEFAULT_ZAY_TOML: &str = r#"# Zay – simple settings (edit this file, then: zay -s <url>)
-# Subscription URL is passed on the CLI: zay -s "https://..."
+# Subscription URL(s) on the CLI: zay -s "https://..." [-s "https://..."]
 # YAML mixin (merged into config.yaml): see mixin.yaml
 
 mixed_port = 7890
@@ -21,15 +23,105 @@ log_level = "info"
 health_check_url = "http://cp.cloudflare.com/generate_204"
 update_interval = 3600
 
-# Path to YAML mixin file (default: mixin.yaml in data dir)
+# Bootstrap proxy: used only to fetch the -s subscription when the URL is blocked on DIRECT.
+# Either a path to a YAML file (one Mihomo proxy), or an inline table — see below.
+# bootstrap_proxy = "bootstrap.yaml"
+#
+# [bootstrap_proxy]
+# name = "Bootstrap"
+# type = "ss"
+# server = "1.2.3.4"
+# port = 8388
+# cipher = "aes-256-gcm"
+# password = "secret"
+
+# Path to YAML mixin file (default: mixin.yaml in data dir, see examples inside)
 # mixin = "mixin.yaml"
 "#;
 
-pub const DEFAULT_MIXIN: &str = r#"# YAML mixin – merged into generated config.yaml
-# Example:
-#   mixed-port: 7891
-#   rules:
-#     - DOMAIN-SUFFIX,example.com,DIRECT
+pub const DEFAULT_MIXIN: &str = r#"# =============================================================================
+# mixin.yaml — 合并进 Zay 生成的 config.yaml（可选）
+# =============================================================================
+#
+# 位置：<数据目录>/mixin.yaml（默认 ~/.config/zay/mixin.yaml）
+#
+# 用法：
+#   1. 取消下方示例的行首 #，或自行添加 YAML
+#   2. 仅有注释/空行时不会参与合并
+#   3. mixin 里的 rules 会排在 Zay 内置规则 **之前**（先匹配先生效）
+#   4. rule-providers 与内置 Loyalsoldier 规则集 **合并**（可同时存在）
+#   5. proxy-groups 按 name **合并**（同名组合并字段；proxies/use 列表追加去重）
+#   6. 其它顶层键（mixed-port、tun、dns 等）按字段覆盖生成配置
+#   7. 修改后重启 zay 生效
+#
+# Zay 内置代理组名：Proxy、Auto（不是 PROXY）
+# 策略：DIRECT（直连）、REJECT（拒绝）、Proxy / Auto（走代理）
+#
+# =============================================================================
+# 其它全局项示例
+# =============================================================================
+#
+# mixed-port: 7891
+#
+# tun:
+#   enable: true
+#
+# =============================================================================
+# rule-providers — 外部规则集
+# =============================================================================
+#
+# 本地列表（在 ruleset/ 新建 my-direct.txt，每行一个域名）：
+#
+# rule-providers:
+#   my-direct:
+#     type: file
+#     behavior: domain
+#     path: ./ruleset/my-direct.txt
+#
+# 远程规则：
+#
+# rule-providers:
+#   my-remote:
+#     type: http
+#     behavior: domain
+#     url: "https://example.com/rules.txt"
+#     path: ./ruleset/my-remote.yaml
+#     interval: 86400
+#
+# behavior：domain | ipcidr | classical
+#
+# =============================================================================
+# rules — 分流（从上到下，命中第一条即停止）
+# =============================================================================
+#
+# rules:
+#   - RULE-SET,my-direct,DIRECT
+#   - DOMAIN-SUFFIX,company.internal,DIRECT
+#   - DOMAIN,www.example.com,DIRECT
+#   - IP-CIDR,192.168.0.0/16,DIRECT
+#   - GEOIP,CN,DIRECT
+#   - PROCESS-NAME,Telegram.exe,Proxy
+#
+# 勿在 mixin 写 MATCH,Proxy — 内置规则末尾已包含。
+#
+# =============================================================================
+# proxy-groups — 按 name 合并（勿整段覆盖 Auto/Proxy）
+# =============================================================================
+#
+# proxy-groups:
+#   - name: Proxy
+#     proxies:
+#       - DIRECT
+#       - 我的备用节点
+#
+# =============================================================================
+# 你的配置
+# =============================================================================
+#
+# rule-providers:
+#
+# rules:
+#
 "#;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -41,7 +133,13 @@ struct ZayFile {
     log_level: String,
     health_check_url: String,
     update_interval: u64,
+    /// Mihomo `external-controller` listen address (default 127.0.0.1:19090).
+    controller_port: Option<u16>,
+    /// Mihomo API `secret` (auto-generated per run if omitted).
+    api_secret: Option<String>,
     mixin: Option<String>,
+    /// Path to a YAML file, or omit when using `[bootstrap_proxy]` table.
+    bootstrap_proxy: Option<TomlValue>,
 }
 
 impl Default for ZayFile {
@@ -53,14 +151,24 @@ impl Default for ZayFile {
             log_level: "info".into(),
             health_check_url: "http://cp.cloudflare.com/generate_204".into(),
             update_interval: 3600,
+            controller_port: None,
+            api_secret: None,
             mixin: None,
+            bootstrap_proxy: None,
         }
     }
 }
 
+/// Single proxy node for bootstrapping subscription download (see `proxy-providers.*.proxy`).
+#[derive(Debug, Clone)]
+pub struct BootstrapProxy {
+    pub name: String,
+    pub proxy: Value,
+}
+
 #[derive(Debug, Clone)]
 pub struct Settings {
-    pub subscription: String,
+    pub subscriptions: Vec<String>,
     pub data_dir: PathBuf,
     pub mixed_port: u16,
     pub allow_lan: bool,
@@ -68,7 +176,11 @@ pub struct Settings {
     pub log_level: String,
     pub health_check_url: String,
     pub update_interval: u64,
+    /// `external-controller` value written into Mihomo config (e.g. `127.0.0.1:19090`).
+    pub external_controller: String,
+    pub api_secret: String,
     pub mixin: Option<PathBuf>,
+    pub bootstrap_proxy: Option<BootstrapProxy>,
 }
 
 impl Settings {
@@ -76,6 +188,28 @@ impl Settings {
         self.mixin
             .clone()
             .unwrap_or_else(|| self.data_dir.join("mixin.yaml"))
+    }
+
+    /// Mihomo `proxy-providers` name for subscription at `index` (`sub0`, `sub1`, …).
+    pub fn subscription_provider_id(index: usize) -> String {
+        format!("sub{index}")
+    }
+
+    pub fn subscription_provider_ids(&self) -> Vec<String> {
+        (0..self.subscriptions.len())
+            .map(Self::subscription_provider_id)
+            .collect()
+    }
+
+    pub fn subscription_cache_path(&self, index: usize) -> PathBuf {
+        self.data_dir
+            .join("providers")
+            .join(format!("sub{index}.yaml"))
+    }
+
+    /// Prefix applied to every node from `proxy-providers.sub{i}` (via Mihomo `override`).
+    pub fn subscription_name_prefix(index: usize) -> String {
+        format!("sub{index}-")
     }
 }
 
@@ -168,11 +302,36 @@ pub fn ensure_default_mixin(settings: &Settings) -> Result<()> {
     }
     fs::write(&mixin_path, DEFAULT_MIXIN)
         .with_context(|| format!("writing {}", mixin_path.display()))?;
-    eprintln!("created default mixin at {}", mixin_path.display());
+    eprintln!(
+        "created default mixin at {} (rule examples in comments)",
+        mixin_path.display()
+    );
     Ok(())
 }
 
-pub fn resolve(subscription: &str, cli: &Cli) -> Result<Settings> {
+fn resolve_bootstrap_proxy(
+    raw: &TomlValue,
+    toml_path: &Path,
+    data_dir: &Path,
+) -> Result<BootstrapProxy> {
+    match raw {
+        TomlValue::String(rel) => {
+            let path = PathBuf::from(rel);
+            let path = if path.is_absolute() {
+                path
+            } else {
+                toml_path.parent().unwrap_or(data_dir).join(path)
+            };
+            proxy::load_from_yaml_file(&path)
+        }
+        TomlValue::Table(table) => proxy::load_from_toml_table(table),
+        _ => bail!(
+            "bootstrap_proxy must be a file path string or [bootstrap_proxy] table"
+        ),
+    }
+}
+
+pub fn resolve(cli: &Cli) -> Result<Settings> {
     let data_dir = cli
         .data_dir
         .clone()
@@ -202,8 +361,23 @@ pub fn resolve(subscription: &str, cli: &Cli) -> Result<Settings> {
         })
     });
 
+    let bootstrap_proxy = if let Some(path) = &cli.bootstrap_proxy {
+        Some(proxy::load_from_yaml_file(path)?)
+    } else if let Some(raw) = &file.bootstrap_proxy {
+        Some(resolve_bootstrap_proxy(raw, &toml_path, &data_dir)?)
+    } else {
+        None
+    };
+
+    let controller_port = file.controller_port.unwrap_or(19090);
+    let api_secret = file
+        .api_secret
+        .clone()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(generate_api_secret);
+
     Ok(Settings {
-        subscription: subscription.to_string(),
+        subscriptions: cli.subscriptions.clone(),
         data_dir,
         mixed_port: cli.mixed_port.unwrap_or(file.mixed_port),
         allow_lan: cli.allow_lan || file.allow_lan,
@@ -214,21 +388,96 @@ pub fn resolve(subscription: &str, cli: &Cli) -> Result<Settings> {
             .clone()
             .unwrap_or(file.health_check_url),
         update_interval: cli.update_interval.unwrap_or(file.update_interval),
+        external_controller: format!("127.0.0.1:{controller_port}"),
+        api_secret,
         mixin,
+        bootstrap_proxy,
     })
 }
 
-pub fn cleanup_stale_subscription_cache(data_dir: &Path) {
-    let cache = data_dir.join("providers/subscription.yaml");
-    let Ok(raw) = fs::read_to_string(&cache) else {
-        return;
-    };
+fn generate_api_secret() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("zay-{nanos:032x}")
+}
+
+fn is_invalid_subscription_body(raw: &str) -> bool {
     let trimmed = raw.trim_start();
-    let invalid = trimmed.starts_with('<')
+    trimmed.starts_with('<')
         || trimmed.starts_with("<!doctype")
-        || trimmed.starts_with("<!DOCTYPE");
-    if invalid {
-        let _ = fs::remove_file(&cache);
-        eprintln!("removed invalid subscription cache at {}", cache.display());
+        || trimmed.starts_with("<!DOCTYPE")
+}
+
+pub fn cleanup_stale_subscription_cache(data_dir: &Path, sub_count: usize) {
+    let providers = data_dir.join("providers");
+    let mut paths: Vec<PathBuf> = (0..sub_count)
+        .map(|i| providers.join(format!("sub{i}.yaml")))
+        .collect();
+    let legacy = providers.join("subscription.yaml");
+    if sub_count == 1 {
+        paths.push(legacy);
+    }
+    for cache in paths {
+        let Ok(raw) = fs::read_to_string(&cache) else {
+            continue;
+        };
+        if is_invalid_subscription_body(&raw) {
+            let _ = fs::remove_file(&cache);
+            eprintln!(
+                "removed invalid subscription cache at {}",
+                cache.display()
+            );
+        }
+    }
+
+    if let Ok(entries) = fs::read_dir(&providers) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let Some(idx_str) = name
+                .strip_prefix("sub")
+                .and_then(|s| s.strip_suffix(".yaml"))
+            else {
+                continue;
+            };
+            let Ok(idx) = idx_str.parse::<usize>() else {
+                continue;
+            };
+            if idx >= sub_count {
+                if fs::remove_file(&path).is_ok() {
+                    eprintln!(
+                        "removed orphan subscription cache at {}",
+                        path.display()
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::*;
+
+    #[test]
+    fn cleanup_removes_orphan_provider_caches() {
+        let dir = std::env::temp_dir()
+            .join(format!("zay-test-{}", std::process::id()));
+        let providers = dir.join("providers");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&providers).unwrap();
+        fs::write(providers.join("sub0.yaml"), "proxies: []\n").unwrap();
+        fs::write(providers.join("sub2.yaml"), "proxies: []\n").unwrap();
+        cleanup_stale_subscription_cache(&dir, 1);
+        assert!(providers.join("sub0.yaml").is_file());
+        assert!(!providers.join("sub2.yaml").exists());
+        let _ = fs::remove_dir_all(&dir);
     }
 }

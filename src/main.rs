@@ -1,9 +1,9 @@
 mod api;
+mod assets;
 mod bootstrap;
-mod geo;
 mod mihomo;
-mod mihomo_bin;
 mod settings;
+mod yaml;
 
 #[cfg(unix)]
 mod privilege;
@@ -17,7 +17,7 @@ const LONG_ABOUT: &str = r#"Zay – a simple proxy with a built-in HTTP API.
 
 Start:
   zay -s "https://your-subscription-url"
-  zay -s "https://..." --api-port 8787 --mixed-port 7890
+  zay -s "https://sub-a" -s "https://sub-b" --api-port 8787 --mixed-port 7890
 
 Runs the mixed proxy and Zay API (default http://127.0.0.1:8787).
 
@@ -42,9 +42,9 @@ Examples:
     long_about = LONG_ABOUT
 )]
 pub struct Cli {
-    /// Subscription URL (required)
-    #[clap(short, long, value_name = "URL")]
-    pub subscription: String,
+    /// Subscription URL (repeat -s for multiple subscriptions)
+    #[clap(short, long = "subscription", value_name = "URL", action = clap::ArgAction::Append)]
+    pub subscriptions: Vec<String>,
 
     /// Data directory (default: $XDG_CONFIG_HOME/zay or ~/.config/zay on Linux)
     #[clap(short, long, value_name = "DIR")]
@@ -85,10 +85,17 @@ pub struct Cli {
     /// YAML mixin merged into generated config.yaml
     #[clap(long, value_name = "FILE")]
     pub mixin: Option<std::path::PathBuf>,
+
+    /// Bootstrap proxy YAML (one Mihomo proxy) used to fetch the subscription URL
+    #[clap(long, value_name = "FILE")]
+    pub bootstrap_proxy: Option<std::path::PathBuf>,
 }
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    if cli.subscriptions.is_empty() {
+        bail!("at least one subscription URL is required (-s URL)");
+    }
     let prepared = bootstrap::prepare(&cli)?;
     eprintln!("data dir → {}", prepared.settings.data_dir.display());
 
@@ -96,7 +103,7 @@ fn main() -> anyhow::Result<()> {
     let api_listen = format!("127.0.0.1:{}", cli.api_port);
     let _api = api::spawn(state.clone(), &api_listen);
 
-    let engine = mihomo_bin::resolve_binary()?;
+    let engine = assets::resolve_binary()?;
     eprintln!(
         "starting – mixed proxy on 0.0.0.0:{}",
         state.settings.mixed_port
@@ -106,7 +113,7 @@ fn main() -> anyhow::Result<()> {
     if state.tun_enabled {
         eprintln!("TUN enabled – elevated privileges required for proxy");
     }
-    let mut child = mihomo_bin::spawn(
+    let mut child = assets::spawn(
         &engine,
         &state.settings.data_dir,
         &config_path,
@@ -115,17 +122,20 @@ fn main() -> anyhow::Result<()> {
     )?;
 
     if let Some(stdout) = child.stdout.take() {
-        mihomo_bin::pipe_logs(stdout);
+        assets::pipe_logs(stdout);
     }
     if let Some(stderr) = child.stderr.take() {
-        mihomo_bin::pipe_logs(stderr);
+        assets::pipe_logs(stderr);
     }
 
-    geo::spawn_background_download(state.settings.clone());
+    mihomo::geo::spawn_background_download(
+        state.settings.clone(),
+        Some(state.config_yaml.clone()),
+    );
 
     let pid = child.id();
     ctrlc::set_handler(move || {
-        mihomo_bin::terminate_process(pid);
+        assets::terminate_process(pid);
         eprintln!("stopping");
         std::process::exit(130);
     })

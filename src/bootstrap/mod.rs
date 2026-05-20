@@ -1,7 +1,10 @@
+pub mod proxy;
+
 use anyhow::{Context, Result};
 
 use crate::{
-    Cli, geo, mihomo,
+    Cli,
+    mihomo::{self, config, geo, rules},
     settings::{self as zay_settings, Settings},
 };
 
@@ -13,7 +16,16 @@ pub struct Prepared {
 }
 
 pub fn prepare(cli: &Cli) -> Result<Prepared> {
-    let settings = zay_settings::resolve(&cli.subscription, cli)?;
+    let settings = zay_settings::resolve(cli)?;
+    eprintln!(
+        "mihomo {} (config schema {})",
+        config::MIHOMO_VERSION,
+        config::CONFIG_TAG
+    );
+    eprintln!(
+        "external-controller {} (reload after geo/rules download)",
+        settings.external_controller
+    );
 
     std::fs::create_dir_all(&settings.data_dir).with_context(|| {
         format!("creating data dir {}", settings.data_dir.display())
@@ -26,18 +38,37 @@ pub fn prepare(cli: &Cli) -> Result<Prepared> {
             )
         },
     )?;
+    std::fs::create_dir_all(rules::ruleset_dir(&settings.data_dir))
+        .with_context(|| {
+            format!(
+                "creating {}",
+                rules::ruleset_dir(&settings.data_dir).display()
+            )
+        })?;
 
-    zay_settings::cleanup_stale_subscription_cache(&settings.data_dir);
+    zay_settings::cleanup_stale_subscription_cache(
+        &settings.data_dir,
+        settings.subscriptions.len(),
+    );
     zay_settings::ensure_default_mixin(&settings)?;
+
+    let has_rules = rules::files_present(&settings.data_dir);
+    if !has_rules {
+        eprintln!("clash-rules missing; will download via proxy after startup");
+    }
 
     let (has_mmdb, has_geosite) = geo::files_present(&settings.data_dir);
     if !has_mmdb || !has_geosite {
         eprintln!("geo rules missing; will download after proxy is ready");
     }
 
+    if let Some(bp) = &settings.bootstrap_proxy {
+        eprintln!("bootstrap proxy \"{}\" will fetch subscription", bp.name);
+    }
+
     let config_yaml = mihomo::finalize_config(
         &settings,
-        mihomo::build_config(&settings, has_mmdb, has_geosite),
+        mihomo::build_config(&settings, has_mmdb, has_geosite, has_rules)?,
     )?;
 
     let config_path = settings.data_dir.join("config.yaml");
