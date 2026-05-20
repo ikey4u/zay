@@ -40,27 +40,47 @@ pub fn files_present(data_dir: &Path) -> (bool, bool) {
     )
 }
 
-pub(crate) fn http_client_via_proxy(mixed_port: u16) -> Result<Client> {
-    let proxy = format!("http://127.0.0.1:{mixed_port}");
-    let proxy = reqwest::Proxy::all(&proxy)
-        .with_context(|| format!("invalid proxy URL {proxy}"))?;
+fn build_proxy_client(proxy_url: &str) -> Result<Client> {
+    let proxy = reqwest::Proxy::all(proxy_url)
+        .with_context(|| format!("invalid proxy URL {proxy_url}"))?;
     Client::builder()
         .user_agent(SUBSCRIPTION_UA)
         .proxy(proxy)
+        .timeout(Duration::from_secs(120))
+        .connect_timeout(Duration::from_secs(30))
         .build()
-        .context("building HTTP client")
+        .with_context(|| format!("building HTTP client for {proxy_url}"))
+}
+
+pub(crate) fn http_client_via_proxy(mixed_port: u16) -> Result<Client> {
+    build_proxy_client(&format!("http://127.0.0.1:{mixed_port}"))
+}
+
+/// HTTP + SOCKS5 mixed-port clients (retry HTTPS downloads through Mihomo).
+pub(crate) fn http_clients_via_proxy(mixed_port: u16) -> Result<Vec<Client>> {
+    let http = build_proxy_client(&format!("http://127.0.0.1:{mixed_port}"))?;
+    let socks =
+        build_proxy_client(&format!("socks5://127.0.0.1:{mixed_port}"))?;
+    Ok(vec![http, socks])
 }
 
 pub(crate) fn wait_for_proxy(mixed_port: u16, timeout: Duration) -> Result<()> {
-    let client = http_client_via_proxy(mixed_port)?;
+    let clients = http_clients_via_proxy(mixed_port)?;
     let deadline = Instant::now() + timeout;
     eprintln!("waiting for proxy on 127.0.0.1:{mixed_port}…");
     loop {
-        if client
-            .get("http://cp.cloudflare.com/generate_204")
-            .send()
-            .is_ok()
-        {
+        let http_ok = clients.iter().any(|c| {
+            c.get("http://cp.cloudflare.com/generate_204")
+                .send()
+                .is_ok()
+        });
+        let https_ok = clients.iter().any(|c| {
+            c.get("https://www.cloudflare.com/cdn-cgi/trace")
+                .send()
+                .map(|r| r.status().is_success())
+                .unwrap_or(false)
+        });
+        if http_ok && https_ok {
             return Ok(());
         }
         if Instant::now() >= deadline {
@@ -201,14 +221,15 @@ fn download_when_ready(
     }
 
     wait_for_proxy(settings.mixed_port, Duration::from_secs(120))?;
-    let client = http_client_via_proxy(settings.mixed_port)?;
+    rules::wait_for_fetch_outbound(settings, Duration::from_secs(180))?;
+    let clients = http_clients_via_proxy(settings.mixed_port)?;
 
     let mmdb_path = settings.data_dir.join("Country.mmdb");
     let geosite_path = settings.data_dir.join("geosite.dat");
 
     if !has_mmdb {
         fetch_file(
-            &client,
+            &clients[0],
             "Country.mmdb",
             MMDB_URL,
             &mmdb_path,
@@ -217,7 +238,7 @@ fn download_when_ready(
     }
     if !has_geosite {
         fetch_file(
-            &client,
+            &clients[0],
             "geosite.dat",
             GEOSITE_URL,
             &geosite_path,

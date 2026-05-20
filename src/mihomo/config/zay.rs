@@ -22,6 +22,8 @@ pub fn build(
     has_builtin_rules: bool,
 ) -> Config {
     let sub_uses: Vec<String> = settings.subscription_provider_ids();
+    let urltest_members = urltest_member_proxies(settings);
+    let select_proxies = select_group_proxies(settings);
 
     let mut cfg = Config {
         mixed_port: Some(settings.mixed_port),
@@ -38,7 +40,7 @@ pub fn build(
         proxy_groups: Some(vec![
             ProxyGroup::UrlTest(UrlTestGroup {
                 name: "Auto".into(),
-                proxies: Some(vec!["DIRECT".into()]),
+                proxies: Some(urltest_members),
                 r#use: Some(sub_uses.clone()),
                 url: Some(settings.health_check_url.clone()),
                 interval: Some(300),
@@ -48,17 +50,17 @@ pub fn build(
             }),
             ProxyGroup::Select(SelectGroup {
                 name: "Proxy".into(),
-                proxies: Some(vec!["Auto".into(), "DIRECT".into()]),
+                proxies: Some(select_proxies),
                 r#use: Some(sub_uses),
                 filter: None,
                 disable_udp: None,
             }),
         ]),
-        rules: Some(if has_builtin_rules {
-            rules::routing_rule_lines(has_mmdb)
-        } else {
-            rules::fallback_rule_lines(has_mmdb)
-        }),
+        rules: Some(rules::compose_routing_rules(
+            settings,
+            has_mmdb,
+            has_builtin_rules,
+        )),
         ..Default::default()
     };
 
@@ -87,6 +89,24 @@ pub fn build(
     }
 
     cfg
+}
+
+/// Members of the `Auto` url-test group (must not include the group name `Auto`).
+fn urltest_member_proxies(settings: &Settings) -> Vec<String> {
+    let mut names = vec!["DIRECT".into()];
+    if let Some(bp) = settings.bootstrap_proxy.as_ref() {
+        names.insert(0, bp.name.clone());
+    }
+    names
+}
+
+/// Static members listed under the `Proxy` select group (may reference other groups).
+fn select_group_proxies(settings: &Settings) -> Vec<String> {
+    let mut names = vec!["Auto".into(), "DIRECT".into()];
+    if let Some(bp) = settings.bootstrap_proxy.as_ref() {
+        names.insert(0, bp.name.clone());
+    }
+    names
 }
 
 fn subscription_providers(

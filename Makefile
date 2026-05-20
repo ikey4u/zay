@@ -3,6 +3,8 @@
 CARGO_HOME_DIR = /tmp/cargo-tmp
 REMAP = --remap-path-prefix=$(CARGO_HOME_DIR)=~ --remap-path-prefix=$(CURDIR)=.
 
+VERSION := $(shell sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+
 DIST_DIR = dist
 TARGET_MACOS_ARM64 = aarch64-apple-darwin
 TARGET_LINUX_X64 = x86_64-unknown-linux-gnu
@@ -10,9 +12,9 @@ TARGET_WINDOWS_X64 = x86_64-pc-windows-gnu
 BIN_MACOS_ARM64 = target/$(TARGET_MACOS_ARM64)/release/zay
 BIN_LINUX_X64 = target/$(TARGET_LINUX_X64)/release/zay
 BIN_WINDOWS_X64 = target/$(TARGET_WINDOWS_X64)/release/zay.exe
-ZIP_MACOS_ARM64 = zay-macos-arm64.zip
-ZIP_LINUX_X64 = zay-macos-linux-x64.zip
-ZIP_WINDOWS_X64 = zay-windows-x64.zip
+ZIP_MACOS_ARM64 = zay-macos-arm64-v$(VERSION).zip
+ZIP_LINUX_X64 = zay-linux-x64-v$(VERSION).zip
+ZIP_WINDOWS_X64 = zay-windows-x64-v$(VERSION).zip
 
 -include Makefile.local
 
@@ -49,4 +51,4 @@ pkg: macos.build-for-macos-arm64 macos.build-linux-x64 macos.build-for-window-x6
 	$(call zip_binary,$(ZIP_MACOS_ARM64),$(BIN_MACOS_ARM64))
 	$(call zip_binary,$(ZIP_LINUX_X64),$(BIN_LINUX_X64))
 	$(call zip_binary,$(ZIP_WINDOWS_X64),$(BIN_WINDOWS_X64))
-	@echo "packaged: $(DIST_DIR)/$(ZIP_MACOS_ARM64) $(DIST_DIR)/$(ZIP_LINUX_X64) $(DIST_DIR)/$(ZIP_WINDOWS_X64)"
+	@echo "packaged (v$(VERSION)): $(DIST_DIR)/$(ZIP_MACOS_ARM64) $(DIST_DIR)/$(ZIP_LINUX_X64) $(DIST_DIR)/$(ZIP_WINDOWS_X64)"

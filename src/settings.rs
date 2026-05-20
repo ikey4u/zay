@@ -102,7 +102,7 @@ pub const DEFAULT_MIXIN: &str = r#"# ===========================================
 #   - GEOIP,CN,DIRECT
 #   - PROCESS-NAME,Telegram.exe,Proxy
 #
-# 勿在 mixin 写 MATCH,Proxy — 内置规则末尾已包含。
+# 勿在 mixin 写 MATCH,DIRECT — 内置规则末尾已包含（黑名单模式：仅 GFW 等走 Proxy）。
 #
 # =============================================================================
 # proxy-groups — 按 name 合并（勿整段覆盖 Auto/Proxy）
