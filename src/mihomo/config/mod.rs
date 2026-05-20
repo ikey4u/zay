@@ -1,6 +1,7 @@
 //! Mihomo [`Config`](config::Config) types aligned with official v1.19.25 `docs/config.yaml` / `RawConfig`.
 //!
-//! Schema tag: **`v1.19.25`** (see `MIHOMO_CONFIG_TAG` / embedded `CONFIG_TEMPLATE` from `build.rs`).
+//! Schema tag: **`v1.19.25`** (see `CONFIG_TAG`). Full upstream template is written at runtime as
+//! `mihomo/config.template.yaml` (see `crate::assets`).
 
 pub mod cfa;
 pub mod config;
@@ -30,10 +31,3 @@ pub const MIHOMO_VERSION: &str = env!("MIHOMO_VERSION");
 
 /// Mihomo release tag used when generating `mihomo::config` (matches embedded binary).
 pub const CONFIG_TAG: &str = env!("MIHOMO_CONFIG_TAG");
-
-/// Absolute path to the downloaded reference `docs/config.yaml` at build time.
-pub const CONFIG_TEMPLATE_PATH: &str = env!("MIHOMO_CONFIG_TEMPLATE");
-
-/// Full upstream template text (includes `#` comments; for reference / tooling, not for `serde` parsing).
-pub const CONFIG_TEMPLATE: &str =
-    include_str!(concat!(env!("OUT_DIR"), "/mihomo-docs-config.yaml"));

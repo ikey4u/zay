@@ -1,6 +1,6 @@
 //! Outbound `proxies` entries.
 //!
-//! Mihomo supports many `type` values (see `MIHOMO_CONFIG_TEMPLATE`). Zay keeps a
+//! Mihomo supports many `type` values (see `mihomo/config.template.yaml`). Zay keeps a
 //! [`Proxy`] wrapper around [`serde_yaml::Value`] so subscription/bootstrap nodes round-trip
 //! without listing every variant, while typed structs below match the v1.19.25 docs.
 

@@ -13,6 +13,12 @@ use crate::settings;
 const EMBEDDED_MIHOMO: &[u8] = include_bytes!(env!("MIHOMO_EMBED"));
 const EMBEDDED_MIHOMO_VERSION: &str = env!("MIHOMO_VERSION");
 
+/// Upstream Mihomo `docs/config.yaml` (v1.19.25), fetched at build time in `build.rs`.
+const MIHOMO_CONFIG_TEMPLATE: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/mihomo-docs-config.yaml"));
+
+pub const CONFIG_TEMPLATE_NAME: &str = "config.template.yaml";
+
 fn exe_name() -> &'static str {
     if cfg!(windows) {
         "mihomo.exe"
@@ -59,6 +65,22 @@ fn materialize_embedded() -> anyhow::Result<PathBuf> {
         path.display()
     );
     Ok(path)
+}
+
+/// Write the embedded Mihomo reference config into `<mihomo_dir>/config.template.yaml`.
+pub fn ensure_config_template(mihomo_dir: &Path) -> anyhow::Result<()> {
+    let path = mihomo_dir.join(CONFIG_TEMPLATE_NAME);
+    if path.is_file() {
+        return Ok(());
+    }
+    fs::write(&path, MIHOMO_CONFIG_TEMPLATE).with_context(|| {
+        format!("writing Mihomo config reference to {}", path.display())
+    })?;
+    eprintln!(
+        "created Mihomo config reference at {} (upstream docs/config.yaml)",
+        path.display()
+    );
+    Ok(())
 }
 
 pub fn resolve_binary() -> anyhow::Result<PathBuf> {

@@ -82,10 +82,6 @@ fn fetch_config_docs_template(out_dir: &Path) {
         "cargo:rustc-env=MIHOMO_CONFIG_TAG={}",
         PINNED_MIHOMO_VERSION
     );
-    println!(
-        "cargo:rustc-env=MIHOMO_CONFIG_TEMPLATE={}",
-        dest.to_string_lossy()
-    );
 }
 
 fn emit_rustc_env(embed_path: &Path, version: &str) {

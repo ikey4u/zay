@@ -18,6 +18,7 @@ pub const DEFAULT_ZAY_TOML: &str = r#"# Zay – simple settings (edit this file,
 # Subscription URL(s) on the CLI: zay -s "https://..." [-s "https://..."]
 # YAML mixin (merged into mihomo/config.yaml): see mixin.yaml in this directory
 # Mihomo runtime files (config, geo, ruleset, providers) live in ./mihomo/
+# Reference: mihomo/config.template.yaml (upstream docs/config.yaml, created on first run)
 
 mixed_port = 7890
 allow_lan = false

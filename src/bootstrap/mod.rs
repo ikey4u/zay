@@ -3,7 +3,7 @@ pub mod proxy;
 use anyhow::{Context, Result};
 
 use crate::{
-    Cli,
+    Cli, assets,
     mihomo::{self, config, geo, rules},
     settings::{self as zay_settings, Settings},
 };
@@ -47,6 +47,7 @@ pub fn prepare(cli: &Cli) -> Result<Prepared> {
                 rules::ruleset_dir(&settings.mihomo_dir()).display()
             )
         })?;
+    assets::ensure_config_template(&settings.mihomo_dir())?;
 
     zay_settings::cleanup_stale_subscription_cache(
         &settings.mihomo_dir(),
