@@ -13,7 +13,10 @@ const RELEASE_BASE: &str =
 
 /// Strip zig/cargo glibc suffix (e.g. `.2.17`) so Mihomo artifact lookup matches `*-linux-gnu`.
 fn normalize_target(target: &str) -> &str {
-    target.split_once('.').map(|(base, _)| base).unwrap_or(target)
+    target
+        .split_once('.')
+        .map(|(base, _)| base)
+        .unwrap_or(target)
 }
 
 fn main() {

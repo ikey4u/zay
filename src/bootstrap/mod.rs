@@ -3,9 +3,10 @@ pub mod proxy;
 use anyhow::{Context, Result};
 
 use crate::{
-    Cli, assets,
+    ProxyOpts, assets,
     mihomo::{self, config, geo, rules},
-    settings::{self as zay_settings, Settings},
+    settings::{self as zay_settings, Settings, StackFlags},
+    stack,
 };
 
 pub struct Prepared {
@@ -15,8 +16,18 @@ pub struct Prepared {
     pub tun_enabled: bool,
 }
 
-pub fn prepare(cli: &Cli) -> Result<Prepared> {
+pub fn prepare_stack(cli: &ProxyOpts, flags: StackFlags) -> Result<Prepared> {
+    let settings = zay_settings::resolve_stack(cli, flags)?;
+    stack::validate(&settings)?;
+    prepare_inner(settings, true)
+}
+
+pub fn prepare_proxy(cli: &ProxyOpts) -> Result<Prepared> {
     let settings = zay_settings::resolve(cli)?;
+    prepare_inner(settings, false)
+}
+
+fn prepare_inner(settings: Settings, stack_mode: bool) -> Result<Prepared> {
     eprintln!(
         "mihomo {} (config schema {})",
         config::MIHOMO_VERSION,
@@ -49,30 +60,54 @@ pub fn prepare(cli: &Cli) -> Result<Prepared> {
         })?;
     assets::ensure_config_template(&settings.mihomo_dir())?;
 
-    zay_settings::cleanup_stale_subscription_cache(
-        &settings.mihomo_dir(),
-        settings.subscriptions.len(),
-    );
+    if !settings.subscriptions.is_empty() {
+        zay_settings::cleanup_stale_subscription_cache(
+            &settings.mihomo_dir(),
+            settings.subscriptions.len(),
+        );
+    }
     zay_settings::ensure_default_mixin(&settings)?;
 
     let has_rules = rules::files_present(&settings.mihomo_dir());
     if !has_rules {
-        eprintln!("clash-rules missing; will download via proxy after startup");
+        if settings.subscriptions.is_empty() {
+            eprintln!("clash-rules missing; using direct fallback rules");
+        } else {
+            eprintln!(
+                "clash-rules missing; will download via proxy after startup"
+            );
+        }
     }
 
     let (has_mmdb, has_geosite) = geo::files_present(&settings.mihomo_dir());
     if !has_mmdb || !has_geosite {
-        eprintln!("geo rules missing; will download after proxy is ready");
+        if settings.subscriptions.is_empty() {
+            eprintln!(
+                "geo rules missing; direct fallback may be less specific"
+            );
+        } else {
+            eprintln!("geo rules missing; will download after proxy is ready");
+        }
     }
 
     if let Some(bp) = &settings.bootstrap_proxy {
         eprintln!("bootstrap proxy \"{}\" will fetch subscription", bp.name);
     }
 
-    let config_yaml = mihomo::finalize_config(
-        &settings,
-        mihomo::build_config(&settings, has_mmdb, has_geosite, has_rules)?,
-    )?;
+    let base_config = if stack_mode {
+        stack::mihomo::build_config(
+            &settings,
+            has_mmdb,
+            has_geosite,
+            has_rules,
+        )?
+    } else {
+        mihomo::build_config(&settings, has_mmdb, has_geosite, has_rules)?
+    };
+    let mut config_yaml = mihomo::finalize_config(&settings, base_config)?;
+    if !has_mmdb {
+        config_yaml = mihomo::remove_geoip_rules_without_mmdb(&config_yaml)?;
+    }
 
     let config_path = settings.config_path();
     std::fs::write(&config_path, &config_yaml).with_context(|| {

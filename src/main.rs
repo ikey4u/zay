@@ -1,8 +1,12 @@
 mod api;
 mod assets;
 mod bootstrap;
+mod fwd;
+mod http;
 mod mihomo;
 mod settings;
+mod ssh;
+mod stack;
 mod yaml;
 
 #[cfg(unix)]
@@ -10,30 +14,34 @@ mod privilege;
 
 use std::sync::Arc;
 
-use anyhow::{Context, bail};
-use clap::Parser;
+use anyhow::{Context, Result, bail};
+use clap::{Parser, Subcommand};
 
-const LONG_ABOUT: &str = r#"Zay – a simple proxy with a built-in HTTP API.
+const LONG_ABOUT: &str = r#"Zay – proxy, mesh, and connection tools.
 
-Start:
+Proxy (default, requires -s):
   zay -s "https://your-subscription-url"
   zay -s "https://sub-a" -s "https://sub-b" --api-port 8787 --mixed-port 7890
 
-Runs the mixed proxy and Zay API (default http://127.0.0.1:8787).
+Stack (Mihomo always; optional mesh / gateway / subscription / TUN):
+  zay stack --mesh --gateway
+  zay stack --gateway
+  zay stack --proxy "https://..." --gateway
 
-HTTP API:
+Port relay and SSH tunnels:
+  zay fwd --to tcp://0.0.0.0:8080 --from tcp://127.0.0.1:80
+  zay ssh -L 3307:10.0.0.5:3306 myserver
+
+Static HTTP server:
+  zay http --root dist --spa
+  zay http --root dist --listen 127.0.0.1:8443 --cert cert.pem --key key.pem
+
+HTTP API (proxy / stack mode):
   GET  /api/health
-       Health check
-
   GET  /api/config
-       Return full zay config YAML (proxies inlined from subscription)
-
-Examples:
-  curl http://127.0.0.1:8787/api/health
-  curl http://127.0.0.1:8787/api/config
 "#;
 
-/// Zay – simple proxy with HTTP API.
+/// Zay – simple proxy with HTTP API, fwd relay, and ssh tunnels.
 #[derive(Parser, Debug)]
 #[clap(
     name = "zay",
@@ -42,6 +50,28 @@ Examples:
     long_about = LONG_ABOUT
 )]
 pub struct Cli {
+    #[command(subcommand)]
+    pub command: Option<Command>,
+
+    #[command(flatten)]
+    pub proxy: ProxyOpts,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum Command {
+    /// Run Mihomo (+ optional EasyTier mesh, gateway, subscription, TUN)
+    Stack(stack::StackCli),
+    /// Serve a static directory over HTTP/HTTPS
+    Http(http::HttpCli),
+    /// Forward TCP streams directly or over WebSocket
+    Fwd(fwd::FwdCli),
+    /// Stable SSH port forwarding with auto-reconnect
+    Ssh(ssh::SshCli),
+}
+
+/// Options for the default proxy run (`zay -s …`).
+#[derive(clap::Args, Debug, Default)]
+pub struct ProxyOpts {
     /// Subscription URL (repeat -s for multiple subscriptions)
     #[clap(short, long = "subscription", value_name = "URL", action = clap::ArgAction::Append)]
     pub subscriptions: Vec<String>,
@@ -91,17 +121,47 @@ pub struct Cli {
     pub bootstrap_proxy: Option<std::path::PathBuf>,
 }
 
-fn main() -> anyhow::Result<()> {
+fn main() -> Result<()> {
     let cli = Cli::parse();
-    if cli.subscriptions.is_empty() {
-        bail!("at least one subscription URL is required (-s URL)");
+    match cli.command {
+        Some(Command::Stack(stack)) => stack::run(stack),
+        Some(Command::Http(http)) => run_http(http),
+        Some(Command::Fwd(fwd)) => run_fwd(fwd),
+        Some(Command::Ssh(ssh)) => run_ssh(ssh),
+        None => run_proxy(cli),
     }
-    let prepared = bootstrap::prepare(&cli)?;
+}
+
+fn run_http(cli: http::HttpCli) -> Result<()> {
+    tokio::runtime::Runtime::new()
+        .context("creating tokio runtime")?
+        .block_on(http::run(cli))
+}
+
+fn run_fwd(cli: fwd::FwdCli) -> Result<()> {
+    tokio::runtime::Runtime::new()
+        .context("creating tokio runtime")?
+        .block_on(fwd::run_cli(cli))
+}
+
+fn run_ssh(cli: ssh::SshCli) -> Result<()> {
+    tokio::runtime::Runtime::new()
+        .context("creating tokio runtime")?
+        .block_on(ssh::run_cli(cli))
+}
+
+fn run_proxy(cli: Cli) -> Result<()> {
+    if cli.proxy.subscriptions.is_empty() {
+        bail!(
+            "at least one subscription URL is required (-s URL), or use: zay stack, zay fwd, zay ssh"
+        );
+    }
+    let prepared = bootstrap::prepare_proxy(&cli.proxy)?;
     eprintln!("config dir → {}", prepared.settings.data_dir.display());
     eprintln!("mihomo dir → {}", prepared.settings.mihomo_dir().display());
 
     let state = Arc::new(api::AppState::from(prepared));
-    let api_listen = format!("127.0.0.1:{}", cli.api_port);
+    let api_listen = format!("127.0.0.1:{}", cli.proxy.api_port);
     let _api = api::spawn(state.clone(), &api_listen);
 
     let engine = assets::resolve_binary()?;

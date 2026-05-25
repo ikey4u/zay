@@ -1,3 +1,3 @@
-# Zay - A simple network proxy
+# Zay - A simple network tool
 
 See `zay --help` for usage.

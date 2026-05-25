@@ -1,8 +1,15 @@
-.PHONY: fmt build pkg cross-build macos.build-linux-x64 macos.build-for-window-x64 macos.build-for-macos-arm64 setup check-zig
+.PHONY: fmt build pkg cross-build macos.build-for-linux-x64 macos.build-for-window-x64 macos.build-for-macos-arm64 setup setup-zig check-zig check-mingw
 
 CARGO_HOME_DIR = /tmp/cargo-tmp
 REMAP = --remap-path-prefix=$(CARGO_HOME_DIR)=~ --remap-path-prefix=$(CURDIR)=.
 CARGO = CARGO_HOME=$(CARGO_HOME_DIR) RUSTFLAGS="$(REMAP)"
+MINGW_DLLTOOL ?= x86_64-w64-mingw32-dlltool
+MINGW_CC ?= x86_64-w64-mingw32-gcc
+MINGW_AR ?= x86_64-w64-mingw32-ar
+WINDOWS_CARGO = CARGO_HOME=$(CARGO_HOME_DIR) \
+	CC_x86_64_pc_windows_gnu=$(MINGW_CC) \
+	AR_x86_64_pc_windows_gnu=$(MINGW_AR) \
+	RUSTFLAGS="$(REMAP) -C dlltool=$(MINGW_DLLTOOL)"
 
 VERSION := $(shell sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 
@@ -26,10 +33,32 @@ check-zig:
 	@command -v zig >/dev/null || (echo "Install zig: https://ziglang.org/" >&2; exit 1)
 	@command -v cargo-zigbuild >/dev/null || (echo "Install cargo-zigbuild: cargo install cargo-zigbuild" >&2; exit 1)
 
-setup: check-zig
+check-mingw:
+	@command -v $(MINGW_DLLTOOL) >/dev/null || ( \
+		echo "Missing $(MINGW_DLLTOOL), required for the Windows GNU target." >&2; \
+		echo "Install it with: brew install mingw-w64" >&2; \
+		echo "Or override MINGW_DLLTOOL=/path/to/dlltool." >&2; \
+		exit 1; \
+	)
+	@command -v $(MINGW_CC) >/dev/null || ( \
+		echo "Missing $(MINGW_CC), required for Windows C dependencies." >&2; \
+		echo "Install it with: brew install mingw-w64" >&2; \
+		echo "Or override MINGW_CC=/path/to/gcc." >&2; \
+		exit 1; \
+	)
+	@command -v $(MINGW_AR) >/dev/null || ( \
+		echo "Missing $(MINGW_AR), required for Windows C dependencies." >&2; \
+		echo "Install it with: brew install mingw-w64" >&2; \
+		echo "Or override MINGW_AR=/path/to/ar." >&2; \
+		exit 1; \
+	)
+
+setup:
 	mkdir -p $(CARGO_HOME_DIR)
 	ln -sf $(CARGO_HOME_DIR) $(HOME)/.cargo
 	rustup target add x86_64-unknown-linux-gnu x86_64-pc-windows-gnu aarch64-apple-darwin
+
+setup-zig: setup check-zig
 
 fmt:
 	cargo +nightly fmt
@@ -37,16 +66,16 @@ fmt:
 build: setup
 	$(CARGO) cargo build --release
 
-macos.build-linux-x64: setup
+macos.build-for-linux-x64: setup-zig
 	$(CARGO) cargo zigbuild --release --target $(ZIG_LINUX_TARGET)
 	@test -f $(BIN_LINUX_X64) || (echo "missing $(BIN_LINUX_X64) (zig target $(ZIG_LINUX_TARGET))" >&2; exit 1)
 
-macos.build-for-window-x64: setup
-	$(CARGO) cargo zigbuild --release --target $(TARGET_WINDOWS_X64)
+macos.build-for-window-x64: setup-zig check-mingw
+	$(WINDOWS_CARGO) cargo zigbuild --release --target $(TARGET_WINDOWS_X64)
 	@test -f $(BIN_WINDOWS_X64)
 
 macos.build-for-macos-arm64: setup
-	$(CARGO) cargo zigbuild --release --target $(TARGET_MACOS_ARM64)
+	$(CARGO) cargo build --release --target $(TARGET_MACOS_ARM64)
 	@test -f $(BIN_MACOS_ARM64)
 
 $(DIST_DIR):
@@ -62,7 +91,7 @@ endef
 # Sequential cross-builds (avoid parallel cargo/zig races); Linux uses glibc 2.17 via zig.
 pkg: | $(DIST_DIR)
 	$(MAKE) macos.build-for-macos-arm64
-	$(MAKE) macos.build-linux-x64
+	$(MAKE) macos.build-for-linux-x64
 	$(MAKE) macos.build-for-window-x64
 	$(call zip_binary,$(ZIP_MACOS_ARM64),$(BIN_MACOS_ARM64))
 	$(call zip_binary,$(ZIP_LINUX_X64),$(BIN_LINUX_X64))

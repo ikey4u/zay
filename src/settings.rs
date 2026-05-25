@@ -8,7 +8,7 @@ use serde::Deserialize;
 use serde_yaml::Value;
 use toml::Value as TomlValue;
 
-use crate::{Cli, bootstrap::proxy};
+use crate::{ProxyOpts, bootstrap::proxy};
 
 pub const ZAY_TOML_FILE: &str = "zay.toml";
 /// Mihomo runtime home under the Zay config directory (`config.yaml`, geo, ruleset, providers, …).
@@ -41,6 +41,17 @@ update_interval = 3600
 
 # Path to YAML mixin file (default: mixin.yaml in data dir, see examples inside)
 # mixin = "mixin.yaml"
+
+# EasyTier mesh (used with: zay stack --mesh). See docs/stack.md — no separate easytier.toml.
+# [mesh]
+# instance_name = "zay"
+# network_name = "my-network"
+# network_secret = "change-me"
+# dhcp = true
+# no_tun = true
+# listeners = ["tcp://0.0.0.0:11010", "udp://0.0.0.0:11010"]
+# peers = ["tcp://public.easytier.top:11010"]
+# mesh_routes = ["10.126.126.0/24"]
 "#;
 
 pub const DEFAULT_MIXIN: &str = r#"# =============================================================================
@@ -102,9 +113,13 @@ pub const DEFAULT_MIXIN: &str = r#"# ===========================================
 #   - RULE-SET,my-direct,DIRECT
 #   - DOMAIN-SUFFIX,company.internal,DIRECT
 #   - DOMAIN,www.example.com,DIRECT
-#   - IP-CIDR,192.168.0.0/16,DIRECT
-#   - GEOIP,CN,DIRECT
+#   - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
+#   - IP-CIDR,172.16.0.0/12,DIRECT,no-resolve
+#   - IP-CIDR,192.168.0.0/16,DIRECT,no-resolve
 #   - PROCESS-NAME,Telegram.exe,Proxy
+#
+# 避免在离线/受限网络启动阶段使用 GEOIP 规则；缺少 MMDB 时 Mihomo 会尝试联网下载。
+# Zay 会在 MMDB 缺失时把 GEOIP,PRIVATE 规则改写为私网 IP-CIDR 规则。
 #
 # 勿在 mixin 写 MATCH,DIRECT — 内置规则末尾已包含（黑名单模式：仅 GFW 等走 Proxy）。
 #
@@ -128,6 +143,21 @@ pub const DEFAULT_MIXIN: &str = r#"# ===========================================
 #
 "#;
 
+/// EasyTier mesh section in `zay.toml` (see `docs/stack.md`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct MeshConfig {
+    pub instance_name: Option<String>,
+    pub network_name: String,
+    pub network_secret: String,
+    pub dhcp: Option<bool>,
+    pub no_tun: Option<bool>,
+    pub listeners: Option<Vec<String>>,
+    pub peers: Option<Vec<String>>,
+    pub proxy_networks: Option<Vec<String>>,
+    /// Zay-only: injected as Mihomo `IP-CIDR,…,DIRECT` rules when `--mesh`.
+    pub mesh_routes: Option<Vec<String>>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 struct ZayFile {
@@ -144,6 +174,7 @@ struct ZayFile {
     mixin: Option<String>,
     /// Path to a YAML file, or omit when using `[bootstrap_proxy]` table.
     bootstrap_proxy: Option<TomlValue>,
+    mesh: Option<MeshConfig>,
 }
 
 impl Default for ZayFile {
@@ -159,6 +190,7 @@ impl Default for ZayFile {
             api_secret: None,
             mixin: None,
             bootstrap_proxy: None,
+            mesh: None,
         }
     }
 }
@@ -170,7 +202,15 @@ pub struct BootstrapProxy {
     pub proxy: Value,
 }
 
-#[derive(Debug, Clone)]
+/// Flags passed to `zay stack` (Mihomo always runs; these shape the profile).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StackFlags {
+    pub mesh: bool,
+    pub gateway: bool,
+    pub tun: bool,
+}
+
+#[derive(Clone)]
 pub struct Settings {
     pub subscriptions: Vec<String>,
     pub data_dir: PathBuf,
@@ -185,6 +225,8 @@ pub struct Settings {
     pub api_secret: String,
     pub mixin: Option<PathBuf>,
     pub bootstrap_proxy: Option<BootstrapProxy>,
+    pub mesh: Option<MeshConfig>,
+    pub stack: StackFlags,
 }
 
 impl Settings {
@@ -344,7 +386,15 @@ fn resolve_bootstrap_proxy(
     }
 }
 
-pub fn resolve(cli: &Cli) -> Result<Settings> {
+pub fn resolve(cli: &ProxyOpts) -> Result<Settings> {
+    resolve_inner(cli, StackFlags::default())
+}
+
+pub fn resolve_stack(cli: &ProxyOpts, stack: StackFlags) -> Result<Settings> {
+    resolve_inner(cli, stack)
+}
+
+fn resolve_inner(cli: &ProxyOpts, stack: StackFlags) -> Result<Settings> {
     let data_dir = cli
         .data_dir
         .clone()
@@ -389,12 +439,25 @@ pub fn resolve(cli: &Cli) -> Result<Settings> {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(generate_api_secret);
 
+    let allow_lan = if stack.gateway {
+        true
+    } else {
+        cli.allow_lan || file.allow_lan
+    };
+    let tun = if stack.tun {
+        true
+    } else if stack.mesh || stack.gateway {
+        false
+    } else {
+        cli.tun || file.tun
+    };
+
     Ok(Settings {
         subscriptions: cli.subscriptions.clone(),
         data_dir,
         mixed_port: cli.mixed_port.unwrap_or(file.mixed_port),
-        allow_lan: cli.allow_lan || file.allow_lan,
-        tun: cli.tun || file.tun,
+        allow_lan,
+        tun,
         log_level: cli.log_level.clone().unwrap_or(file.log_level),
         health_check_url: cli
             .health_check_url
@@ -405,6 +468,8 @@ pub fn resolve(cli: &Cli) -> Result<Settings> {
         api_secret,
         mixin,
         bootstrap_proxy,
+        mesh: file.mesh,
+        stack,
     })
 }
 

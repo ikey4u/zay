@@ -322,6 +322,58 @@ pub fn config_has_tun(config_yaml: &str) -> bool {
         .unwrap_or(false)
 }
 
+pub fn remove_geoip_rules_without_mmdb(config_yaml: &str) -> Result<String> {
+    let mut config: Value =
+        serde_yaml::from_str(config_yaml).context("parsing config as YAML")?;
+    let Some(rules) = config.get_mut("rules").and_then(Value::as_sequence_mut)
+    else {
+        return Ok(config_yaml.to_string());
+    };
+
+    let mut normalized = Vec::with_capacity(rules.len());
+    let mut changed = false;
+    for rule in std::mem::take(rules) {
+        let Some(raw) = rule.as_str() else {
+            normalized.push(rule);
+            continue;
+        };
+        if !raw.starts_with("GEOIP,") {
+            normalized.push(rule);
+            continue;
+        }
+
+        changed = true;
+        let parts: Vec<&str> = raw.split(',').collect();
+        if parts.get(1) == Some(&"PRIVATE") {
+            let outbound = parts.get(2).copied().unwrap_or("DIRECT");
+            for cidr in [
+                "10.0.0.0/8",
+                "172.16.0.0/12",
+                "192.168.0.0/16",
+                "100.64.0.0/10",
+                "127.0.0.0/8",
+                "169.254.0.0/16",
+            ] {
+                normalized.push(Value::from(format!(
+                    "IP-CIDR,{cidr},{outbound},no-resolve"
+                )));
+            }
+            normalized.push(Value::from(format!(
+                "IP-CIDR6,fc00::/7,{outbound},no-resolve"
+            )));
+        } else {
+            eprintln!("removed GEOIP rule because MMDB is missing: {raw}");
+        }
+    }
+
+    *rules = normalized;
+    if changed {
+        eprintln!("rewrote GEOIP rules because MMDB is missing");
+    }
+    serde_yaml::to_string(&config)
+        .context("serializing config without GEOIP rules")
+}
+
 pub fn finalize_config(
     settings: &Settings,
     base_config: String,
