@@ -12,7 +12,7 @@ Common options:
 
 | Option | Meaning |
 |--------|---------|
-| `-s, --subscription URL` | Add a Mihomo subscription provider. Repeatable. |
+| `-s, --proxy URL` | Add a Mihomo subscription provider. Repeatable. |
 | `--mesh` | Start EasyTier in-process using `[mesh]` from `zay.toml`. |
 | `--gateway` | Enable LAN mixed relay (`allow-lan`, direct gateway profile). |
 | `--tun` | Enable Mihomo TUN. Requires root/admin privileges. |
@@ -29,7 +29,7 @@ Every `zay stack` starts Mihomo. Flags only change the profile:
 |---------|--------|----------|
 | `zay stack` | base direct profile | off |
 | `zay stack --gateway` | LAN mixed relay, direct egress | off |
-| `zay stack -s URL` | subscription providers + rules | off |
+| `zay stack --proxy URL` | subscription providers + rules | off |
 | `zay stack --mesh` | base + mesh route rules | on |
 | `zay stack --mesh --gateway` | LAN relay + mesh route rules | on |
 | `zay stack --tun` | Mihomo TUN | off |
@@ -80,7 +80,7 @@ sudo zay stack --gateway --mixed-port 7890
 Host relay with subscription:
 
 ```bash
-sudo zay stack --gateway -s "https://subscription.example"
+sudo zay stack --gateway --proxy "https://subscription.example"
 ```
 
 VM TUN through host SOCKS:

@@ -14,8 +14,8 @@ pub const ZAY_TOML_FILE: &str = "zay.toml";
 /// Mihomo runtime home under the Zay config directory (`config.yaml`, geo, ruleset, providers, …).
 pub const MIHOMO_DIR: &str = "mihomo";
 
-pub const DEFAULT_ZAY_TOML: &str = r#"# Zay – simple settings (edit this file, then: zay -s <url>)
-# Subscription URL(s) on the CLI: zay -s "https://..." [-s "https://..."]
+pub const DEFAULT_ZAY_TOML: &str = r#"# Zay – simple settings (edit this file, then: zay stack)
+# Stack proxy URL(s) on the CLI: zay stack --proxy "https://..." [--proxy "https://..."]
 # YAML mixin (merged into mihomo/config.yaml): see mixin.yaml in this directory
 # Mihomo runtime files (config, geo, ruleset, providers) live in ./mihomo/
 # Reference: mihomo/config.template.yaml (upstream docs/config.yaml, created on first run)
@@ -27,7 +27,7 @@ log_level = "info"
 health_check_url = "http://cp.cloudflare.com/generate_204"
 update_interval = 3600
 
-# Bootstrap proxy: used only to fetch the -s subscription when the URL is blocked on DIRECT.
+# Bootstrap proxy: used only to fetch stack proxy subscriptions when the URL is blocked on DIRECT.
 # Either a path to a YAML file (one Mihomo proxy), or an inline table — see below.
 # bootstrap_proxy = "bootstrap.yaml"
 #
@@ -384,10 +384,6 @@ fn resolve_bootstrap_proxy(
             "bootstrap_proxy must be a file path string or [bootstrap_proxy] table"
         ),
     }
-}
-
-pub fn resolve(cli: &ProxyOpts) -> Result<Settings> {
-    resolve_inner(cli, StackFlags::default())
 }
 
 pub fn resolve_stack(cli: &ProxyOpts, stack: StackFlags) -> Result<Settings> {

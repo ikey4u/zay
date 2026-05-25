@@ -17,15 +17,15 @@ use crate::{
 
 #[derive(Args, Debug)]
 pub struct StackCli {
-    #[command(flatten)]
+    #[command(flatten, next_help_heading = "Runtime options")]
     pub common: ProxyOpts,
 
-    /// EasyTier mesh ([mesh] in zay.toml)
-    #[arg(long)]
+    /// Join the configured private mesh network
+    #[arg(long, help_heading = "Stack options")]
     pub mesh: bool,
 
-    /// LAN mixed relay (allow-lan, direct mode)
-    #[arg(long)]
+    /// Share the local proxy port with LAN/VM clients
+    #[arg(long, help_heading = "Stack options")]
     pub gateway: bool,
 }
 

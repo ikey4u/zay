@@ -19,15 +19,10 @@ pub struct Prepared {
 pub fn prepare_stack(cli: &ProxyOpts, flags: StackFlags) -> Result<Prepared> {
     let settings = zay_settings::resolve_stack(cli, flags)?;
     stack::validate(&settings)?;
-    prepare_inner(settings, true)
+    prepare_inner(settings)
 }
 
-pub fn prepare_proxy(cli: &ProxyOpts) -> Result<Prepared> {
-    let settings = zay_settings::resolve(cli)?;
-    prepare_inner(settings, false)
-}
-
-fn prepare_inner(settings: Settings, stack_mode: bool) -> Result<Prepared> {
+fn prepare_inner(settings: Settings) -> Result<Prepared> {
     eprintln!(
         "mihomo {} (config schema {})",
         config::MIHOMO_VERSION,
@@ -94,16 +89,12 @@ fn prepare_inner(settings: Settings, stack_mode: bool) -> Result<Prepared> {
         eprintln!("bootstrap proxy \"{}\" will fetch subscription", bp.name);
     }
 
-    let base_config = if stack_mode {
-        stack::mihomo::build_config(
-            &settings,
-            has_mmdb,
-            has_geosite,
-            has_rules,
-        )?
-    } else {
-        mihomo::build_config(&settings, has_mmdb, has_geosite, has_rules)?
-    };
+    let base_config = stack::mihomo::build_config(
+        &settings,
+        has_mmdb,
+        has_geosite,
+        has_rules,
+    )?;
     let mut config_yaml = mihomo::finalize_config(&settings, base_config)?;
     if !has_mmdb {
         config_yaml = mihomo::remove_geoip_rules_without_mmdb(&config_yaml)?;

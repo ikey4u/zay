@@ -1,4 +1,4 @@
-//! Optional bootstrap proxy: a single Mihomo `proxies` entry used to fetch the `-s` subscription URL.
+//! Optional bootstrap proxy: a single Mihomo `proxies` entry used to fetch stack proxy subscriptions.
 //!
 //! Maps to `proxy-providers.subscription.proxy` in the generated config (Mihomo dials this node directly).
 

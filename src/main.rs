@@ -12,18 +12,12 @@ mod yaml;
 #[cfg(unix)]
 mod privilege;
 
-use std::sync::Arc;
-
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
-const LONG_ABOUT: &str = r#"Zay – proxy, mesh, and connection tools.
+const LONG_ABOUT: &str = r#"Zay – network stack and connection tools.
 
-Proxy (default, requires -s):
-  zay -s "https://your-subscription-url"
-  zay -s "https://sub-a" -s "https://sub-b" --api-port 8787 --mixed-port 7890
-
-Stack (Mihomo always; optional mesh / gateway / subscription / TUN):
+Network stack:
   zay stack --mesh --gateway
   zay stack --gateway
   zay stack --proxy "https://..." --gateway
@@ -36,30 +30,29 @@ Static HTTP server:
   zay http --root dist --spa
   zay http --root dist --listen 127.0.0.1:8443 --cert cert.pem --key key.pem
 
-HTTP API (proxy / stack mode):
+HTTP API (stack mode):
   GET  /api/health
   GET  /api/config
 "#;
 
-/// Zay – simple proxy with HTTP API, fwd relay, and ssh tunnels.
+/// Zay – simple network tool.
 #[derive(Parser, Debug)]
 #[clap(
     name = "zay",
     author,
-    about = "A simple network proxy",
-    long_about = LONG_ABOUT
+    about = "A simple network tool",
+    long_about = LONG_ABOUT,
+    subcommand_required = true,
+    arg_required_else_help = true
 )]
 pub struct Cli {
     #[command(subcommand)]
-    pub command: Option<Command>,
-
-    #[command(flatten)]
-    pub proxy: ProxyOpts,
+    pub command: Command,
 }
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
-    /// Run Mihomo (+ optional EasyTier mesh, gateway, subscription, TUN)
+    /// Run the network stack: proxy, mesh, gateway, and TUN
     Stack(stack::StackCli),
     /// Serve a static directory over HTTP/HTTPS
     Http(http::HttpCli),
@@ -69,14 +62,19 @@ pub enum Command {
     Ssh(ssh::SshCli),
 }
 
-/// Options for the default proxy run (`zay -s …`).
+/// Options for `zay stack`.
 #[derive(clap::Args, Debug, Default)]
 pub struct ProxyOpts {
-    /// Subscription URL (repeat -s for multiple subscriptions)
-    #[clap(short, long = "subscription", value_name = "URL", action = clap::ArgAction::Append)]
+    /// Remote proxy subscription URL (repeatable)
+    #[clap(
+        short = 's',
+        long = "proxy",
+        value_name = "URL",
+        action = clap::ArgAction::Append
+    )]
     pub subscriptions: Vec<String>,
 
-    /// Zay config directory — zay.toml & mixin.yaml at top level; Mihomo files under mihomo/
+    /// Zay config directory (zay.toml, mixin.yaml, and runtime files)
     #[clap(short, long, value_name = "DIR")]
     pub data_dir: Option<std::path::PathBuf>,
 
@@ -84,19 +82,19 @@ pub struct ProxyOpts {
     #[clap(short = 'c', long, value_name = "FILE")]
     pub config: Option<std::path::PathBuf>,
 
-    /// Zay HTTP API listen port (binds 127.0.0.1)
+    /// Local Zay API port
     #[clap(long, value_name = "PORT", default_value_t = 8787)]
     pub api_port: u16,
 
-    /// HTTP/SOCKS mixed proxy port (default: 7890)
+    /// Local HTTP/SOCKS proxy port (default: 7890)
     #[clap(long, value_name = "PORT")]
     pub mixed_port: Option<u16>,
 
-    /// Proxy provider update interval in seconds (default: 3600)
+    /// Subscription provider update interval in seconds (default: 3600)
     #[clap(long, value_name = "SECS")]
     pub update_interval: Option<u64>,
 
-    /// URL used for proxy health checks (default: http://cp.cloudflare.com/generate_204)
+    /// URL used for provider health checks
     #[clap(long, value_name = "URL")]
     pub health_check_url: Option<String>,
 
@@ -104,19 +102,19 @@ pub struct ProxyOpts {
     #[clap(long, value_name = "LEVEL")]
     pub log_level: Option<String>,
 
-    /// Allow LAN connections (default: false)
+    /// Allow LAN access to the local proxy port
     #[clap(long, default_value_t = false, action = clap::ArgAction::SetTrue)]
     pub allow_lan: bool,
 
-    /// Enable TUN mode (default: false; uses sudo cache when available, else prompts)
+    /// Capture system traffic through a TUN interface
     #[clap(long, default_value_t = false, action = clap::ArgAction::SetTrue)]
     pub tun: bool,
 
-    /// YAML mixin merged into generated config.yaml
+    /// YAML mixin merged into generated proxy config
     #[clap(long, value_name = "FILE")]
     pub mixin: Option<std::path::PathBuf>,
 
-    /// Bootstrap proxy YAML (one Mihomo proxy) used to fetch the subscription URL
+    /// Bootstrap proxy YAML used to fetch remote subscriptions
     #[clap(long, value_name = "FILE")]
     pub bootstrap_proxy: Option<std::path::PathBuf>,
 }
@@ -124,11 +122,10 @@ pub struct ProxyOpts {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Some(Command::Stack(stack)) => stack::run(stack),
-        Some(Command::Http(http)) => run_http(http),
-        Some(Command::Fwd(fwd)) => run_fwd(fwd),
-        Some(Command::Ssh(ssh)) => run_ssh(ssh),
-        None => run_proxy(cli),
+        Command::Stack(stack) => stack::run(stack),
+        Command::Http(http) => run_http(http),
+        Command::Fwd(fwd) => run_fwd(fwd),
+        Command::Ssh(ssh) => run_ssh(ssh),
     }
 }
 
@@ -148,64 +145,4 @@ fn run_ssh(cli: ssh::SshCli) -> Result<()> {
     tokio::runtime::Runtime::new()
         .context("creating tokio runtime")?
         .block_on(ssh::run_cli(cli))
-}
-
-fn run_proxy(cli: Cli) -> Result<()> {
-    if cli.proxy.subscriptions.is_empty() {
-        bail!(
-            "at least one subscription URL is required (-s URL), or use: zay stack, zay fwd, zay ssh"
-        );
-    }
-    let prepared = bootstrap::prepare_proxy(&cli.proxy)?;
-    eprintln!("config dir → {}", prepared.settings.data_dir.display());
-    eprintln!("mihomo dir → {}", prepared.settings.mihomo_dir().display());
-
-    let state = Arc::new(api::AppState::from(prepared));
-    let api_listen = format!("127.0.0.1:{}", cli.proxy.api_port);
-    let _api = api::spawn(state.clone(), &api_listen);
-
-    let engine = assets::resolve_binary()?;
-    eprintln!(
-        "starting – mixed proxy on 0.0.0.0:{}",
-        state.settings.mixed_port
-    );
-
-    let config_path = state.settings.config_path();
-    if state.tun_enabled {
-        eprintln!("TUN enabled – elevated privileges required for proxy");
-    }
-    let mut child = assets::spawn(
-        &engine,
-        &state.settings.mihomo_dir(),
-        &config_path,
-        false,
-        state.tun_enabled,
-    )?;
-
-    if let Some(stdout) = child.stdout.take() {
-        assets::pipe_logs(stdout);
-    }
-    if let Some(stderr) = child.stderr.take() {
-        assets::pipe_logs(stderr);
-    }
-
-    mihomo::geo::spawn_background_download(
-        state.settings.clone(),
-        Some(state.config_yaml.clone()),
-    );
-
-    let pid = child.id();
-    ctrlc::set_handler(move || {
-        assets::terminate_process(pid);
-        eprintln!("stopping");
-        std::process::exit(130);
-    })
-    .context("installing Ctrl-C handler")?;
-
-    let status = child.wait().context("waiting for zay")?;
-    let code = status.code().unwrap_or(1);
-    if code != 0 {
-        bail!("zay exited with status {code}");
-    }
-    Ok(())
 }
