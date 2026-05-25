@@ -69,7 +69,7 @@ TUN ownership rule:
 | `--mesh --tun` + `no_tun = true` | Mihomo |
 | `--mesh --tun` without `no_tun` | rejected |
 
-## Tart Host / VM
+## Tart Host/VM
 
 Host direct relay:
 
@@ -103,7 +103,7 @@ proxies:
 
 rules:
   # Corporate/internal domains that should use the host network/VPN.
-  - DOMAIN-SUFFIX,woa.com,Host
+  - DOMAIN-SUFFIX,example.com,Host
   - IP-CIDR,10.99.0.0/16,Host,no-resolve
 
   # Local/private ranges that should remain direct.

@@ -21,6 +21,7 @@ Network stack:
   zay stack --mesh --gateway
   zay stack --gateway
   zay stack --proxy "https://..." --gateway
+  zay stack --help
 
 Port relay and SSH tunnels:
   zay fwd --to tcp://0.0.0.0:8080 --from tcp://127.0.0.1:80
@@ -35,6 +36,8 @@ HTTP API (stack mode):
   GET  /api/config
 "#;
 
+const AFTER_HELP: &str = include_str!("../docs/USAGE_EXAMPLE.md");
+
 /// Zay – simple network tool.
 #[derive(Parser, Debug)]
 #[clap(
@@ -42,6 +45,7 @@ HTTP API (stack mode):
     author,
     about = "A simple network tool",
     long_about = LONG_ABOUT,
+    after_long_help = AFTER_HELP,
     subcommand_required = true,
     arg_required_else_help = true
 )]

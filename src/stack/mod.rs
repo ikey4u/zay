@@ -15,7 +15,12 @@ use crate::{
     settings::{Settings, StackFlags},
 };
 
+const LONG_ABOUT: &str = "Run the network stack: local proxy, LAN/VM gateway, private mesh, and TUN capture.";
+
+const AFTER_HELP: &str = include_str!("../../docs/USAGE_EXAMPLE.md");
+
 #[derive(Args, Debug)]
+#[command(long_about = LONG_ABOUT, after_long_help = AFTER_HELP)]
 pub struct StackCli {
     #[command(flatten, next_help_heading = "Runtime options")]
     pub common: ProxyOpts,
