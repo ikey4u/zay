@@ -56,14 +56,24 @@ pub fn run(cli: StackCli) -> Result<()> {
     let _api = api::spawn(state.clone(), &api_listen);
 
     let engine = assets::resolve_binary()?;
+    let listen_host = if flags.gateway {
+        "0.0.0.0"
+    } else {
+        "127.0.0.1"
+    };
+    let proxy_scope = if flags.gateway {
+        "gateway proxy"
+    } else {
+        "local proxy"
+    };
     eprintln!(
-        "stack – Mihomo mixed on 0.0.0.0:{} (gateway={}, mesh={}, tun={})",
+        "stack – {proxy_scope} on {listen_host}:{} (gateway={}, mesh={}, tun={})",
         state.settings.mixed_port, flags.gateway, flags.mesh, state.tun_enabled,
     );
 
     let config_path = state.settings.config_path();
     if state.tun_enabled {
-        eprintln!("TUN enabled – elevated privileges required for Mihomo");
+        eprintln!("TUN enabled – elevated privileges required");
     }
 
     let mut child = match spawn_mihomo(
@@ -106,14 +116,14 @@ pub fn run(cli: StackCli) -> Result<()> {
     })
     .context("installing Ctrl-C handler")?;
 
-    let status = child.wait().context("waiting for Mihomo")?;
+    let status = child.wait().context("waiting for network stack")?;
     if mesh_started {
         easytier::stop_all()?;
     }
 
     let code = status.code().unwrap_or(1);
     if code != 0 {
-        bail!("Mihomo exited with status {code}");
+        bail!("network stack exited with status {code}");
     }
     Ok(())
 }
@@ -142,7 +152,7 @@ pub fn validate(settings: &Settings) -> Result<()> {
             .context("--mesh requires a [mesh] section in zay.toml")?;
         if flags.tun && mesh.no_tun != Some(true) {
             bail!(
-                "--tun with --mesh requires `no_tun = true` in [mesh] (Mihomo owns TUN; EasyTier virtual IP only)"
+                "--tun with --mesh requires `no_tun = true` in [mesh] (stack owns TUN; mesh virtual IP only)"
             );
         }
     }

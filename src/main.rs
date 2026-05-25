@@ -102,10 +102,6 @@ pub struct ProxyOpts {
     #[clap(long, value_name = "LEVEL")]
     pub log_level: Option<String>,
 
-    /// Allow LAN access to the local proxy port
-    #[clap(long, default_value_t = false, action = clap::ArgAction::SetTrue)]
-    pub allow_lan: bool,
-
     /// Capture system traffic through a TUN interface
     #[clap(long, default_value_t = false, action = clap::ArgAction::SetTrue)]
     pub tun: bool,

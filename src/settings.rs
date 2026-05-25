@@ -21,8 +21,6 @@ pub const DEFAULT_ZAY_TOML: &str = r#"# Zay – simple settings (edit this file,
 # Reference: mihomo/config.template.yaml (upstream docs/config.yaml, created on first run)
 
 mixed_port = 7890
-allow_lan = false
-tun = false
 log_level = "info"
 health_check_url = "http://cp.cloudflare.com/generate_204"
 update_interval = 3600
@@ -435,18 +433,8 @@ fn resolve_inner(cli: &ProxyOpts, stack: StackFlags) -> Result<Settings> {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(generate_api_secret);
 
-    let allow_lan = if stack.gateway {
-        true
-    } else {
-        cli.allow_lan || file.allow_lan
-    };
-    let tun = if stack.tun {
-        true
-    } else if stack.mesh || stack.gateway {
-        false
-    } else {
-        cli.tun || file.tun
-    };
+    let allow_lan = stack.gateway;
+    let tun = stack.tun;
 
     Ok(Settings {
         subscriptions: cli.subscriptions.clone(),

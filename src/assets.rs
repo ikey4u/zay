@@ -121,9 +121,15 @@ pub fn spawn(
     quiet: bool,
     privileged: bool,
 ) -> anyhow::Result<Child> {
+    let config_path = config_path.canonicalize().with_context(|| {
+        format!("canonicalizing config {}", config_path.display())
+    })?;
     let config_dir = config_path
         .parent()
         .context("config path has no parent directory")?;
+    let mihomo_dir = mihomo_dir.canonicalize().with_context(|| {
+        format!("canonicalizing runtime dir {}", mihomo_dir.display())
+    })?;
 
     #[cfg(unix)]
     if privileged && !crate::privilege::is_root() {
@@ -136,7 +142,7 @@ pub fn spawn(
                 "-f",
                 config_path.to_str().context("non-UTF8 config path")?,
             ],
-            mihomo_dir,
+            &mihomo_dir,
             quiet,
         );
     }
@@ -150,8 +156,8 @@ pub fn spawn(
     cmd.arg("-d")
         .arg(config_dir)
         .arg("-f")
-        .arg(config_path)
-        .current_dir(mihomo_dir)
+        .arg(&config_path)
+        .current_dir(&mihomo_dir)
         .stdin(Stdio::null());
 
     if quiet {
