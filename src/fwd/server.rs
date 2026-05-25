@@ -1,6 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use futures_util::{SinkExt, StreamExt};
 use tokio::{
     io::{
@@ -13,10 +13,13 @@ use tokio::{
 use tokio_tungstenite::{
     WebSocketStream, accept_hdr_async, connect_async,
     tungstenite::{
-        Message,
+        Error as WsError, Message,
         client::IntoClientRequest,
         handshake::server::{ErrorResponse, Request, Response},
-        http::{HeaderValue, StatusCode, header::AUTHORIZATION},
+        http::{
+            HeaderValue, StatusCode,
+            header::{AUTHORIZATION, LOCATION},
+        },
     },
 };
 use tracing::{debug, info, warn};
@@ -29,6 +32,9 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_CONNECTIONS: usize = 1024;
 const UPSTREAM_RETRIES: u32 = 3;
 const UPSTREAM_RETRY_DELAY: Duration = Duration::from_millis(500);
+const MAX_WEBSOCKET_REDIRECTS: u8 = 5;
+
+type ClientRequest = tokio_tungstenite::tungstenite::http::Request<()>;
 
 pub async fn run(args: FwdArgs) -> Result<()> {
     let token = args.token.map(Arc::<str>::from);
@@ -126,9 +132,15 @@ async fn connect_upstream_tcp(addr: &str) -> Result<TcpStream> {
         }
     }
 
-    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("upstream connect failed"))).with_context(
-        || format!("Failed to connect TCP target {addr} after {UPSTREAM_RETRIES} attempts"),
-    )
+    let err =
+        last_err.unwrap_or_else(|| anyhow::anyhow!("upstream connect failed"));
+    warn!(
+        "Failed to connect TCP target {addr} after {UPSTREAM_RETRIES} attempts: {err:#}"
+    );
+
+    Err(err).with_context(|| {
+        format!("Failed to connect TCP target {addr} after {UPSTREAM_RETRIES} attempts")
+    })
 }
 
 async fn tcp_websocket(
@@ -144,8 +156,9 @@ async fn tcp_websocket(
     info!(
         "TCP to WebSocket bridge: {} → {}",
         listen.addr,
-        redact_url(&target.url)
+        websocket_endpoint_label(&target)
     );
+    log_websocket_endpoint_mapping("upstream", &target);
     let permits = Arc::new(Semaphore::new(MAX_CONNECTIONS));
 
     loop {
@@ -190,9 +203,10 @@ async fn websocket_tcp(
 
     info!(
         "WebSocket to TCP bridge: {} → {}",
-        redact_url(&listen.url),
+        websocket_endpoint_label(&listen),
         target.addr
     );
+    log_websocket_endpoint_mapping("listener", &listen);
     let permits = Arc::new(Semaphore::new(MAX_CONNECTIONS));
 
     loop {
@@ -252,38 +266,324 @@ async fn handle_tcp_websocket(
 }
 
 async fn connect_upstream_websocket(
-    request: tokio_tungstenite::tungstenite::http::Request<()>,
+    mut request: ClientRequest,
     url: &str,
 ) -> Result<(
     WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>,
     tokio_tungstenite::tungstenite::http::Response<Option<Vec<u8>>>,
 )> {
     let mut last_err: Option<anyhow::Error> = None;
+    let mut current_url = url.to_string();
 
     for attempt in 1..=UPSTREAM_RETRIES {
-        match timeout(CONNECT_TIMEOUT, connect_async(request.clone())).await {
-            Ok(Ok(pair)) => return Ok(pair),
-            Ok(Err(e)) => last_err = Some(e.into()),
-            Err(e) => last_err = Some(e.into()),
+        let mut redirects = 0;
+
+        loop {
+            match timeout(CONNECT_TIMEOUT, connect_async(request.clone())).await
+            {
+                Ok(Ok(pair)) => {
+                    debug!(
+                        "Connected WebSocket upstream {}",
+                        redact_url(&current_url)
+                    );
+                    return Ok(pair);
+                }
+                Ok(Err(e)) => {
+                    if let Some((next_request, next_url)) =
+                        websocket_redirect_request(&request, &current_url, &e)?
+                    {
+                        if redirects >= MAX_WEBSOCKET_REDIRECTS {
+                            last_err = Some(anyhow::anyhow!(
+                                "too many WebSocket redirects after {MAX_WEBSOCKET_REDIRECTS} redirects"
+                            ));
+                            break;
+                        }
+
+                        redirects += 1;
+                        info!(
+                            "WebSocket upstream redirect: {} → {}",
+                            redact_url(&current_url),
+                            redact_url(&next_url)
+                        );
+                        request = next_request;
+                        current_url = next_url;
+                        continue;
+                    }
+
+                    last_err = Some(anyhow::anyhow!(
+                        websocket_connect_error_summary(&e)
+                    ));
+                }
+                Err(e) => {
+                    last_err = Some(e.into());
+                }
+            }
+
+            break;
         }
 
         if attempt < UPSTREAM_RETRIES {
             debug!(
-                "Upstream WebSocket connect to {} failed (attempt {attempt}/{UPSTREAM_RETRIES}), retrying...",
-                redact_url(url)
+                "Upstream WebSocket connect to {} failed (attempt {attempt}/{UPSTREAM_RETRIES}): {:#}",
+                redact_url(&current_url),
+                last_err
+                    .as_ref()
+                    .map(|e| e.to_string())
+                    .unwrap_or_else(|| "unknown error".to_string())
             );
             sleep(UPSTREAM_RETRY_DELAY).await;
         }
     }
 
-    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("upstream connect failed"))).with_context(
-        || {
-            format!(
-                "Failed to connect WebSocket target {} after {UPSTREAM_RETRIES} attempts",
-                redact_url(url)
+    let err =
+        last_err.unwrap_or_else(|| anyhow::anyhow!("upstream connect failed"));
+    warn!(
+        "Failed to connect WebSocket target {} after {UPSTREAM_RETRIES} attempts: {err:#}",
+        redact_url(&current_url)
+    );
+
+    Err(err).with_context(|| {
+        format!(
+            "Failed to connect WebSocket target {} after {UPSTREAM_RETRIES} attempts",
+            redact_url(&current_url)
+        )
+    })
+}
+
+fn websocket_redirect_request(
+    request: &ClientRequest,
+    current_url: &str,
+    error: &WsError,
+) -> Result<Option<(ClientRequest, String)>> {
+    let response = match error {
+        WsError::Http(response) if is_redirect_status(response.status()) => {
+            response
+        }
+        _ => return Ok(None),
+    };
+
+    let location = response
+        .headers()
+        .get(LOCATION)
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "HTTP {} redirect without Location header",
+                response.status()
             )
-        },
+        })?;
+    let next_url = websocket_redirect_url(current_url, location)?;
+    let mut next_request =
+        next_url.as_str().into_client_request().with_context(|| {
+            format!(
+                "Invalid WebSocket redirect target {}",
+                redact_url(next_url.as_str())
+            )
+        })?;
+
+    if same_redirect_host(current_url, next_url.as_str()) {
+        if let Some(value) = request.headers().get(AUTHORIZATION) {
+            next_request
+                .headers_mut()
+                .insert(AUTHORIZATION, value.clone());
+        }
+    } else if request.headers().contains_key(AUTHORIZATION) {
+        warn!(
+            "Not forwarding Authorization header across WebSocket redirect {} → {}",
+            redact_url(current_url),
+            redact_url(next_url.as_str())
+        );
+    }
+
+    Ok(Some((next_request, next_url.to_string())))
+}
+
+fn is_redirect_status(status: StatusCode) -> bool {
+    matches!(
+        status,
+        StatusCode::MOVED_PERMANENTLY
+            | StatusCode::FOUND
+            | StatusCode::SEE_OTHER
+            | StatusCode::TEMPORARY_REDIRECT
+            | StatusCode::PERMANENT_REDIRECT
     )
+}
+
+fn websocket_redirect_url(current_url: &str, location: &str) -> Result<Url> {
+    let base = Url::parse(current_url).with_context(|| {
+        format!("Invalid WebSocket URL {}", redact_url(current_url))
+    })?;
+    let parsed_location = match Url::parse(location) {
+        Ok(url) => url,
+        Err(url::ParseError::RelativeUrlWithoutBase) => base
+            .join(location)
+            .with_context(|| format!("Invalid redirect Location {location}"))?,
+        Err(e) => {
+            return Err(e).with_context(|| {
+                format!("Invalid redirect Location {location}")
+            });
+        }
+    };
+    let mut next = preserve_origin_for_same_host_websocket_redirect(
+        &base,
+        parsed_location,
+    );
+
+    match next.scheme() {
+        "http" => next
+            .set_scheme("ws")
+            .map_err(|_| anyhow::anyhow!("invalid redirect Location scheme"))?,
+        "https" => next
+            .set_scheme("wss")
+            .map_err(|_| anyhow::anyhow!("invalid redirect Location scheme"))?,
+        "ws" | "wss" => {}
+        scheme => {
+            bail!(
+                "unsupported WebSocket redirect Location scheme '{scheme}': use ws://, wss://, http://, or https://"
+            );
+        }
+    }
+
+    Ok(next)
+}
+
+fn preserve_origin_for_same_host_websocket_redirect(
+    current: &Url,
+    mut location: Url,
+) -> Url {
+    let same_host = current
+        .host_str()
+        .zip(location.host_str())
+        .map(|(current, location)| current.eq_ignore_ascii_case(location))
+        .unwrap_or(false);
+
+    if !same_host {
+        return location;
+    }
+
+    if current.port() == location.port() {
+        return location;
+    }
+
+    let location_scheme = location.scheme();
+    let current_is_ws_origin = matches!(current.scheme(), "ws" | "wss");
+    let location_is_http_origin =
+        matches!(location_scheme, "http" | "https" | "ws" | "wss");
+
+    if current_is_ws_origin && location_is_http_origin {
+        info!(
+            "WebSocket redirect Location changes port on the same host; preserving original origin {} and using redirected path {}",
+            websocket_origin_label(current),
+            location.path()
+        );
+        let _ = location.set_scheme(current.scheme());
+        let _ = location.set_port(current.port());
+    }
+
+    location
+}
+
+fn websocket_origin_label(url: &Url) -> String {
+    match url.port() {
+        Some(port) => format!(
+            "{}://{}:{port}",
+            url.scheme(),
+            url.host_str().unwrap_or("")
+        ),
+        None => format!("{}://{}", url.scheme(), url.host_str().unwrap_or("")),
+    }
+}
+
+fn same_redirect_host(current_url: &str, next_url: &str) -> bool {
+    let Ok(current) = Url::parse(current_url) else {
+        return false;
+    };
+    let Ok(next) = Url::parse(next_url) else {
+        return false;
+    };
+
+    current
+        .host_str()
+        .zip(next.host_str())
+        .map(|(current, next)| current.eq_ignore_ascii_case(next))
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redirect_http_location_to_ws() {
+        let url = websocket_redirect_url(
+            "ws://example.com/db",
+            "http://example.com/db/",
+        )
+        .unwrap();
+
+        assert_eq!(url.as_str(), "ws://example.com/db/");
+    }
+
+    #[test]
+    fn redirect_preserves_origin_when_same_host_location_changes_port() {
+        let url = websocket_redirect_url(
+            "ws://example.com/db",
+            "http://example.com:1479/db/",
+        )
+        .unwrap();
+
+        assert_eq!(url.as_str(), "ws://example.com/db/");
+    }
+
+    #[test]
+    fn redirect_keeps_cross_host_location_origin() {
+        let url = websocket_redirect_url(
+            "ws://example.com/db",
+            "http://other.example.com:1479/db/",
+        )
+        .unwrap();
+
+        assert_eq!(url.as_str(), "ws://other.example.com:1479/db/");
+    }
+
+    #[test]
+    fn redirect_resolves_relative_location() {
+        let url =
+            websocket_redirect_url("ws://example.com/db", "/db/?a=1").unwrap();
+
+        assert_eq!(url.as_str(), "ws://example.com/db/?a=1");
+    }
+
+    #[test]
+    fn redirect_rejects_non_websocket_scheme() {
+        let err = websocket_redirect_url(
+            "ws://example.com/db",
+            "ftp://example.com/db",
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("unsupported WebSocket redirect Location scheme")
+        );
+    }
+}
+
+fn websocket_connect_error_summary(error: &WsError) -> String {
+    match error {
+        WsError::Http(response) => {
+            let mut summary = format!("HTTP {}", response.status());
+            if let Some(location) = response
+                .headers()
+                .get(LOCATION)
+                .and_then(|value| value.to_str().ok())
+            {
+                summary.push_str(&format!("; location={location}"));
+            }
+            summary
+        }
+        _ => error.to_string(),
+    }
 }
 
 async fn handle_websocket_tcp(
@@ -350,6 +650,9 @@ fn validate_websocket_request(
     let actual_path = request.uri().path();
 
     if actual_path != expected_path {
+        warn!(
+            "Rejecting WebSocket client: expected path {expected_path}, got {actual_path}"
+        );
         return Err(error_response(
             StatusCode::NOT_FOUND,
             format!(
@@ -360,6 +663,9 @@ fn validate_websocket_request(
 
     if let Some(token) = token {
         if !is_authorized(request, token) {
+            warn!(
+                "Rejecting WebSocket client on path {actual_path}: missing or invalid token"
+            );
             return Err(error_response(
                 StatusCode::UNAUTHORIZED,
                 "missing or invalid token".to_string(),
@@ -407,6 +713,31 @@ fn redact_url(raw: &str) -> String {
             url.to_string()
         })
         .unwrap_or_else(|_| raw.to_string())
+}
+
+fn websocket_endpoint_label(endpoint: &WebSocketEndpoint) -> String {
+    let original = redact_url(&endpoint.original_url);
+    let websocket = redact_url(&endpoint.url);
+
+    if original == websocket {
+        websocket
+    } else {
+        format!("{original} (WebSocket upgrade as {websocket})")
+    }
+}
+
+fn log_websocket_endpoint_mapping(role: &str, endpoint: &WebSocketEndpoint) {
+    let original = redact_url(&endpoint.original_url);
+    let websocket = redact_url(&endpoint.url);
+
+    if original == websocket {
+        debug!("WebSocket {role} endpoint: {websocket}");
+    } else {
+        info!(
+            "Endpoint {role} {} is treated as WebSocket upgrade endpoint {}; it is not plain HTTP forwarding",
+            original, websocket
+        );
+    }
 }
 
 async fn proxy_tcp_websocket<S>(

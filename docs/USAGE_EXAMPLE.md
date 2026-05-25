@@ -52,8 +52,23 @@ Examples:
 5. Port relay
    zay fwd --to tcp://0.0.0.0:8080 --from tcp://127.0.0.1:80
 
-6. SSH local port forwarding
+6. Database over WebSocket gateway
+   On the database-side machine:
+   zay fwd --to http://0.0.0.0:18819/db --from tcp://db.internal:3306
+
+   On the client machine:
+   zay fwd --to tcp://127.0.0.1:8899 --from http://public.example.com/db
+
+   Connect through the local TCP port:
+   mysql -h 127.0.0.1 -P 8899 -u USER -p
+
+   Notes:
+   - The gateway should route public.example.com/db to the database-side listener.
+   - http:// endpoints are treated as WebSocket upgrade endpoints, not plain HTTP forwarding.
+   - Gateway path redirects like /db -> /db/ are followed.
+
+7. SSH local port forwarding
    zay ssh -L 3307:10.0.0.5:3306 myserver
 
-7. SSH through a jump host
+8. SSH through a jump host
    zay ssh -J bastion -L 3307:mysql.internal:3306 app-server

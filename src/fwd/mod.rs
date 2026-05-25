@@ -2,11 +2,15 @@
 
 mod server;
 
+use std::sync::Once;
+
 use anyhow::{Context, Result, bail};
-use clap::Args;
+use clap::{ArgAction, Args};
 pub use server::run;
 use tracing_subscriber::EnvFilter;
 use url::Url;
+
+static RUSTLS_PROVIDER: Once = Once::new();
 
 #[derive(Args, Debug)]
 #[command(
@@ -39,6 +43,10 @@ pub struct FwdCli {
     /// Bearer token for WebSocket authorization
     #[arg(long, value_name = "TOKEN")]
     token: Option<String>,
+
+    /// Increase diagnostic logging (-v for debug, -vv for trace)
+    #[arg(short, long, action = ArgAction::Count)]
+    verbose: u8,
 }
 
 #[derive(Debug)]
@@ -64,20 +72,37 @@ pub struct TcpEndpoint {
 
 #[derive(Debug, Clone)]
 pub struct WebSocketEndpoint {
+    pub original_url: String,
     pub url: String,
     pub bind_addr: String,
     pub path: String,
 }
 
 pub async fn run_cli(cli: FwdCli) -> Result<()> {
-    init_tracing();
+    init_rustls_provider();
+    init_tracing(cli.verbose);
     run(parse(cli)?).await
 }
 
-fn init_tracing() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .try_init();
+fn init_rustls_provider() {
+    RUSTLS_PROVIDER.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
+fn init_tracing(verbose: u8) {
+    let default_filter = match verbose {
+        0 => "zay::fwd=info",
+        1 => "zay::fwd=debug,tungstenite=info",
+        _ => "zay::fwd=trace,tungstenite=debug",
+    };
+
+    let filter = match std::env::var("RUST_LOG") {
+        Ok(value) if !value.trim().is_empty() => EnvFilter::new(value),
+        _ => EnvFilter::new(default_filter),
+    };
+
+    let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
 }
 
 fn parse(cli: FwdCli) -> Result<FwdArgs> {
@@ -115,8 +140,11 @@ fn parse_fwd_to_endpoint(raw: &str) -> Result<FwdEndpoint> {
 
     match url.scheme() {
         "tcp" => Ok(FwdEndpoint::Tcp(parse_tcp_endpoint(raw, &url)?)),
-        "ws" => Ok(FwdEndpoint::Ws(parse_websocket_endpoint(&url, false)?)),
+        "ws" => {
+            Ok(FwdEndpoint::Ws(parse_websocket_endpoint(raw, &url, false)?))
+        }
         "http" => Ok(FwdEndpoint::Ws(parse_websocket_endpoint(
+            raw,
             &with_scheme(url, "ws")?,
             false,
         )?)),
@@ -134,13 +162,17 @@ fn parse_fwd_from_endpoint(raw: &str) -> Result<FwdEndpoint> {
 
     match url.scheme() {
         "tcp" => Ok(FwdEndpoint::Tcp(parse_tcp_endpoint(raw, &url)?)),
-        "ws" => Ok(FwdEndpoint::Ws(parse_websocket_endpoint(&url, true)?)),
-        "wss" => Ok(FwdEndpoint::Wss(parse_websocket_endpoint(&url, true)?)),
+        "ws" => Ok(FwdEndpoint::Ws(parse_websocket_endpoint(raw, &url, true)?)),
+        "wss" => {
+            Ok(FwdEndpoint::Wss(parse_websocket_endpoint(raw, &url, true)?))
+        }
         "http" => Ok(FwdEndpoint::Ws(parse_websocket_endpoint(
+            raw,
             &with_scheme(url, "ws")?,
             true,
         )?)),
         "https" => Ok(FwdEndpoint::Wss(parse_websocket_endpoint(
+            raw,
             &with_scheme(url, "wss")?,
             true,
         )?)),
@@ -185,6 +217,7 @@ fn parse_tcp_endpoint(raw: &str, url: &Url) -> Result<TcpEndpoint> {
 }
 
 fn parse_websocket_endpoint(
+    original_raw: &str,
     url: &Url,
     allow_query: bool,
 ) -> Result<WebSocketEndpoint> {
@@ -195,6 +228,7 @@ fn parse_websocket_endpoint(
     }
 
     Ok(WebSocketEndpoint {
+        original_url: original_raw.to_string(),
         url: url.as_str().to_string(),
         bind_addr: url_host_port(url.as_str(), url, true)?,
         path: url_path(url),
