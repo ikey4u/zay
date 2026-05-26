@@ -107,7 +107,7 @@ If a `mixin.yaml` also writes `tun.route-exclude-address`, ensure it includes th
 
 Corporate proxy gateways:
 
-When `--tun` is enabled, Zay excludes common local/private CIDRs from Mihomo TUN auto-route by default: `10.0.0.0/8`, `100.64.0.0/10`, `127.0.0.0/8`, `169.254.0.0/16`, `172.16.0.0/12`, and `192.168.0.0/16`. If your network uses additional corporate gateway ranges, add them with `--tun-exclude` or `tun_exclude_routes`:
+When `--tun` is enabled, Zay does not exclude local/private CIDRs from Mihomo TUN auto-route by default. It only writes `tun.route-exclude-address` for explicit `--tun-exclude` / `tun_exclude_routes` values and for `[mesh].mesh_routes`. This keeps VM traffic inside the Mihomo rule engine so rules can send corporate services, such as `10.x` addresses, through a host gateway. If a CIDR must bypass Mihomo TUN, add it explicitly:
 
 ```bash
 sudo zay stack --gateway --tun --tun-exclude 11.155.134.0/24

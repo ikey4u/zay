@@ -19,15 +19,6 @@ use crate::{
     settings::{BootstrapProxy, Settings},
 };
 
-const DEFAULT_TUN_ROUTE_EXCLUDES: &[&str] = &[
-    "10.0.0.0/8",
-    "100.64.0.0/10",
-    "127.0.0.0/8",
-    "169.254.0.0/16",
-    "172.16.0.0/12",
-    "192.168.0.0/16",
-];
-
 pub fn build_config(
     settings: &Settings,
     has_mmdb: bool,
@@ -94,10 +85,7 @@ fn apply_tun_route_excludes(cfg: &mut Config, settings: &Settings) {
 }
 
 fn tun_route_excludes(settings: &Settings) -> Vec<String> {
-    let mut excludes: Vec<String> = DEFAULT_TUN_ROUTE_EXCLUDES
-        .iter()
-        .map(|cidr| (*cidr).to_string())
-        .collect();
+    let mut excludes = Vec::new();
     excludes.extend(settings.tun_exclude_routes.iter().cloned());
     if let Some(mesh_routes) = mesh::route_exclude_addresses(settings) {
         excludes.extend(mesh_routes);
@@ -333,8 +321,6 @@ mod tests {
         assert!(yaml.contains("IP-CIDR,10.126.126.0/24,DIRECT,no-resolve"));
         assert!(yaml.contains("route-exclude-address:"));
         assert!(yaml.contains("- 10.126.126.0/24"));
-        assert!(yaml.contains("- 10.0.0.0/8"));
-        assert!(yaml.contains("- 192.168.0.0/16"));
         assert!(!yaml.contains("name: EasyTier"));
     }
 
