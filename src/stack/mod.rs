@@ -112,7 +112,7 @@ pub fn run(cli: StackCli) -> Result<()> {
             .mesh
             .as_ref()
             .context("[mesh] missing in zay.toml")?;
-        easytier::start(cfg)?;
+        easytier::start(cfg, &prepared.settings.data_dir)?;
         true
     } else {
         false

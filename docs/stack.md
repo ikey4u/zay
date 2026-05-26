@@ -41,7 +41,15 @@ Every `zay stack` starts Mihomo. Flags only change the profile:
 
 EasyTier is linked as a Rust crate from GitHub and started in-process. It is not an embedded binary.
 
-The Windows package currently builds without the in-process EasyTier crate because EasyTier's Windows packet stack requires Npcap/Packet import libraries during cross-compilation. On Windows, `zay stack --mesh` returns a clear unsupported error; run EasyTier separately or use Zay mesh on macOS/Linux.
+On Windows, Zay still uses the in-process EasyTier crate. The Windows package must carry EasyTier's prebuilt packet/TUN runtime files next to `zay.exe`: `Packet.dll`, `wintun.dll`, and `WinDivert64.sys`. These are runtime driver/user-mode artifacts from the EasyTier Windows package; Zay does not build or sign Windows drivers.
+
+Run the shell as Administrator when TUN is required.
+
+The Windows package copies those files from `assets/prebuilt` by default. Override the source directory with `EASYTIER_WINDOWS_ASSETS` if needed:
+
+```bash
+make pkg EASYTIER_WINDOWS_ASSETS=/path/to/windows-runtime-files
+```
 
 `zay stack --mesh` can create `[mesh]` automatically when it is missing:
 

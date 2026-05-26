@@ -26,6 +26,8 @@ BIN_WINDOWS_X64 = target/$(TARGET_WINDOWS_X64)/release/zay.exe
 ZIP_MACOS_ARM64 = zay-macos-arm64-v$(VERSION).zip
 ZIP_LINUX_X64 = zay-linux-x64-v$(VERSION).zip
 ZIP_WINDOWS_X64 = zay-windows-x64-v$(VERSION).zip
+EASYTIER_WINDOWS_ASSETS ?= assets/prebuilt
+EASYTIER_WINDOWS_RUNTIME = Packet.dll wintun.dll WinDivert64.sys
 
 -include Makefile.local
 
@@ -88,6 +90,22 @@ define zip_binary
 	cd $(dir $(2)) && zip -j $(CURDIR)/$(DIST_DIR)/$(1) $(notdir $(2))
 endef
 
+define zip_windows_binary
+	@test -f $(2) || (echo "missing binary: $(2)" >&2; exit 1)
+	rm -f $(DIST_DIR)/$(1)
+	tmpdir=$$(mktemp -d); \
+	cp $(2) "$$tmpdir/"; \
+	for file in $(EASYTIER_WINDOWS_RUNTIME); do \
+		if [ -f "$(EASYTIER_WINDOWS_ASSETS)/$$file" ]; then \
+			cp "$(EASYTIER_WINDOWS_ASSETS)/$$file" "$$tmpdir/"; \
+		else \
+			echo "warning: missing EasyTier runtime asset: $(EASYTIER_WINDOWS_ASSETS)/$$file" >&2; \
+		fi; \
+	done; \
+	cd "$$tmpdir" && zip -j "$(CURDIR)/$(DIST_DIR)/$(1)" *; \
+	rm -rf "$$tmpdir"
+endef
+
 # Sequential cross-builds (avoid parallel cargo/zig races); Linux uses glibc 2.17 via zig.
 pkg: | $(DIST_DIR)
 	$(MAKE) macos.build-for-macos-arm64
@@ -95,5 +113,5 @@ pkg: | $(DIST_DIR)
 	$(MAKE) macos.build-for-window-x64
 	$(call zip_binary,$(ZIP_MACOS_ARM64),$(BIN_MACOS_ARM64))
 	$(call zip_binary,$(ZIP_LINUX_X64),$(BIN_LINUX_X64))
-	$(call zip_binary,$(ZIP_WINDOWS_X64),$(BIN_WINDOWS_X64))
+	$(call zip_windows_binary,$(ZIP_WINDOWS_X64),$(BIN_WINDOWS_X64))
 	@echo "packaged (v$(VERSION)): $(DIST_DIR)/$(ZIP_MACOS_ARM64) $(DIST_DIR)/$(ZIP_LINUX_X64) $(DIST_DIR)/$(ZIP_WINDOWS_X64)"
