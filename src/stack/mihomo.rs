@@ -19,6 +19,15 @@ use crate::{
     settings::{BootstrapProxy, Settings},
 };
 
+const DEFAULT_TUN_ROUTE_EXCLUDES: &[&str] = &[
+    "10.0.0.0/8",
+    "100.64.0.0/10",
+    "127.0.0.0/8",
+    "169.254.0.0/16",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+];
+
 pub fn build_config(
     settings: &Settings,
     has_mmdb: bool,
@@ -60,15 +69,42 @@ pub fn build(
             ..Default::default()
         });
     }
+    apply_tun_route_excludes(&mut cfg, settings);
 
     if let Some(bp) = settings.bootstrap_proxy.as_ref() {
-        cfg.proxies = Some(vec![Proxy::from_value(bp.proxy.clone())]);
+        cfg.proxies
+            .get_or_insert_with(Vec::new)
+            .push(Proxy::from_value(bp.proxy.clone()));
     }
     if has_builtin_rules && has_subscription {
         cfg.rule_providers = Some(rules::rule_providers_map());
     }
 
     cfg
+}
+
+fn apply_tun_route_excludes(cfg: &mut Config, settings: &Settings) {
+    let excludes = tun_route_excludes(settings);
+    if excludes.is_empty() {
+        return;
+    }
+    cfg.tun
+        .get_or_insert_with(TunConfig::default)
+        .route_exclude_address = Some(excludes);
+}
+
+fn tun_route_excludes(settings: &Settings) -> Vec<String> {
+    let mut excludes: Vec<String> = DEFAULT_TUN_ROUTE_EXCLUDES
+        .iter()
+        .map(|cidr| (*cidr).to_string())
+        .collect();
+    excludes.extend(settings.tun_exclude_routes.iter().cloned());
+    if let Some(mesh_routes) = mesh::route_exclude_addresses(settings) {
+        excludes.extend(mesh_routes);
+    }
+    excludes.sort();
+    excludes.dedup();
+    excludes
 }
 
 fn direct_config(
@@ -245,5 +281,70 @@ fn dns_tun() -> DnsConfig {
         ]),
         nameserver: Some(vec!["114.114.114.114".into(), "223.5.5.5".into()]),
         ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::build_config;
+    use crate::settings::{MeshConfig, Settings, StackFlags};
+
+    fn settings_with_mesh() -> Settings {
+        Settings {
+            subscriptions: Vec::new(),
+            data_dir: PathBuf::from("/tmp/zay-test"),
+            mixed_port: 17890,
+            allow_lan: false,
+            tun: true,
+            log_level: "info".into(),
+            health_check_url: "https://www.gstatic.com/generate_204".into(),
+            update_interval: 3600,
+            tun_exclude_routes: Vec::new(),
+            external_controller: "127.0.0.1:19090".into(),
+            api_secret: "secret".into(),
+            mixin: None,
+            bootstrap_proxy: None,
+            mesh: Some(MeshConfig {
+                instance_name: Some("zay".into()),
+                network_name: "my-network".into(),
+                network_secret: "change-me".into(),
+                dhcp: None,
+                ipv4: None,
+                listeners: None,
+                peers: None,
+                proxy_networks: None,
+                mesh_routes: Some(vec!["10.126.126.0/24".into()]),
+            }),
+            stack: StackFlags {
+                mesh: true,
+                gateway: false,
+                tun: true,
+            },
+        }
+    }
+
+    #[test]
+    fn mesh_routes_are_direct_and_excluded_from_mihomo_tun() {
+        let yaml =
+            build_config(&settings_with_mesh(), true, false, false).unwrap();
+
+        assert!(yaml.contains("IP-CIDR,10.126.126.0/24,DIRECT,no-resolve"));
+        assert!(yaml.contains("route-exclude-address:"));
+        assert!(yaml.contains("- 10.126.126.0/24"));
+        assert!(yaml.contains("- 10.0.0.0/8"));
+        assert!(yaml.contains("- 192.168.0.0/16"));
+        assert!(!yaml.contains("name: EasyTier"));
+    }
+
+    #[test]
+    fn custom_tun_excludes_are_written() {
+        let mut settings = settings_with_mesh();
+        settings.tun_exclude_routes = vec!["11.155.134.0/24".into()];
+
+        let yaml = build_config(&settings, true, false, false).unwrap();
+
+        assert!(yaml.contains("- 11.155.134.0/24"));
     }
 }

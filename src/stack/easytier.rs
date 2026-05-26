@@ -27,8 +27,21 @@ mod imp {
 
         let mut out = String::new();
         writeln!(out, "instance_name = {instance_name:?}")?;
-        if mesh.dhcp.unwrap_or(true) {
+        if let Some(ipv4) = mesh
+            .ipv4
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            if mesh.dhcp == Some(true) {
+                bail!("[mesh].ipv4 requires dhcp = false or omitted");
+            }
+            writeln!(out, "ipv4 = {ipv4:?}")?;
+            writeln!(out, "dhcp = false")?;
+        } else if mesh.dhcp.unwrap_or(true) {
             writeln!(out, "dhcp = true")?;
+        } else {
+            writeln!(out, "dhcp = false")?;
         }
         writeln!(out)?;
         writeln!(out, "[network_identity]")?;
@@ -64,12 +77,6 @@ mod imp {
                 writeln!(out, "cidr = {cidr:?}")?;
                 writeln!(out, "allow = [\"tcp\", \"udp\", \"icmp\"]")?;
             }
-        }
-
-        if mesh.no_tun.unwrap_or(false) {
-            writeln!(out)?;
-            writeln!(out, "[flags]")?;
-            writeln!(out, "no_tun = true")?;
         }
 
         Ok(out)
@@ -115,3 +122,56 @@ mod imp {
 }
 
 pub use imp::*;
+
+#[cfg(all(test, not(windows)))]
+mod tests {
+    use super::*;
+    use crate::settings::MeshConfig;
+
+    fn mesh() -> MeshConfig {
+        MeshConfig {
+            instance_name: Some("zay".into()),
+            network_name: "test-net".into(),
+            network_secret: "secret".into(),
+            dhcp: None,
+            ipv4: None,
+            listeners: None,
+            peers: None,
+            proxy_networks: None,
+            mesh_routes: None,
+        }
+    }
+
+    #[test]
+    fn emits_dhcp_by_default() {
+        let toml = to_easytier_toml(&mesh()).unwrap();
+
+        assert!(toml.contains("dhcp = true"));
+        assert!(!toml.contains("ipv4 ="));
+        assert!(!toml.contains("socks5_proxy"));
+        assert!(!toml.contains("no_tun"));
+    }
+
+    #[test]
+    fn emits_static_ipv4_and_disables_dhcp() {
+        let mut mesh = mesh();
+        mesh.ipv4 = Some("10.126.126.10/24".into());
+
+        let toml = to_easytier_toml(&mesh).unwrap();
+
+        assert!(toml.contains("ipv4 = \"10.126.126.10/24\""));
+        assert!(toml.contains("dhcp = false"));
+        assert!(!toml.contains("no_tun"));
+    }
+
+    #[test]
+    fn rejects_static_ipv4_with_dhcp_enabled() {
+        let mut mesh = mesh();
+        mesh.ipv4 = Some("10.126.126.10/24".into());
+        mesh.dhcp = Some(true);
+
+        let err = to_easytier_toml(&mesh).unwrap_err();
+
+        assert!(err.to_string().contains("requires dhcp = false"));
+    }
+}

@@ -43,16 +43,27 @@ Examples:
    - Avoid broad DIRECT rules like IP-CIDR,10.0.0.0/8,DIRECT if internal services in 10.x should go through the Host.
 
 3. Host joins private mesh and shares proxy with LAN/VM clients
-   Configure [mesh] in zay.toml first.
-   zay stack --mesh --gateway
+   Start each node with a different --mesh-ipv4. If [mesh] is missing, zay writes it to zay.toml.
+   zay stack --mesh --gateway --mesh-network-name my-network --mesh-network-secret change-me --mesh-ipv4 10.126.126.10/24 --mesh-peer tcp://public.easytier.top:11010
 
-4. Static files / SPA development server
+4. Mesh with Mihomo TUN and EasyTier ping support
+   On node A:
+   sudo zay stack --mesh --tun --mesh-network-name my-network --mesh-network-secret change-me --mesh-ipv4 10.126.126.10/24 --mesh-peer tcp://public.easytier.top:11010
+
+   On node B:
+   sudo zay stack --mesh --tun --mesh-network-name my-network --mesh-network-secret change-me --mesh-ipv4 10.126.126.11/24 --mesh-peer tcp://public.easytier.top:11010
+
+   Test from node A:
+   ping 10.126.126.11
+   ssh 10.126.126.11
+
+5. Static files / SPA development server
    zay http --root dist --spa
 
-5. Port relay
+6. Port relay
    zay fwd --to tcp://0.0.0.0:8080 --from tcp://127.0.0.1:80
 
-6. Database over WebSocket gateway
+7. Database over WebSocket gateway
    On the database-side machine:
    zay fwd --to http://0.0.0.0:18819/db --from tcp://db.internal:3306
 
@@ -67,8 +78,8 @@ Examples:
    - http:// endpoints are treated as WebSocket upgrade endpoints, not plain HTTP forwarding.
    - Gateway path redirects like /db -> /db/ are followed.
 
-7. SSH local port forwarding
+8. SSH local port forwarding
    zay ssh -L 3307:10.0.0.5:3306 myserver
 
-8. SSH through a jump host
+9. SSH through a jump host
    zay ssh -J bastion -L 3307:mysql.internal:3306 app-server

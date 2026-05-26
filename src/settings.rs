@@ -24,6 +24,8 @@ mixed_port = 7890
 log_level = "info"
 health_check_url = "http://cp.cloudflare.com/generate_204"
 update_interval = 3600
+# Extra CIDRs that Mihomo TUN should not capture. Useful for corporate proxy gateways.
+# tun_exclude_routes = ["11.155.134.0/24"]
 
 # Bootstrap proxy: used only to fetch stack proxy subscriptions when the URL is blocked on DIRECT.
 # Either a path to a YAML file (one Mihomo proxy), or an inline table — see below.
@@ -46,7 +48,8 @@ update_interval = 3600
 # network_name = "my-network"
 # network_secret = "change-me"
 # dhcp = true
-# no_tun = true
+# ipv4 = "10.126.126.10/24"
+# Mihomo TUN excludes mesh_routes, so EasyTier TUN owns these CIDRs.
 # listeners = ["tcp://0.0.0.0:11010", "udp://0.0.0.0:11010"]
 # peers = ["tcp://public.easytier.top:11010"]
 # mesh_routes = ["10.126.126.0/24"]
@@ -148,11 +151,11 @@ pub struct MeshConfig {
     pub network_name: String,
     pub network_secret: String,
     pub dhcp: Option<bool>,
-    pub no_tun: Option<bool>,
+    pub ipv4: Option<String>,
     pub listeners: Option<Vec<String>>,
     pub peers: Option<Vec<String>>,
     pub proxy_networks: Option<Vec<String>>,
-    /// Zay-only: injected as Mihomo `IP-CIDR,…,DIRECT` rules when `--mesh`.
+    /// Zay-only: injected as Mihomo `IP-CIDR,...,DIRECT` rules and TUN route excludes when `--mesh`.
     pub mesh_routes: Option<Vec<String>>,
 }
 
@@ -165,6 +168,7 @@ struct ZayFile {
     log_level: String,
     health_check_url: String,
     update_interval: u64,
+    tun_exclude_routes: Vec<String>,
     /// Mihomo `external-controller` listen address (default 127.0.0.1:19090).
     controller_port: Option<u16>,
     /// Mihomo API `secret` (auto-generated per run if omitted).
@@ -184,6 +188,7 @@ impl Default for ZayFile {
             log_level: "info".into(),
             health_check_url: "http://cp.cloudflare.com/generate_204".into(),
             update_interval: 3600,
+            tun_exclude_routes: Vec::new(),
             controller_port: None,
             api_secret: None,
             mixin: None,
@@ -218,6 +223,7 @@ pub struct Settings {
     pub log_level: String,
     pub health_check_url: String,
     pub update_interval: u64,
+    pub tun_exclude_routes: Vec<String>,
     /// `external-controller` value written into Mihomo config (e.g. `127.0.0.1:19090`).
     pub external_controller: String,
     pub api_secret: String,
@@ -435,6 +441,8 @@ fn resolve_inner(cli: &ProxyOpts, stack: StackFlags) -> Result<Settings> {
 
     let allow_lan = stack.gateway;
     let tun = stack.tun;
+    let mut tun_exclude_routes = file.tun_exclude_routes;
+    tun_exclude_routes.extend(cli.tun_exclude_routes.clone());
 
     Ok(Settings {
         subscriptions: cli.subscriptions.clone(),
@@ -448,6 +456,7 @@ fn resolve_inner(cli: &ProxyOpts, stack: StackFlags) -> Result<Settings> {
             .clone()
             .unwrap_or(file.health_check_url),
         update_interval: cli.update_interval.unwrap_or(file.update_interval),
+        tun_exclude_routes,
         external_controller: format!("127.0.0.1:{controller_port}"),
         api_secret,
         mixin,

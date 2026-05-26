@@ -30,10 +30,10 @@ Every `zay stack` starts Mihomo. Flags only change the profile:
 | `zay stack` | base direct profile | off |
 | `zay stack --gateway` | LAN mixed relay, direct egress | off |
 | `zay stack --proxy URL` | subscription providers + rules | off |
-| `zay stack --mesh` | base + mesh route rules | on |
-| `zay stack --mesh --gateway` | LAN relay + mesh route rules | on |
+| `zay stack --mesh` | base + direct mesh rules | EasyTier TUN |
+| `zay stack --mesh --gateway` | LAN relay + direct mesh rules | EasyTier TUN |
 | `zay stack --tun` | Mihomo TUN | off |
-| `zay stack --mesh --tun` | Mihomo TUN + mesh route rules | on, requires `[mesh].no_tun = true` |
+| `zay stack --mesh --tun` | Mihomo TUN excluding mesh routes | EasyTier TUN |
 
 `fwd`, `ssh`, and `http` are separate foreground subcommands, not `stack` flags.
 
@@ -43,7 +43,19 @@ EasyTier is linked as a Rust crate from GitHub and started in-process. It is not
 
 The Windows package currently builds without the in-process EasyTier crate because EasyTier's Windows packet stack requires Npcap/Packet import libraries during cross-compilation. On Windows, `zay stack --mesh` returns a clear unsupported error; run EasyTier separately or use Zay mesh on macOS/Linux.
 
-Configure mesh in `zay.toml`:
+`zay stack --mesh` can create `[mesh]` automatically when it is missing:
+
+```bash
+sudo zay stack --mesh --tun \
+  --mesh-network-name my-network \
+  --mesh-network-secret change-me \
+  --mesh-ipv4 10.126.126.10/24 \
+  --mesh-peer tcp://public.easytier.top:11010
+```
+
+The `--mesh-ipv4` address should be different on each node. If `--mesh-route` is omitted, Zay derives it from `--mesh-ipv4`, for example `10.126.126.10/24` becomes `10.126.126.0/24`. Existing `[mesh]` config is left unchanged.
+
+Equivalent manual config:
 
 ```toml
 [mesh]
@@ -51,23 +63,51 @@ instance_name = "zay"
 network_name = "my-network"
 network_secret = "change-me"
 dhcp = true
-no_tun = true
+# For a stable EasyTier virtual IP, use ipv4 and leave dhcp omitted or false.
+# ipv4 = "10.126.126.10/24"
 listeners = ["tcp://0.0.0.0:11010", "udp://0.0.0.0:11010"]
 peers = ["tcp://public.easytier.top:11010"]
 
-# Zay-only: injected into Mihomo as IP-CIDR,...,DIRECT rules
+# Zay-only: injected into Mihomo as IP-CIDR,...,DIRECT rules and TUN excludes
 mesh_routes = ["10.126.126.0/24"]
 ```
+
+Static EasyTier virtual IP:
+
+```toml
+[mesh]
+instance_name = "zay"
+network_name = "my-network"
+network_secret = "change-me"
+ipv4 = "10.126.126.10/24"
+peers = ["tcp://public.easytier.top:11010"]
+```
+
+When `ipv4` is set, Zay writes `dhcp = false` to EasyTier. Do not set `dhcp = true` together with `ipv4`.
+
+EasyTier owns the mesh CIDRs with its own TUN. Zay writes `[mesh].mesh_routes` into Mihomo `route-exclude-address` so mesh IP traffic stays on the EasyTier route when Mihomo TUN is enabled by `zay stack --tun` or by a `tun:` mixin. This keeps `ssh`, `mysql`, and `ping` to EasyTier virtual IPs on the EasyTier L3 path.
 
 TUN ownership rule:
 
 | Setup | Full-tunnel owner |
 |-------|-------------------|
-| `--mesh` + `no_tun = true` | none; EasyTier virtual IP only |
-| `--mesh` without `no_tun` | EasyTier |
+| `--mesh` | EasyTier for `mesh_routes` |
 | `--tun` | Mihomo |
-| `--mesh --tun` + `no_tun = true` | Mihomo |
-| `--mesh --tun` without `no_tun` | rejected |
+| `--mesh --tun` | Mihomo for normal traffic; EasyTier for excluded `mesh_routes` |
+
+If a `mixin.yaml` also writes `tun.route-exclude-address`, ensure it includes the mesh CIDRs because mixin values can override generated fields.
+
+Corporate proxy gateways:
+
+When `--tun` is enabled, Zay excludes common local/private CIDRs from Mihomo TUN auto-route by default: `10.0.0.0/8`, `100.64.0.0/10`, `127.0.0.0/8`, `169.254.0.0/16`, `172.16.0.0/12`, and `192.168.0.0/16`. If your network uses additional corporate gateway ranges, add them with `--tun-exclude` or `tun_exclude_routes`:
+
+```bash
+sudo zay stack --gateway --tun --tun-exclude 11.155.134.0/24
+```
+
+```toml
+tun_exclude_routes = ["11.155.134.0/24"]
+```
 
 ## Tart Host/VM
 

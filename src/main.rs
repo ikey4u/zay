@@ -110,6 +110,10 @@ pub struct ProxyOpts {
     #[clap(long, default_value_t = false, action = clap::ArgAction::SetTrue)]
     pub tun: bool,
 
+    /// CIDR excluded from Mihomo TUN auto-route (repeatable)
+    #[clap(long = "tun-exclude", value_name = "CIDR", action = clap::ArgAction::Append)]
+    pub tun_exclude_routes: Vec<String>,
+
     /// YAML mixin merged into generated proxy config
     #[clap(long, value_name = "FILE")]
     pub mixin: Option<std::path::PathBuf>,
