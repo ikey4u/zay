@@ -26,8 +26,6 @@ BIN_WINDOWS_X64 = target/$(TARGET_WINDOWS_X64)/release/zay.exe
 ZIP_MACOS_ARM64 = zay-macos-arm64-v$(VERSION).zip
 ZIP_LINUX_X64 = zay-linux-x64-v$(VERSION).zip
 ZIP_WINDOWS_X64 = zay-windows-x64-v$(VERSION).zip
-EASYTIER_WINDOWS_ASSETS ?= assets/prebuilt
-EASYTIER_WINDOWS_RUNTIME = Packet.dll wintun.dll WinDivert64.sys
 
 -include Makefile.local
 
@@ -95,11 +93,24 @@ define zip_windows_binary
 	rm -f $(DIST_DIR)/$(1)
 	tmpdir=$$(mktemp -d); \
 	cp $(2) "$$tmpdir/"; \
-	for file in $(EASYTIER_WINDOWS_RUNTIME); do \
-		if [ -f "$(EASYTIER_WINDOWS_ASSETS)/$$file" ]; then \
-			cp "$(EASYTIER_WINDOWS_ASSETS)/$$file" "$$tmpdir/"; \
+	runtime_dir=""; \
+	for dir in "$(dir $(2))build/zay-"*/out/windows-runtime; do \
+		if [ -f "$$dir/Packet.dll" ] && [ -f "$$dir/wintun.dll" ] && [ -f "$$dir/WinDivert64.sys" ]; then \
+			runtime_dir="$$dir"; \
+		fi; \
+	done; \
+	if [ -z "$$runtime_dir" ]; then \
+		echo "missing generated Windows runtime directory" >&2; \
+		rm -rf "$$tmpdir"; \
+		exit 1; \
+	fi; \
+	for file in Packet.dll wintun.dll WinDivert64.sys; do \
+		if [ -f "$$runtime_dir/$$file" ]; then \
+			cp "$$runtime_dir/$$file" "$$tmpdir/"; \
 		else \
-			echo "warning: missing EasyTier runtime asset: $(EASYTIER_WINDOWS_ASSETS)/$$file" >&2; \
+			echo "missing generated Windows runtime asset: $$file" >&2; \
+			rm -rf "$$tmpdir"; \
+			exit 1; \
 		fi; \
 	done; \
 	cd "$$tmpdir" && zip -j "$(CURDIR)/$(DIST_DIR)/$(1)" *; \

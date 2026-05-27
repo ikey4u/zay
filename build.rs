@@ -5,11 +5,27 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use sha2::{Digest, Sha256};
+
 /// Pinned Mihomo release embedded by Zay (must match `mihomo::config` types).
 const PINNED_MIHOMO_VERSION: &str = "v1.19.25";
 const CONFIG_DOCS_URL: &str = "https://raw.githubusercontent.com/MetaCubeX/mihomo/v1.19.25/docs/config.yaml";
 const RELEASE_BASE: &str =
     "https://github.com/MetaCubeX/mihomo/releases/download";
+const WINPCAP_DEV_PACK_URL: &str =
+    "https://www.winpcap.org/install/bin/WpdPack_4_1_2.zip";
+const WINPCAP_DEV_PACK_SHA256: &str =
+    "ea799cf2f26e4afb1892938070fd2b1ca37ce5cf75fec4349247df12b784edbd";
+const WINPCAP_INSTALLER_URL: &str =
+    "https://www.winpcap.org/install/bin/WinPcap_4_1_3.exe";
+const WINPCAP_INSTALLER_SHA256: &str =
+    "fc4623b113a1f603c0d9ad5f83130bd6de1c62b973be9892305132389c8588de";
+const WINTUN_URL: &str = "https://www.wintun.net/builds/wintun-0.14.1.zip";
+const WINTUN_SHA256: &str =
+    "07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51";
+const WINDIVERT_URL: &str = "https://github.com/basil00/Divert/releases/download/v2.2.2/WinDivert-2.2.2-A.zip";
+const WINDIVERT_SHA256: &str =
+    "63cb41763bb4b20f600b6de04e991a9c2be73279e317d4d82f237b150c5f3f15";
 
 /// Strip zig/cargo glibc suffix (e.g. `.2.17`) so Mihomo artifact lookup matches `*-linux-gnu`.
 fn normalize_target(target: &str) -> &str {
@@ -28,6 +44,7 @@ fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"));
 
     fetch_config_docs_template(&out_dir);
+    prepare_windows_runtime(&out_dir, target);
 
     let (artifact, ext) = artifact_for_target(&target).unwrap_or_else(|| {
         panic!("unsupported build target for embedded Mihomo: {target}")
@@ -91,6 +108,209 @@ fn fetch_config_docs_template(out_dir: &Path) {
         "cargo:rustc-env=MIHOMO_CONFIG_TAG={}",
         PINNED_MIHOMO_VERSION
     );
+}
+
+fn prepare_windows_runtime(out_dir: &Path, target: &str) {
+    if target != "x86_64-pc-windows-gnu" {
+        return;
+    }
+
+    let runtime_dir = out_dir.join("windows-runtime");
+    fs::create_dir_all(&runtime_dir)
+        .unwrap_or_else(|e| panic!("create {}: {e}", runtime_dir.display()));
+
+    prepare_winpcap(out_dir, &runtime_dir);
+    prepare_wintun(out_dir, &runtime_dir);
+    prepare_windivert(out_dir, &runtime_dir);
+}
+
+fn prepare_winpcap(out_dir: &Path, runtime_dir: &Path) {
+    let base_dir = out_dir.join("winpcap");
+    let lib_dir = base_dir.join("lib");
+    fs::create_dir_all(&lib_dir)
+        .unwrap_or_else(|e| panic!("create {}: {e}", lib_dir.display()));
+
+    let packet_lib = lib_dir.join("Packet.lib");
+    let packet_a = lib_dir.join("x86").join("libpacket.a");
+    if !packet_lib.is_file() || !packet_a.is_file() {
+        let archive = base_dir.join("WpdPack_4_1_2.zip");
+        download_if_missing(
+            WINPCAP_DEV_PACK_URL,
+            WINPCAP_DEV_PACK_SHA256,
+            &archive,
+        );
+        if !packet_lib.is_file() {
+            extract_zip_entry(
+                &archive,
+                "WpdPack/Lib/x64/Packet.lib",
+                &packet_lib,
+            )
+            .unwrap_or_else(|e| panic!("extract WinPcap Packet.lib: {e}"));
+        }
+
+        if !packet_a.is_file() {
+            if let Some(parent) = packet_a.parent() {
+                fs::create_dir_all(parent).unwrap_or_else(|e| {
+                    panic!("create {}: {e}", parent.display())
+                });
+            }
+            extract_zip_entry(&archive, "WpdPack/Lib/libpacket.a", &packet_a)
+                .unwrap_or_else(|e| panic!("extract WinPcap libpacket.a: {e}"));
+        }
+    }
+
+    let packet_dll = runtime_dir.join("Packet.dll");
+    if !packet_dll.is_file() || ensure_pe_x86_64(&packet_dll).is_err() {
+        let installer = base_dir.join("WinPcap_4_1_3.exe");
+        download_if_missing(
+            WINPCAP_INSTALLER_URL,
+            WINPCAP_INSTALLER_SHA256,
+            &installer,
+        );
+        extract_winpcap_packet_dll(&installer, &packet_dll)
+            .unwrap_or_else(|e| panic!("extract WinPcap Packet.dll: {e}"));
+    }
+
+    println!("cargo:rustc-link-search=native={}", lib_dir.display());
+    println!(
+        "cargo:rustc-env=WINPCAP_PACKET_DLL={}",
+        packet_dll.display()
+    );
+}
+
+fn prepare_wintun(out_dir: &Path, runtime_dir: &Path) {
+    let wintun_dll = runtime_dir.join("wintun.dll");
+    if wintun_dll.is_file() && ensure_pe_x86_64(&wintun_dll).is_ok() {
+        return;
+    }
+
+    let base_dir = out_dir.join("wintun");
+    let archive = base_dir.join("wintun-0.14.1.zip");
+    download_if_missing(WINTUN_URL, WINTUN_SHA256, &archive);
+    extract_zip_entry(&archive, "wintun/bin/amd64/wintun.dll", &wintun_dll)
+        .unwrap_or_else(|e| panic!("extract Wintun runtime: {e}"));
+    ensure_pe_x86_64(&wintun_dll)
+        .unwrap_or_else(|e| panic!("verify Wintun runtime: {e}"));
+}
+
+fn prepare_windivert(out_dir: &Path, runtime_dir: &Path) {
+    let windivert_sys = runtime_dir.join("WinDivert64.sys");
+    if windivert_sys.is_file() && ensure_pe_x86_64(&windivert_sys).is_ok() {
+        return;
+    }
+
+    let base_dir = out_dir.join("windivert");
+    let archive = base_dir.join("WinDivert-2.2.2-A.zip");
+    download_if_missing(WINDIVERT_URL, WINDIVERT_SHA256, &archive);
+    extract_zip_entry(
+        &archive,
+        "WinDivert-2.2.2-A/x64/WinDivert64.sys",
+        &windivert_sys,
+    )
+    .unwrap_or_else(|e| panic!("extract WinDivert runtime: {e}"));
+    ensure_pe_x86_64(&windivert_sys)
+        .unwrap_or_else(|e| panic!("verify WinDivert runtime: {e}"));
+}
+
+fn download_if_missing(url: &str, sha256: &str, dest: &Path) {
+    if dest.is_file()
+        && fs::metadata(dest).is_ok_and(|m| m.len() > 0)
+        && verify_sha256(dest, sha256).is_ok()
+    {
+        return;
+    }
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)
+            .unwrap_or_else(|e| panic!("create {}: {e}", parent.display()));
+    }
+    download(url, dest).unwrap_or_else(|e| panic!("download {url}: {e}"));
+    verify_sha256(dest, sha256)
+        .unwrap_or_else(|e| panic!("verify {url} checksum: {e}"));
+}
+
+fn verify_sha256(path: &Path, expected: &str) -> Result<(), String> {
+    let bytes = fs::read(path).map_err(|e| e.to_string())?;
+    let actual = format!("{:x}", Sha256::digest(&bytes));
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} sha256 mismatch: expected {expected}, got {actual}",
+            path.display()
+        ))
+    }
+}
+
+fn extract_zip_entry(
+    archive_path: &Path,
+    entry_name: &str,
+    dest: &Path,
+) -> Result<(), String> {
+    let file = File::open(archive_path).map_err(|e| e.to_string())?;
+    let mut zip = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+    let mut entry = zip.by_name(entry_name).map_err(|e| e.to_string())?;
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let mut output = File::create(dest).map_err(|e| e.to_string())?;
+    copy(&mut entry, &mut output).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn extract_winpcap_packet_dll(
+    installer: &Path,
+    dest: &Path,
+) -> Result<(), String> {
+    let bytes = fs::read(installer).map_err(|e| e.to_string())?;
+    let nsis = nsis::NsisInstaller::from_bytes(&bytes)
+        .map_err(|e| format!("parse NSIS installer: {e}"))?;
+    let mut candidates = Vec::new();
+
+    for file in nsis.files() {
+        let file = file.map_err(|e| e.to_string())?;
+        let name = file.name().map_err(|e| e.to_string())?.to_string();
+        let normalized = name.replace('\\', "/").to_ascii_lowercase();
+        if !normalized.ends_with("/packet.dll")
+            && normalized.as_str() != "packet.dll"
+        {
+            continue;
+        }
+
+        let content = file.decompress().map_err(|e| e.to_string())?;
+        if is_pe_x86_64_bytes(&content) {
+            candidates.push((content.len(), content));
+        }
+    }
+    candidates.sort_by_key(|(size, _)| *size);
+    let Some((_, content)) = candidates.pop() else {
+        return Err("no x86_64 Packet.dll found in WinPcap installer".into());
+    };
+    fs::write(dest, content).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn is_pe_x86_64_bytes(buf: &[u8]) -> bool {
+    if buf.len() < 0x40 || &buf[0..2] != b"MZ" {
+        return false;
+    }
+    let pe_offset =
+        u32::from_le_bytes([buf[0x3c], buf[0x3d], buf[0x3e], buf[0x3f]])
+            as usize;
+    if pe_offset + 6 > buf.len() || &buf[pe_offset..pe_offset + 4] != b"PE\0\0"
+    {
+        return false;
+    }
+    let machine = u16::from_le_bytes([buf[pe_offset + 4], buf[pe_offset + 5]]);
+    machine == 0x8664
+}
+
+fn ensure_pe_x86_64(path: &Path) -> Result<(), String> {
+    let bytes = fs::read(path).map_err(|e| e.to_string())?;
+    if is_pe_x86_64_bytes(&bytes) {
+        Ok(())
+    } else {
+        Err(format!("{} is not an x86_64 PE file", path.display()))
+    }
 }
 
 fn emit_rustc_env(embed_path: &Path, version: &str) {
