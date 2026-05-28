@@ -4,13 +4,7 @@ pub mod easytier;
 pub mod mesh;
 pub mod mihomo;
 
-use std::{
-    fs,
-    net::Ipv4Addr,
-    path::{Path, PathBuf},
-    process::Child,
-    sync::Arc,
-};
+use std::{fs, net::Ipv4Addr, path::PathBuf, process::Child, sync::Arc};
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
@@ -18,9 +12,7 @@ use clap::Args;
 use crate::{
     ProxyOpts, api, assets, bootstrap,
     mihomo::geo,
-    settings::{
-        Settings, StackFlags, ZAY_TOML_FILE, default_data_dir, default_zay_toml,
-    },
+    settings::{self as zay_settings, Settings, StackFlags, default_zay_toml},
 };
 
 const LONG_ABOUT: &str = "Run the network stack: local proxy, LAN/VM gateway, private mesh, and TUN capture.";
@@ -273,21 +265,10 @@ fn ensure_mesh_config_from_stack(
 }
 
 fn stack_config_paths(common: &ProxyOpts) -> (PathBuf, PathBuf) {
-    let data_dir = common
-        .data_dir
-        .clone()
-        .or_else(|| {
-            common
-                .config
-                .as_ref()
-                .and_then(|p| p.parent().map(Path::to_path_buf))
-        })
-        .unwrap_or_else(default_data_dir);
-    let toml_path = common
-        .config
-        .clone()
-        .unwrap_or_else(|| data_dir.join(ZAY_TOML_FILE));
-    (data_dir, toml_path)
+    zay_settings::stack_config_paths(
+        common.data_dir.as_deref(),
+        common.config.as_deref(),
+    )
 }
 
 fn mesh_config_toml(

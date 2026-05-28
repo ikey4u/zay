@@ -349,7 +349,28 @@ fn load_zay_toml(path: &Path) -> Result<ZayFile> {
     toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))
 }
 
-fn ensure_zay_toml(data_dir: &Path, toml_path: &Path) -> Result<()> {
+pub fn stack_config_paths(
+    data_dir: Option<&Path>,
+    config: Option<&Path>,
+) -> (PathBuf, PathBuf) {
+    let data_dir = data_dir
+        .map(Path::to_path_buf)
+        .or_else(|| config.map(config_parent_dir))
+        .unwrap_or_else(default_data_dir);
+    let toml_path = config
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| data_dir.join(ZAY_TOML_FILE));
+    (data_dir, toml_path)
+}
+
+fn config_parent_dir(path: &Path) -> PathBuf {
+    path.parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+pub fn ensure_zay_toml(data_dir: &Path, toml_path: &Path) -> Result<()> {
     fs::create_dir_all(data_dir)
         .with_context(|| format!("creating data dir {}", data_dir.display()))?;
     if toml_path.is_file() {
@@ -388,20 +409,8 @@ pub fn resolve_stack(cli: &ProxyOpts, stack: StackFlags) -> Result<Settings> {
 }
 
 fn resolve_inner(cli: &ProxyOpts, stack: StackFlags) -> Result<Settings> {
-    let data_dir = cli
-        .data_dir
-        .clone()
-        .or_else(|| {
-            cli.config
-                .as_ref()
-                .and_then(|p| p.parent().map(Path::to_path_buf))
-        })
-        .unwrap_or_else(default_data_dir);
-
-    let toml_path = cli
-        .config
-        .clone()
-        .unwrap_or_else(|| data_dir.join(ZAY_TOML_FILE));
+    let (data_dir, toml_path) =
+        stack_config_paths(cli.data_dir.as_deref(), cli.config.as_deref());
 
     ensure_zay_toml(&data_dir, &toml_path)?;
     let file = load_zay_toml(&toml_path)?;
@@ -528,6 +537,26 @@ mod tests {
         let mixin = parsed.mihomo.mixin.unwrap();
         assert!(mixin.contains("[mihomo].mixin"));
         assert!(mixin.contains("rules:"));
+    }
+
+    #[test]
+    fn config_path_uses_current_dir_for_bare_config_file() {
+        let (data_dir, toml_path) =
+            stack_config_paths(None, Some(Path::new("zay.toml")));
+
+        assert_eq!(data_dir, PathBuf::from("."));
+        assert_eq!(toml_path, PathBuf::from("zay.toml"));
+    }
+
+    #[test]
+    fn explicit_data_dir_and_config_are_preserved() {
+        let (data_dir, toml_path) = stack_config_paths(
+            Some(Path::new("/tmp/zay-data")),
+            Some(Path::new("/tmp/zay-config/zay.toml")),
+        );
+
+        assert_eq!(data_dir, PathBuf::from("/tmp/zay-data"));
+        assert_eq!(toml_path, PathBuf::from("/tmp/zay-config/zay.toml"));
     }
 
     #[test]

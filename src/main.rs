@@ -1,6 +1,7 @@
 mod api;
 mod assets;
 mod bootstrap;
+mod config;
 mod fwd;
 mod http;
 mod mihomo;
@@ -22,6 +23,11 @@ Network stack:
   zay stack --gateway
   zay stack --proxy "https://..." --gateway
   zay stack --help
+
+Configuration:
+  zay config dump
+  zay config set mixed_port 7891
+  zay config edit
 
 Port relay and SSH tunnels:
   zay fwd --to tcp://0.0.0.0:8080 --from tcp://127.0.0.1:80
@@ -58,6 +64,8 @@ pub struct Cli {
 pub enum Command {
     /// Run the network stack: proxy, mesh, gateway, and TUN
     Stack(stack::StackCli),
+    /// Inspect and edit zay.toml
+    Config(config::ConfigCli),
     /// Serve a static directory over HTTP/HTTPS
     Http(http::HttpCli),
     /// Forward TCP streams directly or over WebSocket
@@ -123,6 +131,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Stack(stack) => stack::run(stack),
+        Command::Config(config) => config::run(config),
         Command::Http(http) => run_http(http),
         Command::Fwd(fwd) => run_fwd(fwd),
         Command::Ssh(ssh) => run_ssh(ssh),
