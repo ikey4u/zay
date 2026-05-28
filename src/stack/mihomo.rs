@@ -292,7 +292,7 @@ mod tests {
             tun_exclude_routes: Vec::new(),
             external_controller: "127.0.0.1:19090".into(),
             api_secret: "secret".into(),
-            mixin: None,
+            mihomo_mixin: None,
             bootstrap_proxy: None,
             mesh: Some(MeshConfig {
                 instance_name: Some("zay".into()),

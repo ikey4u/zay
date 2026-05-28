@@ -78,7 +78,7 @@ pub struct ProxyOpts {
     )]
     pub subscriptions: Vec<String>,
 
-    /// Zay config directory (zay.toml, mixin.yaml, and runtime files)
+    /// Zay config directory (zay.toml and runtime files)
     #[clap(short, long, value_name = "DIR")]
     pub data_dir: Option<std::path::PathBuf>,
 
@@ -113,10 +113,6 @@ pub struct ProxyOpts {
     /// CIDR excluded from Mihomo TUN auto-route (repeatable)
     #[clap(long = "tun-exclude", value_name = "CIDR", action = clap::ArgAction::Append)]
     pub tun_exclude_routes: Vec<String>,
-
-    /// YAML mixin merged into generated proxy config
-    #[clap(long, value_name = "FILE")]
-    pub mixin: Option<std::path::PathBuf>,
 
     /// Bootstrap proxy YAML used to fetch remote subscriptions
     #[clap(long, value_name = "FILE")]

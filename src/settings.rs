@@ -14,52 +14,11 @@ pub const ZAY_TOML_FILE: &str = "zay.toml";
 /// Mihomo runtime home under the Zay config directory (`config.yaml`, geo, ruleset, providers, …).
 pub const MIHOMO_DIR: &str = "mihomo";
 
-pub const DEFAULT_ZAY_TOML: &str = r#"# Zay – simple settings (edit this file, then: zay stack)
-# Stack proxy URL(s) on the CLI: zay stack --proxy "https://..." [--proxy "https://..."]
-# YAML mixin (merged into mihomo/config.yaml): see mixin.yaml in this directory
-# Mihomo runtime files (config, geo, ruleset, providers) live in ./mihomo/
-# Reference: mihomo/config.template.yaml (upstream docs/config.yaml, created on first run)
-
-mixed_port = 7890
-log_level = "info"
-health_check_url = "http://cp.cloudflare.com/generate_204"
-update_interval = 3600
-# Extra CIDRs that Mihomo TUN should not capture. Useful for corporate proxy gateways.
-# tun_exclude_routes = ["11.155.134.0/24"]
-
-# Bootstrap proxy: used only to fetch stack proxy subscriptions when the URL is blocked on DIRECT.
-# Either a path to a YAML file (one Mihomo proxy), or an inline table — see below.
-# bootstrap_proxy = "bootstrap.yaml"
-#
-# [bootstrap_proxy]
-# name = "Bootstrap"
-# type = "ss"
-# server = "1.2.3.4"
-# port = 8388
-# cipher = "aes-256-gcm"
-# password = "secret"
-
-# Path to YAML mixin file (default: mixin.yaml in data dir, see examples inside)
-# mixin = "mixin.yaml"
-
-# EasyTier mesh (used with: zay stack --mesh). See docs/stack.md — no separate easytier.toml.
-# [mesh]
-# instance_name = "zay"
-# network_name = "my-network"
-# network_secret = "change-me"
-# dhcp = true
-# ipv4 = "10.126.126.10/24"
-# Mihomo TUN excludes mesh_routes, so EasyTier TUN owns these CIDRs.
-# listeners = ["tcp://0.0.0.0:11010", "udp://0.0.0.0:11010"]
-# peers = ["tcp://public.easytier.top:11010"]
-# mesh_routes = ["10.126.126.0/24"]
-"#;
-
 pub const DEFAULT_MIXIN: &str = r#"# =============================================================================
-# mixin.yaml — 合并进 Zay 生成的 config.yaml（可选）
+# [mihomo].mixin — 合并进 Zay 生成的 config.yaml（可选）
 # =============================================================================
 #
-# 位置：<数据目录>/mixin.yaml（默认 ~/.config/zay/mixin.yaml；Mihomo 文件在 mihomo/ 子目录）
+# 位置：zay.toml 中的 [mihomo].mixin；Mihomo 文件在 mihomo/ 子目录
 #
 # 用法：
 #   1. 取消下方示例的行首 #，或自行添加 YAML
@@ -144,6 +103,57 @@ pub const DEFAULT_MIXIN: &str = r#"# ===========================================
 #
 "#;
 
+pub fn default_zay_toml() -> String {
+    let mut raw = String::from(
+        r#"# Zay – simple settings (edit this file, then: zay stack)
+# Stack proxy URL(s) on the CLI: zay stack --proxy "https://..." [--proxy "https://..."]
+# Mihomo runtime files (config, geo, ruleset, providers) live in ./mihomo/
+# Reference: mihomo/config.template.yaml (upstream docs/config.yaml, created on first run)
+
+mixed_port = 7890
+log_level = "info"
+health_check_url = "http://cp.cloudflare.com/generate_204"
+update_interval = 3600
+# Extra CIDRs that Mihomo TUN should not capture. Useful for corporate proxy gateways.
+# tun_exclude_routes = ["11.155.134.0/24"]
+
+# Bootstrap proxy: used only to fetch stack proxy subscriptions when the URL is blocked on DIRECT.
+# Either a path to a YAML file (one Mihomo proxy), or an inline table — see below.
+# bootstrap_proxy = "bootstrap.yaml"
+#
+# [bootstrap_proxy]
+# name = "Bootstrap"
+# type = "ss"
+# server = "1.2.3.4"
+# port = 8388
+# cipher = "aes-256-gcm"
+# password = "secret"
+
+[mihomo]
+# YAML mixin merged into generated mihomo/config.yaml.
+mixin = '''
+"#,
+    );
+    raw.push_str(DEFAULT_MIXIN);
+    raw.push_str(
+        r#"'''
+
+# EasyTier mesh (used with: zay stack --mesh). See docs/stack.md — no separate easytier.toml.
+# [mesh]
+# instance_name = "zay"
+# network_name = "my-network"
+# network_secret = "change-me"
+# dhcp = true
+# ipv4 = "10.126.126.10/24"
+# Mihomo TUN excludes mesh_routes, so EasyTier TUN owns these CIDRs.
+# listeners = ["tcp://0.0.0.0:11010", "udp://0.0.0.0:11010"]
+# peers = ["tcp://public.easytier.top:11010"]
+# mesh_routes = ["10.126.126.0/24"]
+"#,
+    );
+    raw
+}
+
 /// EasyTier mesh section in `zay.toml` (see `docs/stack.md`).
 #[derive(Debug, Clone, Deserialize)]
 pub struct MeshConfig {
@@ -173,10 +183,16 @@ struct ZayFile {
     controller_port: Option<u16>,
     /// Mihomo API `secret` (auto-generated per run if omitted).
     api_secret: Option<String>,
-    mixin: Option<String>,
+    mihomo: MihomoFile,
     /// Path to a YAML file, or omit when using `[bootstrap_proxy]` table.
     bootstrap_proxy: Option<TomlValue>,
     mesh: Option<MeshConfig>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+struct MihomoFile {
+    mixin: Option<String>,
 }
 
 impl Default for ZayFile {
@@ -191,7 +207,7 @@ impl Default for ZayFile {
             tun_exclude_routes: Vec::new(),
             controller_port: None,
             api_secret: None,
-            mixin: None,
+            mihomo: MihomoFile::default(),
             bootstrap_proxy: None,
             mesh: None,
         }
@@ -227,7 +243,8 @@ pub struct Settings {
     /// `external-controller` value written into Mihomo config (e.g. `127.0.0.1:19090`).
     pub external_controller: String,
     pub api_secret: String,
-    pub mixin: Option<PathBuf>,
+    /// Inline YAML mixin from `[mihomo].mixin`.
+    pub mihomo_mixin: Option<String>,
     pub bootstrap_proxy: Option<BootstrapProxy>,
     pub mesh: Option<MeshConfig>,
     pub stack: StackFlags,
@@ -241,12 +258,6 @@ impl Settings {
 
     pub fn config_path(&self) -> PathBuf {
         self.mihomo_dir().join("config.yaml")
-    }
-
-    pub fn mixin_path(&self) -> PathBuf {
-        self.mixin
-            .clone()
-            .unwrap_or_else(|| self.data_dir.join("mixin.yaml"))
     }
 
     /// Mihomo `proxy-providers` name for subscription at `index` (`sub0`, `sub1`, …).
@@ -344,27 +355,9 @@ fn ensure_zay_toml(data_dir: &Path, toml_path: &Path) -> Result<()> {
     if toml_path.is_file() {
         return Ok(());
     }
-    fs::write(toml_path, DEFAULT_ZAY_TOML)
+    fs::write(toml_path, default_zay_toml())
         .with_context(|| format!("writing {}", toml_path.display()))?;
     eprintln!("created default config at {}", toml_path.display());
-    Ok(())
-}
-
-pub fn ensure_default_mixin(settings: &Settings) -> Result<()> {
-    let mixin_path = settings.mixin_path();
-    if mixin_path.is_file() {
-        return Ok(());
-    }
-    if let Some(parent) = mixin_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
-    }
-    fs::write(&mixin_path, DEFAULT_MIXIN)
-        .with_context(|| format!("writing {}", mixin_path.display()))?;
-    eprintln!(
-        "created default mixin at {} (rule examples in comments)",
-        mixin_path.display()
-    );
     Ok(())
 }
 
@@ -413,16 +406,7 @@ fn resolve_inner(cli: &ProxyOpts, stack: StackFlags) -> Result<Settings> {
     ensure_zay_toml(&data_dir, &toml_path)?;
     let file = load_zay_toml(&toml_path)?;
 
-    let mixin = cli.mixin.clone().or_else(|| {
-        file.mixin.map(|rel| {
-            let path = PathBuf::from(&rel);
-            if path.is_absolute() {
-                path
-            } else {
-                toml_path.parent().unwrap_or(&data_dir).join(path)
-            }
-        })
-    });
+    let mihomo_mixin = file.mihomo.mixin;
 
     let bootstrap_proxy = if let Some(path) = &cli.bootstrap_proxy {
         Some(proxy::load_from_yaml_file(path)?)
@@ -459,7 +443,7 @@ fn resolve_inner(cli: &ProxyOpts, stack: StackFlags) -> Result<Settings> {
         tun_exclude_routes,
         external_controller: format!("127.0.0.1:{controller_port}"),
         api_secret,
-        mixin,
+        mihomo_mixin,
         bootstrap_proxy,
         mesh: file.mesh,
         stack,
@@ -536,6 +520,15 @@ mod tests {
     use std::fs;
 
     use super::*;
+
+    #[test]
+    fn default_config_contains_inline_mihomo_mixin() {
+        let parsed: ZayFile = toml::from_str(&default_zay_toml()).unwrap();
+
+        let mixin = parsed.mihomo.mixin.unwrap();
+        assert!(mixin.contains("[mihomo].mixin"));
+        assert!(mixin.contains("rules:"));
+    }
 
     #[test]
     fn cleanup_removes_orphan_provider_caches() {

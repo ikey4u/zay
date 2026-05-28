@@ -381,19 +381,13 @@ pub fn finalize_config(
     let mut config: Value = serde_yaml::from_str(&base_config)
         .context("parsing generated config as YAML")?;
 
-    let mixin_path = settings.mixin_path();
-    if mixin_path.is_file() {
-        let mixin_raw = fs::read_to_string(&mixin_path).with_context(|| {
-            format!("reading mixin {}", mixin_path.display())
-        })?;
-        if !mixin_is_comments_only(&mixin_raw) {
-            eprintln!("merging mixin from {}", mixin_path.display());
-            let overlay: Value = serde_yaml::from_str(&mixin_raw)
-                .with_context(|| {
-                    format!("parsing mixin {}", mixin_path.display())
-                })?;
-            apply_mixin_overlay(&mut config, overlay);
-        }
+    if let Some(mixin_raw) = settings.mihomo_mixin.as_deref()
+        && !mixin_is_comments_only(mixin_raw)
+    {
+        eprintln!("merging mixin from [mihomo].mixin");
+        let overlay: Value = serde_yaml::from_str(mixin_raw)
+            .context("parsing [mihomo].mixin")?;
+        apply_mixin_overlay(&mut config, overlay);
     }
 
     serde_yaml::to_string(&config).context("serializing final config")
@@ -420,9 +414,12 @@ pub fn publish_config(
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use serde_yaml::Value as YamlValue;
 
     use super::*;
+    use crate::settings::StackFlags;
 
     #[test]
     fn merge_proxy_groups_unions_proxies_by_name() {
@@ -467,6 +464,37 @@ proxy-groups:
             overlay.get("rules").unwrap().clone(),
         );
         let rules = base.get("rules").unwrap().as_sequence().unwrap();
+        assert_eq!(rules[0].as_str().unwrap(), "DOMAIN,example.com,DIRECT");
+    }
+
+    #[test]
+    fn finalize_config_merges_inline_mihomo_mixin() {
+        let settings = Settings {
+            subscriptions: Vec::new(),
+            data_dir: PathBuf::from("/tmp/zay-test"),
+            mixed_port: 7890,
+            allow_lan: false,
+            tun: false,
+            log_level: "info".into(),
+            health_check_url: "http://cp.cloudflare.com/generate_204".into(),
+            update_interval: 3600,
+            tun_exclude_routes: Vec::new(),
+            external_controller: "127.0.0.1:19090".into(),
+            api_secret: "secret".into(),
+            mihomo_mixin: Some(
+                "rules:\n  - DOMAIN,example.com,DIRECT\n".into(),
+            ),
+            bootstrap_proxy: None,
+            mesh: None,
+            stack: StackFlags::default(),
+        };
+
+        let yaml =
+            finalize_config(&settings, "rules:\n  - MATCH,Proxy\n".into())
+                .unwrap();
+
+        let merged: YamlValue = serde_yaml::from_str(&yaml).unwrap();
+        let rules = merged.get("rules").unwrap().as_sequence().unwrap();
         assert_eq!(rules[0].as_str().unwrap(), "DOMAIN,example.com,DIRECT");
     }
 }

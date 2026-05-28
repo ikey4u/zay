@@ -13,10 +13,12 @@ Examples:
    zay stack --gateway --proxy "https://subscription.example" --mixed-port 7890
 
    On the VM:
-   1. Put this in the VM data dir as mixin.yaml.
+   1. Put this in the VM data dir's zay.toml.
    2. Replace 192.168.64.1 if your Tart host gateway IP is different.
 
-   mixin.yaml:
+   zay.toml:
+     [mihomo]
+     mixin = '''
      mode: rule
      proxies:
        - name: Host
@@ -34,6 +36,7 @@ Examples:
        - IP-CIDR,169.254.0.0/16,DIRECT,no-resolve
        - IP-CIDR6,fc00::/7,DIRECT,no-resolve
        - MATCH,Host
+     '''
 
    Start the VM stack with TUN enabled:
    sudo zay stack --tun --mixed-port 7890

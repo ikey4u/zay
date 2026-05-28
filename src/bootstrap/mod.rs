@@ -61,8 +61,6 @@ fn prepare_inner(settings: Settings) -> Result<Prepared> {
             settings.subscriptions.len(),
         );
     }
-    zay_settings::ensure_default_mixin(&settings)?;
-
     let has_rules = rules::files_present(&settings.mihomo_dir());
     if !has_rules {
         if settings.subscriptions.is_empty() {
@@ -108,7 +106,7 @@ fn prepare_inner(settings: Settings) -> Result<Prepared> {
 
     let tun_enabled = settings.tun || mihomo::config_has_tun(&config_yaml);
     if tun_enabled && !settings.tun {
-        eprintln!("TUN enabled in merged config (e.g. mixin.yaml)");
+        eprintln!("TUN enabled in merged config (e.g. [mihomo].mixin)");
     }
 
     Ok(Prepared {

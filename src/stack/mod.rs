@@ -19,7 +19,7 @@ use crate::{
     ProxyOpts, api, assets, bootstrap,
     mihomo::geo,
     settings::{
-        DEFAULT_ZAY_TOML, Settings, StackFlags, ZAY_TOML_FILE, default_data_dir,
+        Settings, StackFlags, ZAY_TOML_FILE, default_data_dir, default_zay_toml,
     },
 };
 
@@ -202,7 +202,7 @@ fn ensure_stack_config_exists(common: &ProxyOpts) -> Result<()> {
     }
     fs::create_dir_all(&data_dir)
         .with_context(|| format!("creating data dir {}", data_dir.display()))?;
-    fs::write(&toml_path, DEFAULT_ZAY_TOML)
+    fs::write(&toml_path, default_zay_toml())
         .with_context(|| format!("writing {}", toml_path.display()))?;
     eprintln!("created default config at {}", toml_path.display());
     Ok(())

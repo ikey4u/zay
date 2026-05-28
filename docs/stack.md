@@ -17,9 +17,8 @@ Common options:
 | `--gateway` | Enable LAN mixed relay (`allow-lan`, direct gateway profile). |
 | `--tun` | Enable Mihomo TUN. Requires root/admin privileges. |
 | `--mixed-port PORT` | Mixed HTTP/SOCKS port. Default from `zay.toml`, usually `7890`. |
-| `-d, --data-dir DIR` | Directory containing `zay.toml`, `mixin.yaml`, and `mihomo/`. |
+| `-d, --data-dir DIR` | Directory containing `zay.toml` and `mihomo/`. |
 | `-c, --config FILE` | Explicit `zay.toml` path. |
-| `--mixin FILE` | YAML mixin merged into generated Mihomo config. |
 
 ## Process Model
 
@@ -99,7 +98,7 @@ TUN ownership rule:
 | `--tun` | Mihomo |
 | `--mesh --tun` | Mihomo for normal traffic; EasyTier for excluded `mesh_routes` |
 
-If a `mixin.yaml` also writes `tun.route-exclude-address`, ensure it includes the mesh CIDRs because mixin values can override generated fields.
+If `[mihomo].mixin` also writes `tun.route-exclude-address`, ensure it includes the mesh CIDRs because mixin values can override generated fields.
 
 Corporate proxy gateways:
 
@@ -133,9 +132,11 @@ VM TUN through host SOCKS:
 sudo zay stack --tun -d ~/.config/zay --mixed-port 7890
 ```
 
-VM `mixin.yaml`:
+VM `zay.toml`:
 
-```yaml
+```toml
+[mihomo]
+mixin = '''
 mode: rule
 
 proxies:
@@ -159,6 +160,7 @@ rules:
   - IP-CIDR6,fc00::/7,DIRECT,no-resolve
 
   - MATCH,Host
+'''
 ```
 
 Avoid broad `IP-CIDR,10.0.0.0/8,DIRECT` if corporate services live in `10.x.x.x` and should route through the host.
