@@ -133,17 +133,8 @@ pub fn spawn(
 
     #[cfg(unix)]
     if privileged && !crate::privilege::is_root() {
-        crate::privilege::ensure_sudo_for_tun()?;
-        return crate::privilege::spawn_via_sudo(
-            binary,
-            &[
-                "-d",
-                config_dir.to_str().context("non-UTF8 config dir")?,
-                "-f",
-                config_path.to_str().context("non-UTF8 config path")?,
-            ],
-            &mihomo_dir,
-            quiet,
+        anyhow::bail!(
+            "TUN mode requires root privileges; elevation should have happened in `zay stack`"
         );
     }
 

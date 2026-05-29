@@ -21,7 +21,6 @@ axum-server = { version = "0.7", features = ["tls-rustls"] }
 clap = { version = "4", features = ["derive"] }
 ctrlc = "3.4"
 dirs-next = "2"
-rpassword = "7"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 serde = { version = "1", features = ["derive"] }

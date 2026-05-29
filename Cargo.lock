@@ -4724,17 +4724,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rpassword"
-version = "7.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ac5b223d9738ef56e0b98305410be40fa0941bf6036c56f1506751e43552d64"
-dependencies = [
- "libc",
- "rtoolbox",
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "rsa"
 version = "0.10.0-rc.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4751,16 +4740,6 @@ dependencies = [
  "signature",
  "spki",
  "zeroize",
-]
-
-[[package]]
-name = "rtoolbox"
-version = "0.0.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "50a0e551c1e27e1731aba276dbeaeac73f53c7cd34d1bda485d02bd1e0f36844"
-dependencies = [
- "libc",
- "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5558,6 +5537,17 @@ name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
+
+[[package]]
+name = "sudo2"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c6ea68622345f3315c2cbd365edfc5bcbb22edddb1b8f2cf0b515605340bc6de"
+dependencies = [
+ "libc",
+ "tracing",
+ "wildmatch",
+]
 
 [[package]]
 name = "syn"
@@ -7286,7 +7276,6 @@ dependencies = [
  "nsis",
  "once_cell",
  "reqwest",
- "rpassword",
  "russh",
  "rustls",
  "serde",
@@ -7294,6 +7283,7 @@ dependencies = [
  "serde_yaml",
  "sha2 0.10.9",
  "ssh2-config",
+ "sudo2",
  "tokio",
  "tokio-tungstenite",
  "toml",

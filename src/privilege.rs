@@ -1,83 +1,54 @@
-use std::{
-    io::Write,
-    path::Path,
-    process::{Child, Command, Stdio},
-};
+use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
+
+const NO_ELEVATION_TOOL_MSG: &str = "\
+TUN mode requires administrator privileges, but no elevation tool was found in PATH.
+
+Install sudo (apt install sudo) or doas (apk add doas), or run as root:
+  su -c 'zay stack --tun …'";
+
+fn command_in_path(program: &str) -> bool {
+    std::env::var_os("PATH")
+        .map(|paths| {
+            std::env::split_paths(&paths).any(|dir| dir.join(program).is_file())
+        })
+        .unwrap_or(false)
+}
 
 pub fn is_root() -> bool {
     unsafe { libc::geteuid() == 0 }
 }
 
-fn sudo_non_interactive_ok() -> bool {
-    Command::new("sudo")
-        .args(["-n", "true"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-fn read_sudo_password() -> Result<String> {
-    eprint!("TUN requires administrator access. Password: ");
-    std::io::stderr().flush()?;
-    rpassword::read_password().context("reading password")
-}
-
-fn sudo_validate_password(password: &str) -> Result<()> {
-    let mut child = Command::new("sudo")
-        .args(["-S", "-p", "", "-v"])
-        .stdin(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .context("starting sudo")?;
-    writeln!(child.stdin.as_mut().unwrap(), "{password}")
-        .context("sending password to sudo")?;
-    let status = child.wait().context("waiting for sudo")?;
-    if !status.success() {
-        bail!("sudo authentication failed");
+fn elevation_wrapper() -> Result<&'static str> {
+    if command_in_path("sudo") {
+        Ok("sudo")
+    } else if command_in_path("doas") {
+        Ok("doas")
+    } else {
+        bail!(NO_ELEVATION_TOOL_MSG);
     }
-    Ok(())
 }
 
-/// Ask for sudo password when needed; reuse cached sudo ticket when available.
-pub fn ensure_sudo_for_tun() -> Result<()> {
+/// Re-exec this process with raised privileges when TUN is enabled and we are not root.
+/// Invokes the system `sudo` or `doas` binary (which may be sudo-rs on newer distros).
+pub fn elevate_self_for_tun() -> Result<()> {
     if is_root() {
         return Ok(());
     }
-    if sudo_non_interactive_ok() {
-        eprintln!("using cached sudo credentials");
-        return Ok(());
-    }
-    let password = read_sudo_password()?;
-    sudo_validate_password(&password)?;
-    eprintln!("administrator access granted");
-    Ok(())
-}
 
-pub fn spawn_via_sudo(
-    program: &Path,
-    args: &[&str],
-    cwd: &Path,
-    quiet: bool,
-) -> Result<Child> {
-    let mut cmd = Command::new("sudo");
-    cmd.args(["-n", "-E", "--"])
-        .arg(program)
-        .args(args)
-        .current_dir(cwd)
-        .stdin(Stdio::null());
+    let wrapper = elevation_wrapper()?;
+    let exe = std::env::current_exe().context("reading current executable")?;
+    let args: Vec<String> = std::env::args().skip(1).collect();
 
-    if quiet {
-        cmd.stdout(Stdio::null()).stderr(Stdio::null());
-    } else {
-        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-    }
+    let status = Command::new(wrapper)
+        .arg(&exe)
+        .args(&args)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .with_context(|| format!("re-executing via {wrapper} (TUN mode)"))?;
 
-    cmd.spawn().with_context(|| {
-        format!("starting proxy via sudo at {}", program.display())
-    })
+    std::process::exit(status.code().unwrap_or(1));
 }

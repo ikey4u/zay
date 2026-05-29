@@ -95,6 +95,12 @@ pub fn run(cli: StackCli) -> Result<()> {
     ensure_stack_config_exists(&cli.common)?;
     ensure_mesh_config_from_stack(&cli, flags)?;
     let prepared = bootstrap::prepare_stack(&cli.common, flags)?;
+
+    #[cfg(unix)]
+    if prepared.tun_enabled {
+        crate::privilege::elevate_self_for_tun()?;
+    }
+
     eprintln!("config dir → {}", prepared.settings.data_dir.display());
     eprintln!("mihomo dir → {}", prepared.settings.mihomo_dir().display());
 
@@ -131,9 +137,6 @@ pub fn run(cli: StackCli) -> Result<()> {
     );
 
     let config_path = state.settings.config_path();
-    if state.tun_enabled {
-        eprintln!("TUN enabled – elevated privileges required");
-    }
 
     let mut child = match spawn_mihomo(
         &engine,
