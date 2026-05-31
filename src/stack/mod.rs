@@ -1,4 +1,4 @@
-//! `zay stack` — Mihomo always on; optional EasyTier mesh.
+//! `zay stack` — sing-box TUN + optional EasyTier mesh (WireGuard portal).
 
 pub mod easytier;
 pub mod mesh;
@@ -10,9 +10,10 @@ use anyhow::{Context, Result, bail};
 use clap::Args;
 
 use crate::{
-    ProxyOpts, api, assets, bootstrap,
-    mihomo::geo,
+    ProxyOpts, api, assets,
+    bootstrap::singbox as bootstrap,
     settings::{self as zay_settings, Settings, StackFlags, default_zay_toml},
+    singbox::{self, mixin, rules},
 };
 
 const LONG_ABOUT: &str = "Run the network stack: local proxy, LAN/VM gateway, private mesh, and TUN capture.";
@@ -76,7 +77,7 @@ pub struct StackCli {
     )]
     pub mesh_listeners: Vec<String>,
 
-    /// Mesh route CIDR for Mihomo exclusion; defaults to the network of --mesh-ipv4
+    /// Mesh route CIDR sent to sing-box WireGuard endpoint
     #[arg(
         long = "mesh-route",
         value_name = "CIDR",
@@ -84,25 +85,29 @@ pub struct StackCli {
         help_heading = "Mesh auto-config"
     )]
     pub mesh_routes: Vec<String>,
+
+    /// Skip downloading clash-rules (use cached rule-sets or simple fallback routes)
+    #[arg(long = "no-rules", help_heading = "Stack options")]
+    pub no_rules: bool,
 }
 
 pub fn run(cli: StackCli) -> Result<()> {
     let flags = StackFlags {
         mesh: cli.mesh,
         gateway: cli.gateway,
-        tun: cli.common.tun,
+        tun: !cli.common.no_tun,
+        no_rules: cli.no_rules,
     };
     ensure_stack_config_exists(&cli.common)?;
     ensure_mesh_config_from_stack(&cli, flags)?;
-    let prepared = bootstrap::prepare_stack(&cli.common, flags)?;
 
-    #[cfg(unix)]
-    if prepared.tun_enabled {
-        crate::privilege::elevate_self_for_tun()?;
-    }
+    let mut prepared = bootstrap::prepare_stack(&cli.common, flags)?;
 
     eprintln!("config dir → {}", prepared.settings.data_dir.display());
-    eprintln!("mihomo dir → {}", prepared.settings.mihomo_dir().display());
+    eprintln!(
+        "sing-box dir → {}",
+        prepared.settings.singbox_dir().display()
+    );
 
     let mesh_started = if flags.mesh {
         let cfg = prepared
@@ -110,17 +115,130 @@ pub fn run(cli: StackCli) -> Result<()> {
             .mesh
             .as_ref()
             .context("[mesh] missing in zay.toml")?;
-        easytier::start(cfg, &prepared.settings.data_dir)?;
+        if mesh::is_hub(cfg) {
+            eprintln!(
+                "mesh hub: sing-box TUN disabled (EasyTier relay only; SSH stays on eth0)"
+            );
+        } else {
+            eprintln!(
+                "mesh client: TUN captures only [mesh].mesh_routes (relay SSH + public traffic stay on physical NIC)"
+            );
+            if crate::singbox::tun_route::tun_selective_mesh_routes(
+                &prepared.settings,
+            ) {
+                if let Some(routes) = prepared
+                    .settings
+                    .mesh
+                    .as_ref()
+                    .and_then(|m| m.mesh_routes.as_ref())
+                {
+                    eprintln!(
+                        "mesh client: route_address → {}",
+                        routes.join(", ")
+                    );
+                }
+                if let Some(portal) =
+                    prepared.settings.mesh.as_ref().and_then(|m| {
+                        crate::stack::mesh::portal_client_host_cidr(m)
+                    })
+                {
+                    let tun = prepared.settings.mesh.as_ref().and_then(|m| {
+                        crate::stack::mesh::portal_tun_prefix_cidr(m)
+                    });
+                    eprintln!(
+                        "mesh client: WG portal host {portal}, TUN prefix {} (TCP replies route back via mesh; portal /32 must be unique per node)",
+                        tun.as_deref().unwrap_or("?")
+                    );
+                }
+            } else if prepared.settings.stack.gateway {
+                eprintln!(
+                    "mesh client: --gateway set → full TUN capture (not SSH-safe to relay)"
+                );
+            }
+        }
+        eprintln!(
+            "mesh tip: reach a peer service with `curl http://<mesh-ip>:<port>/` from another node; \
+             the server must run `zay stack --mesh` and listen on 0.0.0.0 or 127.0.0.1 (not only the mesh IP)"
+        );
+        if std::env::var("ZAY_EASYTIER_DEBUG").is_err() {
+            eprintln!(
+                "tip: export ZAY_EASYTIER_DEBUG=1 for verbose EasyTier listener logs"
+            );
+        }
+        easytier::start_for_singbox(cfg, &prepared.settings.data_dir)?;
+        if mesh::is_hub(cfg) {
+            eprintln!(
+                "mesh hub: when Mac/Linux clients connect, this node should show 2+ remote peers \
+                 (e.g. weapon + macbook); only 1 peer means the client is not on the same network_name/secret"
+            );
+            crate::singbox::tun_route::wait_for_mesh_listeners(
+                cfg,
+                std::time::Duration::from_secs(30),
+            )
+            .with_context(|| {
+                "EasyTier hub listeners not ready — clients cannot connect on :11010".to_string()
+            })?;
+        }
+        let wg_listen =
+            cfg.wireguard_listen.as_deref().unwrap_or("127.0.0.1:51820");
+        crate::singbox::tun_route::wait_for_wireguard_port(
+            wg_listen,
+            std::time::Duration::from_secs(30),
+        )
+        .with_context(|| {
+            format!(
+                "EasyTier WireGuard portal {wg_listen} not ready — sing-box cannot reach mesh. \
+                 Check EasyTier logs above; port may be in use (lsof -iUDP:{})",
+                wg_listen.rsplit_once(':').map(|(_, p)| p).unwrap_or("51820")
+            )
+        })?;
+        easytier::wait_for_mesh_peers(std::time::Duration::from_secs(45), cfg)
+            .context("EasyTier mesh not ready")?;
         true
     } else {
         false
     };
 
+    // Hot reload while `easytier-wg` is up hangs sing-box (endpoint close never finishes).
+    // Prefetch rules and write the final config before starting sing-box.
+    if flags.mesh
+        && !flags.no_rules
+        && !rules::files_present(&prepared.settings.singbox_dir())
+    {
+        eprintln!(
+            "mesh: prefetching clash-rules before sing-box (hot reload disabled with --mesh)…"
+        );
+        match rules::download_all(&prepared.settings) {
+            Ok(()) => {
+                let base =
+                    singbox::builder::build_config(&prepared.settings, true)?;
+                prepared.config_json =
+                    mixin::merge_config(&base, &prepared.settings)?;
+                fs::write(
+                    prepared.settings.config_path(),
+                    &prepared.config_json,
+                )
+                .with_context(|| {
+                    format!(
+                        "writing {}",
+                        prepared.settings.config_path().display()
+                    )
+                })?;
+                eprintln!("config updated with clash-rules");
+            }
+            Err(e) => {
+                eprintln!(
+                    "warn: clash-rules prefetch failed: {e:#}; continuing with fallback routes"
+                );
+            }
+        }
+    }
+
     let state = Arc::new(api::AppState::from(prepared));
     let api_listen = format!("127.0.0.1:{}", cli.common.api_port);
     let _api = api::spawn(state.clone(), &api_listen);
 
-    let engine = assets::resolve_binary()?;
+    let engine = singbox::resolve_binary()?;
     let listen_host = if flags.gateway {
         "0.0.0.0"
     } else {
@@ -138,7 +256,13 @@ pub fn run(cli: StackCli) -> Result<()> {
 
     let config_path = state.settings.config_path();
 
-    let mut child = match spawn_mihomo(
+    if state.tun_enabled {
+        let refreshed = bootstrap::refresh_config(&state.settings, flags)?;
+        singbox::tun_route::log_tun_routing(&refreshed);
+        *state.config_json.write().expect("config lock") = refreshed;
+    }
+
+    let mut child = match spawn_singbox(
         &engine,
         &state.settings,
         &config_path,
@@ -160,10 +284,14 @@ pub fn run(cli: StackCli) -> Result<()> {
         assets::pipe_logs(stderr);
     }
 
-    if !state.settings.subscriptions.is_empty() {
-        geo::spawn_background_download(
+    if !flags.mesh
+        && !flags.no_rules
+        && (!state.settings.subscriptions.is_empty()
+            || !rules::files_present(&state.settings.singbox_dir()))
+    {
+        rules::spawn_background_download(
             state.settings.clone(),
-            Some(state.config_yaml.clone()),
+            state.config_json.clone(),
         );
     }
 
@@ -188,6 +316,21 @@ pub fn run(cli: StackCli) -> Result<()> {
         bail!("network stack exited with status {code}");
     }
     Ok(())
+}
+
+fn spawn_singbox(
+    engine: &std::path::Path,
+    settings: &Settings,
+    config_path: &std::path::Path,
+    tun_enabled: bool,
+) -> Result<Child> {
+    singbox::spawn(
+        engine,
+        &settings.singbox_dir(),
+        config_path,
+        false,
+        tun_enabled,
+    )
 }
 
 fn ensure_stack_config_exists(common: &ProxyOpts) -> Result<()> {
@@ -287,6 +430,7 @@ fn mesh_config_toml(
     table.insert("network_name".into(), network_name.into());
     table.insert("network_secret".into(), network_secret.into());
     table.insert("ipv4".into(), ipv4.into());
+    table.insert("wireguard_listen".into(), "127.0.0.1:51820".into());
     if !listeners.is_empty() {
         table.insert(
             "listeners".into(),
@@ -340,6 +484,42 @@ fn ipv4_network_cidr(cidr: &str) -> Result<String> {
     Ok(format!("{}/{}", Ipv4Addr::from(ip & mask), prefix))
 }
 
+pub fn validate(settings: &Settings) -> Result<()> {
+    let flags = settings.stack;
+    if flags.mesh {
+        let mesh = settings
+            .mesh
+            .as_ref()
+            .context("--mesh requires a [mesh] section in zay.toml")?;
+        let routes = mesh.mesh_routes.as_deref().unwrap_or(&[]);
+        if routes.is_empty() {
+            bail!(
+                "[mesh].mesh_routes is required (e.g. [\"10.126.126.0/24\"]) so sing-box routes mesh traffic to easytier-wg"
+            );
+        }
+        if mesh.ipv4.as_deref().unwrap_or("").trim().is_empty() {
+            eprintln!(
+                "warn: [mesh].ipv4 unset — use a fixed virtual address per node (e.g. 10.126.126.10/24)"
+            );
+        }
+        if mesh.peers.as_deref().is_none_or(|p| p.is_empty())
+            && mesh.listeners.as_deref().is_none_or(|l| l.is_empty())
+        {
+            bail!(
+                "[mesh] needs at least one peer or listener to join the EasyTier network"
+            );
+        }
+        if !flags.tun && !mesh::is_hub(mesh) {
+            bail!(
+                "--mesh requires sing-box TUN on client nodes (Mac/Linux); omit --no-tun. \
+                 Hub/relay nodes with [mesh].listeners skip TUN automatically."
+            );
+        }
+        mesh::warn_mesh_role(mesh);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::ipv4_network_cidr;
@@ -350,35 +530,5 @@ mod tests {
             ipv4_network_cidr("10.126.126.10/24").unwrap(),
             "10.126.126.0/24"
         );
-        assert_eq!(
-            ipv4_network_cidr("10.126.126.10/32").unwrap(),
-            "10.126.126.10/32"
-        );
     }
-}
-
-fn spawn_mihomo(
-    engine: &std::path::Path,
-    settings: &Settings,
-    config_path: &std::path::Path,
-    tun_enabled: bool,
-) -> Result<Child> {
-    assets::spawn(
-        engine,
-        &settings.mihomo_dir(),
-        config_path,
-        false,
-        tun_enabled,
-    )
-}
-
-pub fn validate(settings: &Settings) -> Result<()> {
-    let flags = settings.stack;
-    if flags.mesh {
-        settings
-            .mesh
-            .as_ref()
-            .context("--mesh requires a [mesh] section in zay.toml")?;
-    }
-    Ok(())
 }

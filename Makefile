@@ -1,4 +1,4 @@
-.PHONY: fmt build pkg cross-build macos.build-for-linux-x64 macos.build-for-window-x64 macos.build-for-macos-arm64 setup setup-zig check-zig check-mingw
+.PHONY: fmt build pkg cross-build macos.build-for-linux-x64 macos.build-for-windows-x64 macos.build-for-window-x64 macos.build-for-macos-arm64 setup setup-zig check-zig check-mingw
 
 CARGO_HOME_DIR = /tmp/cargo-tmp
 REMAP = --remap-path-prefix=$(CARGO_HOME_DIR)=~ --remap-path-prefix=$(CURDIR)=.
@@ -55,8 +55,12 @@ check-mingw:
 
 setup:
 	mkdir -p $(CARGO_HOME_DIR)
-	ln -sf $(CARGO_HOME_DIR) $(HOME)/.cargo
 	rustup target add x86_64-unknown-linux-gnu x86_64-pc-windows-gnu aarch64-apple-darwin
+	@if $(CARGO) cargo fetch -q; then :; else \
+		echo "repairing broken registry in $(CARGO_HOME_DIR)" >&2; \
+		rm -rf $(CARGO_HOME_DIR)/registry; \
+		$(CARGO) cargo fetch -q; \
+	fi
 
 setup-zig: setup check-zig
 
@@ -70,9 +74,12 @@ macos.build-for-linux-x64: setup-zig
 	$(CARGO) cargo zigbuild --release --target $(ZIG_LINUX_TARGET)
 	@test -f $(BIN_LINUX_X64) || (echo "missing $(BIN_LINUX_X64) (zig target $(ZIG_LINUX_TARGET))" >&2; exit 1)
 
-macos.build-for-window-x64: setup-zig check-mingw
+macos.build-for-windows-x64: setup-zig check-mingw
 	$(WINDOWS_CARGO) cargo zigbuild --release --target $(TARGET_WINDOWS_X64)
 	@test -f $(BIN_WINDOWS_X64)
+
+# Back-compat alias (typo in older docs/Makefile.local)
+macos.build-for-window-x64: macos.build-for-windows-x64
 
 macos.build-for-macos-arm64: setup
 	$(CARGO) cargo build --release --target $(TARGET_MACOS_ARM64)
@@ -93,35 +100,28 @@ define zip_windows_binary
 	rm -f $(DIST_DIR)/$(1)
 	tmpdir=$$(mktemp -d); \
 	cp $(2) "$$tmpdir/"; \
-	runtime_dir=""; \
-	for dir in "$(dir $(2))build/zay-"*/out/windows-runtime; do \
-		if [ -f "$$dir/Packet.dll" ] && [ -f "$$dir/wintun.dll" ] && [ -f "$$dir/WinDivert64.sys" ]; then \
-			runtime_dir="$$dir"; \
-		fi; \
-	done; \
-	if [ -z "$$runtime_dir" ]; then \
-		echo "missing generated Windows runtime directory" >&2; \
+	packet_dll=$$(find target/$(TARGET_WINDOWS_X64)/release/build -type f -path '*/windows-runtime/Packet.dll' 2>/dev/null | head -1); \
+	runtime_dir=$${packet_dll%/Packet.dll}; \
+	if [ -z "$$packet_dll" ] || [ ! -f "$$runtime_dir/wintun.dll" ] || [ ! -f "$$runtime_dir/WinDivert64.sys" ]; then \
+		echo "missing generated Windows runtime under target/$(TARGET_WINDOWS_X64)/release/build/*/out/windows-runtime" >&2; \
 		rm -rf "$$tmpdir"; \
 		exit 1; \
 	fi; \
 	for file in Packet.dll wintun.dll WinDivert64.sys; do \
-		if [ -f "$$runtime_dir/$$file" ]; then \
-			cp "$$runtime_dir/$$file" "$$tmpdir/"; \
-		else \
-			echo "missing generated Windows runtime asset: $$file" >&2; \
-			rm -rf "$$tmpdir"; \
-			exit 1; \
-		fi; \
+		cp "$$runtime_dir/$$file" "$$tmpdir/"; \
 	done; \
 	cd "$$tmpdir" && zip -j "$(CURDIR)/$(DIST_DIR)/$(1)" *; \
 	rm -rf "$$tmpdir"
 endef
 
+cross-build: pkg
+
 # Sequential cross-builds (avoid parallel cargo/zig races); Linux uses glibc 2.17 via zig.
-pkg: | $(DIST_DIR)
+# Requires on macOS: zig, cargo-zigbuild (`cargo install cargo-zigbuild`), mingw-w64 (`brew install mingw-w64`).
+pkg: check-zig check-mingw | $(DIST_DIR)
 	$(MAKE) macos.build-for-macos-arm64
 	$(MAKE) macos.build-for-linux-x64
-	$(MAKE) macos.build-for-window-x64
+	$(MAKE) macos.build-for-windows-x64
 	$(call zip_binary,$(ZIP_MACOS_ARM64),$(BIN_MACOS_ARM64))
 	$(call zip_binary,$(ZIP_LINUX_X64),$(BIN_LINUX_X64))
 	$(call zip_windows_binary,$(ZIP_WINDOWS_X64),$(BIN_WINDOWS_X64))

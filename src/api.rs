@@ -14,25 +14,25 @@ use axum::{
 use serde::Serialize;
 use tokio::net::TcpListener;
 
-use crate::{bootstrap::Prepared, mihomo, settings::Settings};
+use crate::{bootstrap::singbox::Prepared, settings::Settings, singbox::mixin};
 
 #[derive(Clone)]
 pub struct AppState {
-    pub config_yaml: Arc<RwLock<String>>,
+    pub config_json: Arc<RwLock<String>>,
     pub settings: Settings,
     pub tun_enabled: bool,
 }
 
 impl AppState {
-    pub fn config_yaml_text(&self) -> String {
-        self.config_yaml.read().expect("config lock").clone()
+    pub fn config_text(&self) -> String {
+        self.config_json.read().expect("config lock").clone()
     }
 }
 
 impl From<Prepared> for AppState {
     fn from(p: Prepared) -> Self {
         Self {
-            config_yaml: Arc::new(RwLock::new(p.config_yaml)),
+            config_json: Arc::new(RwLock::new(p.config_json)),
             settings: p.settings,
             tun_enabled: p.tun_enabled,
         }
@@ -74,10 +74,13 @@ async fn config_dump(
 ) -> Result<impl IntoResponse, ApiError> {
     let config_path = state.settings.config_path();
     let base = fs::read_to_string(&config_path)
-        .unwrap_or_else(|_| state.config_yaml_text());
-    let full = mihomo::expand_runtime_config(&base, &state.settings)?;
+        .unwrap_or_else(|_| state.config_text());
+    let full = mixin::merge_config(&base, &state.settings)?;
     Ok((
-        [(axum::http::header::CONTENT_TYPE, "text/yaml; charset=utf-8")],
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/json; charset=utf-8",
+        )],
         full,
     ))
 }

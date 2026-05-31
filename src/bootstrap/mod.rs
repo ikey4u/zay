@@ -1,4 +1,5 @@
 pub mod proxy;
+pub mod singbox;
 
 use anyhow::{Context, Result};
 

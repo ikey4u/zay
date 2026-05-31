@@ -13,6 +13,8 @@ use crate::{ProxyOpts, bootstrap::proxy};
 pub const ZAY_TOML_FILE: &str = "zay.toml";
 /// Mihomo runtime home under the Zay config directory (`config.yaml`, geo, ruleset, providers, …).
 pub const MIHOMO_DIR: &str = "mihomo";
+/// Sing-box runtime home (`config.json`, rule-sets, cache, …).
+pub const SINGBOX_DIR: &str = "singbox";
 
 pub const DEFAULT_MIXIN: &str = r#"# =============================================================================
 # [mihomo].mixin — 合并进 Zay 生成的 config.yaml（可选）
@@ -165,8 +167,17 @@ pub struct MeshConfig {
     pub listeners: Option<Vec<String>>,
     pub peers: Option<Vec<String>>,
     pub proxy_networks: Option<Vec<String>>,
-    /// Zay-only: injected as Mihomo `IP-CIDR,...,DIRECT` rules and TUN route excludes when `--mesh`.
+    /// Zay-only: mesh CIDRs routed to EasyTier WireGuard endpoint in sing-box.
     pub mesh_routes: Option<Vec<String>>,
+    /// Local WireGuard portal listen (`host:port`). Default `127.0.0.1:51820` when mesh runs with sing-box.
+    pub wireguard_listen: Option<String>,
+    /// Portal client CIDR (EasyTier `vpn_portal_config.client_cidr`).
+    pub wireguard_client_cidr: Option<String>,
+    /// sing-box WireGuard endpoint interface address (defaults to `[mesh].ipv4`).
+    pub wireguard_client_address: Option<String>,
+    /// Deprecated. Mesh is managed by local EasyTier (`zay stack --mesh`); if set, stack fails
+    /// with a hint to remove it and use `listeners` / `peers` instead.
+    pub wireguard_endpoint: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -184,6 +195,7 @@ struct ZayFile {
     /// Mihomo API `secret` (auto-generated per run if omitted).
     api_secret: Option<String>,
     mihomo: MihomoFile,
+    singbox: SingboxFile,
     /// Path to a YAML file, or omit when using `[bootstrap_proxy]` table.
     bootstrap_proxy: Option<TomlValue>,
     mesh: Option<MeshConfig>,
@@ -192,6 +204,12 @@ struct ZayFile {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 struct MihomoFile {
+    mixin: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+struct SingboxFile {
     mixin: Option<String>,
 }
 
@@ -208,6 +226,7 @@ impl Default for ZayFile {
             controller_port: None,
             api_secret: None,
             mihomo: MihomoFile::default(),
+            singbox: SingboxFile::default(),
             bootstrap_proxy: None,
             mesh: None,
         }
@@ -227,6 +246,8 @@ pub struct StackFlags {
     pub mesh: bool,
     pub gateway: bool,
     pub tun: bool,
+    /// Do not download Loyalsoldier clash-rules from the network.
+    pub no_rules: bool,
 }
 
 #[derive(Clone)]
@@ -245,6 +266,8 @@ pub struct Settings {
     pub api_secret: String,
     /// Inline YAML mixin from `[mihomo].mixin`.
     pub mihomo_mixin: Option<String>,
+    /// Inline JSON mixin from `[singbox].mixin`.
+    pub singbox_mixin: Option<String>,
     pub bootstrap_proxy: Option<BootstrapProxy>,
     pub mesh: Option<MeshConfig>,
     pub stack: StackFlags,
@@ -256,7 +279,16 @@ impl Settings {
         self.data_dir.join(MIHOMO_DIR)
     }
 
+    /// Directory passed to sing-box `-D`.
+    pub fn singbox_dir(&self) -> PathBuf {
+        self.data_dir.join(SINGBOX_DIR)
+    }
+
     pub fn config_path(&self) -> PathBuf {
+        self.singbox_dir().join("config.json")
+    }
+
+    pub fn mihomo_config_path(&self) -> PathBuf {
         self.mihomo_dir().join("config.yaml")
     }
 
@@ -272,7 +304,7 @@ impl Settings {
     }
 
     pub fn subscription_cache_path(&self, index: usize) -> PathBuf {
-        self.mihomo_dir()
+        self.singbox_dir()
             .join("providers")
             .join(format!("sub{index}.yaml"))
     }
@@ -416,6 +448,7 @@ fn resolve_inner(cli: &ProxyOpts, stack: StackFlags) -> Result<Settings> {
     let file = load_zay_toml(&toml_path)?;
 
     let mihomo_mixin = file.mihomo.mixin;
+    let singbox_mixin = file.singbox.mixin;
 
     let bootstrap_proxy = if let Some(path) = &cli.bootstrap_proxy {
         Some(proxy::load_from_yaml_file(path)?)
@@ -453,6 +486,7 @@ fn resolve_inner(cli: &ProxyOpts, stack: StackFlags) -> Result<Settings> {
         external_controller: format!("127.0.0.1:{controller_port}"),
         api_secret,
         mihomo_mixin,
+        singbox_mixin,
         bootstrap_proxy,
         mesh: file.mesh,
         stack,
@@ -475,8 +509,8 @@ fn is_invalid_subscription_body(raw: &str) -> bool {
         || trimmed.starts_with("<!DOCTYPE")
 }
 
-pub fn cleanup_stale_subscription_cache(mihomo_dir: &Path, sub_count: usize) {
-    let providers = mihomo_dir.join("providers");
+pub fn cleanup_stale_subscription_cache(runtime_dir: &Path, sub_count: usize) {
+    let providers = runtime_dir.join("providers");
     let mut paths: Vec<PathBuf> = (0..sub_count)
         .map(|i| providers.join(format!("sub{i}.yaml")))
         .collect();

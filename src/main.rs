@@ -6,6 +6,7 @@ mod fwd;
 mod http;
 mod mihomo;
 mod settings;
+mod singbox;
 mod ssh;
 mod stack;
 mod yaml;
@@ -114,9 +115,9 @@ pub struct ProxyOpts {
     #[clap(long, value_name = "LEVEL")]
     pub log_level: Option<String>,
 
-    /// Capture system traffic through a TUN interface
-    #[clap(long, default_value_t = false, action = clap::ArgAction::SetTrue)]
-    pub tun: bool,
+    /// Disable sing-box system TUN (default: TUN on for `zay stack`)
+    #[clap(long = "no-tun", action = clap::ArgAction::SetTrue)]
+    pub no_tun: bool,
 
     /// CIDR excluded from Mihomo TUN auto-route (repeatable)
     #[clap(long = "tun-exclude", value_name = "CIDR", action = clap::ArgAction::Append)]

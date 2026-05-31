@@ -9,6 +9,10 @@ use sha2::{Digest, Sha256};
 
 /// Pinned Mihomo release embedded by Zay (must match `mihomo::config` types).
 const PINNED_MIHOMO_VERSION: &str = "v1.19.25";
+/// Pinned sing-box release for `zay stack` on the singbox branch.
+const PINNED_SINGBOX_VERSION: &str = "v1.13.12";
+const SINGBOX_RELEASE_BASE: &str =
+    "https://github.com/SagerNet/sing-box/releases/download";
 const CONFIG_DOCS_URL: &str = "https://raw.githubusercontent.com/MetaCubeX/mihomo/v1.19.25/docs/config.yaml";
 const RELEASE_BASE: &str =
     "https://github.com/MetaCubeX/mihomo/releases/download";
@@ -46,12 +50,17 @@ fn main() {
     fetch_config_docs_template(&out_dir);
     prepare_windows_runtime(&out_dir, target);
 
-    let (artifact, ext) = artifact_for_target(&target).unwrap_or_else(|| {
-        panic!("unsupported build target for embedded Mihomo: {target}")
-    });
+    embed_mihomo(&out_dir, target);
+    embed_singbox(&out_dir, target);
+}
+
+fn embed_mihomo(out_dir: &Path, target: &str) {
+    let (artifact, ext) =
+        mihomo_artifact_for_target(target).unwrap_or_else(|| {
+            panic!("unsupported build target for embedded Mihomo: {target}")
+        });
 
     let version = PINNED_MIHOMO_VERSION.to_string();
-
     let exe_name = if target.contains("windows") {
         "mihomo.exe"
     } else {
@@ -60,8 +69,8 @@ fn main() {
     let embed_path = out_dir.join(exe_name);
     let stamp_path = out_dir.join("mihomo.stamp");
 
-    if stamp_matches(&stamp_path, &version, &target) && embed_path.is_file() {
-        emit_rustc_env(&embed_path, &version);
+    if stamp_matches(&stamp_path, &version, target) && embed_path.is_file() {
+        emit_mihomo_rustc_env(&embed_path, &version);
         return;
     }
 
@@ -81,20 +90,68 @@ fn main() {
     });
 
     let _ = fs::remove_file(&archive_path);
+    chmod_executable(&embed_path);
+    write_stamp(&stamp_path, &version, target).expect("write mihomo.stamp");
+    emit_mihomo_rustc_env(&embed_path, &version);
+}
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&embed_path)
-            .expect("mihomo metadata")
-            .permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&embed_path, perms).expect("chmod mihomo");
+fn embed_singbox(out_dir: &Path, target: &str) {
+    let version_tag = PINNED_SINGBOX_VERSION.trim_start_matches('v');
+    let (suffix, ext) =
+        singbox_artifact_for_target(target).unwrap_or_else(|| {
+            panic!("unsupported build target for embedded sing-box: {target}")
+        });
+    let artifact = format!("sing-box-{version_tag}-{suffix}");
+    let version = PINNED_SINGBOX_VERSION;
+    let exe_name = if target.contains("windows") {
+        "sing-box.exe"
+    } else {
+        "sing-box"
+    };
+    let embed_path = out_dir.join(exe_name);
+    let stamp_path = out_dir.join("singbox.stamp");
+
+    if stamp_matches(&stamp_path, version, target) && embed_path.is_file() {
+        emit_singbox_rustc_env(&embed_path, version);
+        return;
     }
 
-    write_stamp(&stamp_path, &version, &target).expect("write mihomo.stamp");
-    emit_rustc_env(&embed_path, &version);
+    let archive_path = out_dir.join(format!("{artifact}.{ext}"));
+    let url = format!("{SINGBOX_RELEASE_BASE}/{version}/{artifact}.{ext}");
+
+    eprintln!("cargo:warning=zay: downloading sing-box {version} for {target}");
+    download(&url, &archive_path).unwrap_or_else(|e| {
+        panic!("failed to download sing-box from {url}: {e}");
+    });
+
+    extract_singbox(&archive_path, ext, &embed_path, &artifact).unwrap_or_else(
+        |e| {
+            panic!(
+                "failed to extract sing-box archive {}: {e}",
+                archive_path.display()
+            );
+        },
+    );
+
+    let _ = fs::remove_file(&archive_path);
+    chmod_executable(&embed_path);
+    write_stamp(&stamp_path, version, target).expect("write singbox.stamp");
+    emit_singbox_rustc_env(&embed_path, version);
 }
+
+#[cfg(unix)]
+fn chmod_executable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = fs::metadata(path)
+        .unwrap_or_else(|e| panic!("metadata for {}: {e}", path.display()))
+        .permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(path, perms)
+        .unwrap_or_else(|e| panic!("chmod {}: {e}", path.display()));
+}
+
+#[cfg(not(unix))]
+fn chmod_executable(_path: &Path) {}
 
 fn fetch_config_docs_template(out_dir: &Path) {
     let dest = out_dir.join("mihomo-docs-config.yaml");
@@ -313,12 +370,56 @@ fn ensure_pe_x86_64(path: &Path) -> Result<(), String> {
     }
 }
 
-fn emit_rustc_env(embed_path: &Path, version: &str) {
+fn emit_mihomo_rustc_env(embed_path: &Path, version: &str) {
     println!(
         "cargo:rustc-env=MIHOMO_EMBED={}",
         embed_path.to_string_lossy()
     );
     println!("cargo:rustc-env=MIHOMO_VERSION={version}");
+}
+
+fn emit_singbox_rustc_env(embed_path: &Path, version: &str) {
+    println!(
+        "cargo:rustc-env=SINGBOX_EMBED={}",
+        embed_path.to_string_lossy()
+    );
+    println!("cargo:rustc-env=SINGBOX_VERSION={version}");
+}
+
+fn extract_singbox(
+    archive: &Path,
+    ext: &str,
+    dest: &Path,
+    artifact: &str,
+) -> Result<(), String> {
+    match ext {
+        "tar.gz" => extract_tar_gz(archive, dest),
+        "zip" => extract_zip(archive, dest, artifact),
+        other => Err(format!("unsupported archive extension: {other}")),
+    }
+}
+
+fn extract_tar_gz(archive_path: &Path, dest: &Path) -> Result<(), String> {
+    let file = File::open(archive_path).map_err(|e| e.to_string())?;
+    let decoder = flate2::read::GzDecoder::new(file);
+    let mut tar = tar::Archive::new(decoder);
+    for entry in tar.entries().map_err(|e| e.to_string())? {
+        let mut entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path().map_err(|e| e.to_string())?;
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        if name == "sing-box" || name == "sing-box.exe" {
+            let mut output = File::create(dest).map_err(|e| e.to_string())?;
+            copy(&mut entry, &mut output).map_err(|e| e.to_string())?;
+            return Ok(());
+        }
+    }
+    Err(format!(
+        "sing-box binary not found in {}",
+        archive_path.display()
+    ))
 }
 
 fn stamp_matches(stamp_path: &Path, version: &str, target: &str) -> bool {
@@ -338,7 +439,34 @@ fn write_stamp(
     Ok(())
 }
 
-fn artifact_for_target(target: &str) -> Option<(&'static str, &'static str)> {
+fn singbox_artifact_for_target(
+    target: &str,
+) -> Option<(&'static str, &'static str)> {
+    Some(match target {
+        "aarch64-apple-darwin" => ("darwin-arm64", "tar.gz"),
+        "x86_64-apple-darwin" => ("darwin-amd64", "tar.gz"),
+        "aarch64-unknown-linux-gnu" | "aarch64-unknown-linux-musl" => {
+            ("linux-arm64", "tar.gz")
+        }
+        "x86_64-unknown-linux-gnu" | "x86_64-unknown-linux-musl" => {
+            ("linux-amd64", "tar.gz")
+        }
+        "i686-unknown-linux-gnu" => ("linux-386", "tar.gz"),
+        "armv7-unknown-linux-gnueabihf" => ("linux-armv7", "tar.gz"),
+        "riscv64gc-unknown-linux-gnu" => ("linux-riscv64", "tar.gz"),
+        "loongarch64-unknown-linux-gnu" => ("linux-loong64", "tar.gz"),
+        "x86_64-pc-windows-msvc" | "x86_64-pc-windows-gnu" => {
+            ("windows-amd64", "zip")
+        }
+        "i686-pc-windows-msvc" => ("windows-386", "zip"),
+        "aarch64-pc-windows-msvc" => ("windows-arm64", "zip"),
+        _ => return None,
+    })
+}
+
+fn mihomo_artifact_for_target(
+    target: &str,
+) -> Option<(&'static str, &'static str)> {
     Some(match target {
         "aarch64-apple-darwin" => ("mihomo-darwin-arm64-go122", "gz"),
         "x86_64-apple-darwin" => ("mihomo-darwin-amd64-v2-go122", "gz"),

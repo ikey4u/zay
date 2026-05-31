@@ -63,6 +63,43 @@ fn toml_table_to_yaml_value(
     Ok(Value::Mapping(map))
 }
 
+/// Build an HTTP proxy URL for fetching subscriptions through a sing-box outbound.
+pub fn singbox_outbound_to_proxy_url(proxy: &Value) -> Result<String> {
+    let map = proxy
+        .as_mapping()
+        .context("bootstrap proxy must be a mapping")?;
+    let ty = yaml_string(map, "type")?.to_lowercase();
+    let server = yaml_string(map, "server")?;
+    let port = yaml_u16(map, "port")?;
+    Ok(match ty.as_str() {
+        "socks5" | "socks" => format!("socks5://{server}:{port}"),
+        "http" | "https" => format!("http://{server}:{port}"),
+        _ => anyhow::bail!(
+            "bootstrap proxy type {ty} is not supported for HTTP fetch"
+        ),
+    })
+}
+
+fn yaml_string(map: &serde_yaml::Mapping, key: &str) -> Result<String> {
+    map.get(Value::from(key))
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .with_context(|| format!("missing `{key}` in bootstrap proxy"))
+}
+
+fn yaml_u16(map: &serde_yaml::Mapping, key: &str) -> Result<u16> {
+    let v = map
+        .get(Value::from(key))
+        .context(format!("missing `{key}`"))?;
+    if let Some(n) = v.as_u64() {
+        return u16::try_from(n).context(format!("`{key}` out of range"));
+    }
+    if let Some(s) = v.as_str() {
+        return s.parse().context(format!("invalid `{key}`"));
+    }
+    anyhow::bail!("invalid `{key}`")
+}
+
 fn toml_value_to_yaml(v: &TomlValue) -> Result<Value> {
     Ok(match v {
         TomlValue::String(s) => Value::String(s.clone()),

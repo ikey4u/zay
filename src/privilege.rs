@@ -1,12 +1,15 @@
-use std::process::{Command, Stdio};
+use std::{
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use anyhow::{Context, Result, bail};
 
 const NO_ELEVATION_TOOL_MSG: &str = "\
-TUN mode requires administrator privileges, but no elevation tool was found in PATH.
+TUN mode requires administrator privileges, but no elevation tool was found.
 
 Install sudo (apt install sudo) or doas (apk add doas), or run as root:
-  su -c 'zay stack --tun …'";
+  sudo zay stack …";
 
 fn command_in_path(program: &str) -> bool {
     std::env::var_os("PATH")
@@ -20,35 +23,44 @@ pub fn is_root() -> bool {
     unsafe { libc::geteuid() == 0 }
 }
 
-fn elevation_wrapper() -> Result<&'static str> {
-    if command_in_path("sudo") {
-        Ok("sudo")
-    } else if command_in_path("doas") {
-        Ok("doas")
-    } else {
-        bail!(NO_ELEVATION_TOOL_MSG);
+/// Resolve `sudo` or `doas`, preferring well-known absolute paths (Linux PATH is often minimal).
+pub fn resolve_privilege_wrapper() -> Result<PathBuf> {
+    for candidate in ["/usr/bin/sudo", "/bin/sudo", "/usr/local/bin/sudo"] {
+        let path = PathBuf::from(candidate);
+        if path.is_file() {
+            return Ok(path);
+        }
     }
+    if command_in_path("sudo") {
+        return Ok(PathBuf::from("sudo"));
+    }
+    for candidate in ["/usr/bin/doas", "/bin/doas"] {
+        let path = PathBuf::from(candidate);
+        if path.is_file() {
+            return Ok(path);
+        }
+    }
+    if command_in_path("doas") {
+        return Ok(PathBuf::from("doas"));
+    }
+    bail!(NO_ELEVATION_TOOL_MSG);
 }
 
-/// Re-exec this process with raised privileges when TUN is enabled and we are not root.
-/// Invokes the system `sudo` or `doas` binary (which may be sudo-rs on newer distros).
-pub fn elevate_self_for_tun() -> Result<()> {
-    if is_root() {
-        return Ok(());
+/// Build `sudo program …` when TUN needs root; otherwise `program …`.
+pub fn command_for_program(
+    program: &Path,
+    privileged: bool,
+) -> Result<Command> {
+    let program = program
+        .canonicalize()
+        .with_context(|| format!("canonicalizing {}", program.display()))?;
+
+    if !privileged || is_root() {
+        return Ok(Command::new(program));
     }
 
-    let wrapper = elevation_wrapper()?;
-    let exe = std::env::current_exe().context("reading current executable")?;
-    let args: Vec<String> = std::env::args().skip(1).collect();
-
-    let status = Command::new(wrapper)
-        .arg(&exe)
-        .args(&args)
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .with_context(|| format!("re-executing via {wrapper} (TUN mode)"))?;
-
-    std::process::exit(status.code().unwrap_or(1));
+    let wrapper = resolve_privilege_wrapper()?;
+    let mut cmd = Command::new(wrapper);
+    cmd.arg(program);
+    Ok(cmd)
 }

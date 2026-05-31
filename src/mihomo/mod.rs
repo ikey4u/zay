@@ -484,6 +484,7 @@ proxy-groups:
             mihomo_mixin: Some(
                 "rules:\n  - DOMAIN,example.com,DIRECT\n".into(),
             ),
+            singbox_mixin: None,
             bootstrap_proxy: None,
             mesh: None,
             stack: StackFlags::default(),

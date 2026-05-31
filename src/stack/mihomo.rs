@@ -293,6 +293,7 @@ mod tests {
             external_controller: "127.0.0.1:19090".into(),
             api_secret: "secret".into(),
             mihomo_mixin: None,
+            singbox_mixin: None,
             bootstrap_proxy: None,
             mesh: Some(MeshConfig {
                 instance_name: Some("zay".into()),
@@ -304,11 +305,16 @@ mod tests {
                 peers: None,
                 proxy_networks: None,
                 mesh_routes: Some(vec!["10.126.126.0/24".into()]),
+                wireguard_listen: None,
+                wireguard_client_cidr: None,
+                wireguard_client_address: None,
+                wireguard_endpoint: None,
             }),
             stack: StackFlags {
                 mesh: true,
                 gateway: false,
                 tun: true,
+                no_rules: false,
             },
         }
     }
