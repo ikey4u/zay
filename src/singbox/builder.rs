@@ -10,8 +10,11 @@ pub fn build_config(settings: &Settings, has_rules: bool) -> Result<String> {
 }
 
 pub fn build_value(settings: &Settings, has_rules: bool) -> Result<Value> {
+    let tun_enabled = tun_route::singbox_tun_enabled(settings);
+    let clash_dns = clash_dns_enabled(settings, tun_enabled, has_rules);
+
     let mut outbounds: Vec<Value> =
-        vec![json!({ "type": "direct", "tag": "direct" })];
+        vec![tun_route::direct_outbound_json(settings, tun_enabled)];
 
     if let Some(bp) = &settings.bootstrap_proxy {
         if let Some(node) = super::clash::convert_proxy(&bp.proxy, None)? {
@@ -59,24 +62,30 @@ pub fn build_value(settings: &Settings, has_rules: bool) -> Result<Value> {
         endpoints.push(wg);
     }
 
-    let tun_enabled = tun_route::singbox_tun_enabled(settings);
+    let include_applications =
+        has_rules && rules::applications_present(&settings.singbox_dir());
 
     let mut route_rules = Vec::new();
     // Relay/public peer IPs must bypass TUN path (SSH + EasyTier :11010) before mesh 10.x rules.
     route_rules.extend(mesh::peer_bypass_route_rules(settings));
     // Mesh CIDRs must win before sniff / clash private rules (10.x is ip_is_private).
     route_rules.extend(mesh::mesh_route_rules(settings));
+    // Mihomo `dns-hijack: any:53` — L4 port match before sniff (sing-box 1.13+; see SagerNet/sing-box#3878).
     if tun_enabled {
-        // L4 match avoids DNS sniff timing issues (macOS/Linux TUN loops).
         route_rules.push(json!({ "port": 53, "action": "hijack-dns" }));
     }
-    route_rules.extend(sniff_route_rules(tun_enabled));
     route_rules.push(json!({ "protocol": "dns", "action": "hijack-dns" }));
+    // Sniff after hijack-dns (TLS SNI / HTTP Host for connections that already have a destination).
+    route_rules.extend(sniff_route_rules(settings, tun_enabled));
 
     if has_rules {
         route_rules.extend(rules::proxy_fetch_rules(&proxy_final));
-        route_rules.extend(rules::builtin_route_rules(&proxy_final));
+        route_rules.extend(rules::builtin_route_rules(
+            &proxy_final,
+            include_applications,
+        ));
     } else if !settings.subscriptions.is_empty() {
+        // Interim routes while clash-rules download (before fake-ip + rule-sets apply).
         route_rules.push(json!({
             "action": "route",
             "ip_is_private": true,
@@ -106,45 +115,58 @@ pub fn build_value(settings: &Settings, has_rules: bool) -> Result<Value> {
         }));
     }
 
-    let listen_addr = if settings.allow_lan {
-        "0.0.0.0"
-    } else {
-        "127.0.0.1"
-    };
-
-    let mut inbounds = vec![json!({
-        "type": "mixed",
-        "tag": "mixed-in",
-        "listen": listen_addr,
-        "listen_port": settings.mixed_port
-    })];
+    let mut inbounds = mixed_inbounds(settings);
 
     if tun_enabled {
         let auto_route = tun_route::tun_auto_route(settings);
         let mut tun = json!({
             "type": "tun",
             "tag": "tun-in",
-            "address": [tun_route::tun_address(settings)],
+            "address": tun_route::tun_addresses(settings),
             "auto_route": auto_route,
             "strict_route": tun_route::tun_strict_route(settings),
-            "stack": "mixed",
+            "stack": tun_route::tun_stack(settings),
             "route_exclude_address": tun_route::tun_exclude_addresses(settings)
         });
         if let Some(addrs) = tun_route::tun_route_address(settings) {
             tun["route_address"] = json!(addrs);
         }
+        if tun_route::tun_auto_redirect(settings) {
+            tun["auto_redirect"] = json!(true);
+        }
         inbounds.push(tun);
     }
 
+    // Loyalsoldier blacklist: final → direct once rule-sets are loaded.
+    let route_final = if has_rules {
+        "direct".to_string()
+    } else {
+        proxy_final.clone()
+    };
+
+    let dns_resolver_tag = if clash_dns { "dns-direct" } else { "local-dns" };
+
     let mut route = json!({
         "rules": route_rules,
-        "final": proxy_final,
+        "final": route_final,
         "auto_detect_interface": true,
-        "default_domain_resolver": "local-dns"
+        "default_domain_resolver": dns_resolver_tag
     });
 
     if has_rules {
-        route["rule_set"] = json!(rules::rule_set_definitions());
+        if include_applications {
+            route["find_process"] = json!(true);
+        }
+        route["rule_set"] = json!(rules::rule_set_definitions(settings));
+    }
+
+    let mut cache_file = json!({
+        "enabled": true,
+        "path": "cache.db"
+    });
+    if clash_dns {
+        cache_file["store_fakeip"] = json!(true);
+        tun_route::log_fakeip_dns_hint(settings, true);
     }
 
     let mut root = json!({
@@ -152,7 +174,7 @@ pub fn build_value(settings: &Settings, has_rules: bool) -> Result<Value> {
             "level": settings.log_level,
             "timestamp": true
         },
-        "dns": dns_config(tun_enabled),
+        "dns": dns_config(settings, tun_enabled, has_rules, clash_dns),
         "inbounds": inbounds,
         "outbounds": outbounds,
         "route": route,
@@ -162,11 +184,7 @@ pub fn build_value(settings: &Settings, has_rules: bool) -> Result<Value> {
                 "secret": settings.api_secret,
                 "default_mode": "rule"
             },
-            "cache_file": {
-                "enabled": true,
-                // Relative to sing-box `-D` / working directory (see singbox::spawn).
-                "path": "cache.db"
-            }
+            "cache_file": cache_file
         }
     });
 
@@ -177,25 +195,115 @@ pub fn build_value(settings: &Settings, has_rules: bool) -> Result<Value> {
     Ok(root)
 }
 
-fn sniff_route_rules(tun_enabled: bool) -> Vec<Value> {
-    let inbounds: Vec<&str> = if tun_enabled {
-        vec!["mixed-in", "tun-in"]
+fn mixed_inbounds(settings: &Settings) -> Vec<Value> {
+    let port = settings.mixed_port;
+    if settings.allow_lan {
+        return vec![json!({
+            "type": "mixed",
+            "tag": "mixed-in",
+            "listen": "0.0.0.0",
+            "listen_port": port
+        })];
+    }
+    let mut inbounds = vec![json!({
+        "type": "mixed",
+        "tag": "mixed-in",
+        "listen": "127.0.0.1",
+        "listen_port": port
+    })];
+    // Firefox/GNOME often use "localhost" → ::1; listen there too (TUN apps should use No Proxy).
+    inbounds.push(json!({
+        "type": "mixed",
+        "tag": "mixed-in-v6",
+        "listen": "::1",
+        "listen_port": port
+    }));
+    inbounds
+}
+
+fn sniff_inbound_tags(settings: &Settings, tun_enabled: bool) -> Vec<String> {
+    let mut tags = if settings.allow_lan {
+        vec!["mixed-in".to_string()]
     } else {
-        vec!["mixed-in"]
+        vec!["mixed-in".to_string(), "mixed-in-v6".to_string()]
     };
+    if tun_enabled {
+        tags.push("tun-in".into());
+    }
+    tags
+}
+
+fn sniff_route_rules(settings: &Settings, tun_enabled: bool) -> Vec<Value> {
+    if !tun_enabled {
+        return Vec::new();
+    }
     vec![json!({
-        "inbound": inbounds,
-        "action": "sniff"
+        "action": "sniff",
+        "sniffer": ["http", "tls", "quic"],
+        "timeout": "2s"
     })]
 }
 
-fn dns_config(_tun_enabled: bool) -> Value {
-    // sing-box 1.12+: no legacy dns.rules outbound items; use route.default_domain_resolver instead.
+fn clash_dns_enabled(
+    settings: &Settings,
+    tun_enabled: bool,
+    has_rules: bool,
+) -> bool {
+    tun_enabled && (has_rules || !settings.subscriptions.is_empty())
+}
+
+fn dns_config(
+    settings: &Settings,
+    _tun_enabled: bool,
+    has_rules: bool,
+    clash_dns: bool,
+) -> Value {
+    if !clash_dns {
+        return json!({
+            "servers": [
+                { "type": "local", "tag": "local-dns" }
+            ],
+            "final": "local-dns",
+            "strategy": "prefer_ipv4"
+        });
+    }
+
+    // Match Mihomo `enhanced-mode: fake-ip` + `nameserver: 223.5.5.5` (see mihomo/config/zay.rs).
+    let mut dns_rules = vec![json!({
+        "domain_suffix": [".lan", ".local", ".internal"],
+        "action": "route",
+        "server": "dns-direct"
+    })];
+    if has_rules {
+        dns_rules.push(json!({
+            "rule_set": ["private", "lancidr"],
+            "query_type": ["A", "AAAA"],
+            "action": "route",
+            "server": "dns-direct"
+        }));
+    }
+    dns_rules.push(json!({
+        "query_type": ["A", "AAAA"],
+        "action": "route",
+        "server": "fake-ip"
+    }));
+
+    let _ = settings;
     json!({
         "servers": [
-            { "type": "local", "tag": "local-dns" }
+            { "type": "udp", "tag": "dns-direct", "server": "223.5.5.5" },
+            { "type": "udp", "tag": "dns-direct-alt", "server": "114.114.114.114" },
+            {
+                "type": "fakeip",
+                "tag": "fake-ip",
+                "inet4_range": "198.18.0.0/15",
+                "inet6_range": "fc00::/18"
+            }
         ],
-        "final": "local-dns"
+        "rules": dns_rules,
+        "final": "dns-direct",
+        "strategy": "prefer_ipv4",
+        "reverse_mapping": true
     })
 }
 
@@ -424,6 +532,67 @@ mod tests {
 
         let err = build_config(&settings, false).unwrap_err();
         assert!(err.to_string().contains("wireguard_endpoint"));
+    }
+
+    #[test]
+    fn clash_rules_use_direct_final_blacklist() {
+        let settings = Settings {
+            subscriptions: vec!["https://example.com/sub".into()],
+            data_dir: PathBuf::from("/tmp/zay-singbox-test"),
+            mixed_port: 17890,
+            allow_lan: false,
+            tun: true,
+            log_level: "info".into(),
+            health_check_url: "https://example.com".into(),
+            update_interval: 3600,
+            tun_exclude_routes: Vec::new(),
+            external_controller: "127.0.0.1:19090".into(),
+            api_secret: "secret".into(),
+            mihomo_mixin: None,
+            singbox_mixin: None,
+            bootstrap_proxy: None,
+            mesh: None,
+            stack: StackFlags {
+                mesh: false,
+                gateway: false,
+                tun: true,
+                no_rules: false,
+            },
+        };
+        let with_rules = build_config(&settings, true).unwrap();
+        assert!(with_rules.contains("\"final\": \"direct\""));
+        assert!(with_rules.contains("\"applications\""));
+        assert!(with_rules.contains("\"geoip-cn\""));
+        assert!(with_rules.contains("\"reverse_mapping\": true"));
+        assert!(with_rules.contains("\"fake-ip\""));
+        assert!(with_rules.contains("\"store_fakeip\": true"));
+        assert!(with_rules.contains("\"type\": \"logical\""));
+
+        let rules = serde_json::from_str::<Value>(&with_rules).unwrap();
+        let route_rules = rules["route"]["rules"].as_array().unwrap();
+        let reject_idx = route_rules
+            .iter()
+            .position(|r| {
+                r.get("action").and_then(|a| a.as_str()) == Some("reject")
+            })
+            .unwrap();
+        let icloud_idx = route_rules
+            .iter()
+            .position(|r| {
+                r.get("rule_set")
+                    .and_then(|s| s.as_array())
+                    .is_some_and(|a| {
+                        a.first().and_then(|v| v.as_str()) == Some("icloud")
+                    })
+            })
+            .unwrap();
+        assert!(
+            reject_idx < icloud_idx,
+            "reject must precede icloud (Mihomo order)"
+        );
+
+        let without_rules = build_config(&settings, false).unwrap();
+        assert!(without_rules.contains("\"reverse_mapping\": true"));
     }
 }
 

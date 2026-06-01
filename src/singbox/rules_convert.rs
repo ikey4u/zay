@@ -27,6 +27,7 @@ pub fn loyalsoldier_yaml_to_singbox_source(raw: &str) -> Result<String> {
     let mut domain_keyword = Vec::new();
     let mut domain_regex = Vec::new();
     let mut ip_cidr = Vec::new();
+    let mut process_name = Vec::new();
 
     for item in payload {
         let Some(line) = item.as_str() else { continue };
@@ -37,6 +38,7 @@ pub fn loyalsoldier_yaml_to_singbox_source(raw: &str) -> Result<String> {
             &mut domain_keyword,
             &mut domain_regex,
             &mut ip_cidr,
+            &mut process_name,
         );
     }
 
@@ -46,6 +48,7 @@ pub fn loyalsoldier_yaml_to_singbox_source(raw: &str) -> Result<String> {
     push_chunks(&mut rules, "domain_keyword", &domain_keyword);
     push_chunks(&mut rules, "domain_regex", &domain_regex);
     push_chunks(&mut rules, "ip_cidr", &ip_cidr);
+    push_chunks(&mut rules, "process_name", &process_name);
 
     if rules.is_empty() {
         bail!("no rules extracted from payload");
@@ -79,8 +82,17 @@ fn classify_line(
     domain_keyword: &mut Vec<String>,
     domain_regex: &mut Vec<String>,
     ip_cidr: &mut Vec<String>,
+    process_name: &mut Vec<String>,
 ) {
     if line.is_empty() || line.starts_with('#') {
+        return;
+    }
+
+    if let Some(rest) = line.strip_prefix("PROCESS-NAME,") {
+        let name = rest.split(',').next().unwrap_or(rest).trim();
+        if !name.is_empty() {
+            process_name.push(name.to_string());
+        }
         return;
     }
 
@@ -164,6 +176,17 @@ fn looks_like_cidr(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn converts_process_name() {
+        let raw = r#"payload:
+  - 'PROCESS-NAME,sing-box'
+  - 'PROCESS-NAME,sing-box.exe'
+"#;
+        let json = loyalsoldier_yaml_to_singbox_source(raw).unwrap();
+        assert!(json.contains("process_name"));
+        assert!(json.contains("sing-box"));
+    }
 
     #[test]
     fn converts_payload_yaml() {

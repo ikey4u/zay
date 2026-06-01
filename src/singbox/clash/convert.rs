@@ -50,6 +50,7 @@ pub fn convert_proxy(
         "hysteria" => hysteria_outbound(map, &tag, false)?,
         "hysteria2" => hysteria_outbound(map, &tag, true)?,
         "tuic" => tuic_outbound(map, &tag)?,
+        "anytls" => anytls_outbound(map, &tag)?,
         "socks5" | "socks" => socks_outbound(map, &tag, false)?,
         "http" | "https" => socks_outbound(map, &tag, true)?,
         "wireguard" => wireguard_outbound(map, &tag)?,
@@ -172,41 +173,44 @@ fn shadowsocks_outbound(map: &serde_yaml::Mapping, tag: &str) -> Result<Value> {
 }
 
 fn vmess_outbound(map: &serde_yaml::Mapping, tag: &str) -> Result<Value> {
+    let port = yaml_u16(map, "port")?;
     let mut out = json!({
         "type": "vmess",
         "tag": tag,
         "server": yaml_str(map, "server")?,
-        "server_port": yaml_u16(map, "port")?,
+        "server_port": port,
         "uuid": yaml_str(map, "uuid")?,
         "security": yaml_str(map, "cipher").unwrap_or("auto"),
         "alter_id": yaml_u64(map, "alterId").unwrap_or(0)
     });
-    apply_transport_tls(map, &mut out)?;
+    apply_transport_and_tls(map, &mut out, "vmess", port)?;
     Ok(out)
 }
 
 fn vless_outbound(map: &serde_yaml::Mapping, tag: &str) -> Result<Value> {
+    let port = yaml_u16(map, "port")?;
     let mut out = json!({
         "type": "vless",
         "tag": tag,
         "server": yaml_str(map, "server")?,
-        "server_port": yaml_u16(map, "port")?,
+        "server_port": port,
         "uuid": yaml_str(map, "uuid")?,
         "flow": yaml_optional_str(map, "flow")
     });
-    apply_transport_tls(map, &mut out)?;
+    apply_transport_and_tls(map, &mut out, "vless", port)?;
     Ok(out)
 }
 
 fn trojan_outbound(map: &serde_yaml::Mapping, tag: &str) -> Result<Value> {
+    let port = yaml_u16(map, "port")?;
     let mut out = json!({
         "type": "trojan",
         "tag": tag,
         "server": yaml_str(map, "server")?,
-        "server_port": yaml_u16(map, "port")?,
+        "server_port": port,
         "password": yaml_str(map, "password")?
     });
-    apply_transport_tls(map, &mut out)?;
+    apply_transport_and_tls(map, &mut out, "trojan", port)?;
     Ok(out)
 }
 
@@ -227,7 +231,7 @@ fn hysteria_outbound(
     });
     if let Some(obj) = out.as_object_mut() {
         if yaml_bool(map, "tls").unwrap_or(true) {
-            obj.insert("tls".into(), json!({ "enabled": true, "server_name": yaml_optional_str(map, "sni").or_else(|| yaml_optional_str(map, "server")) }));
+            obj.insert("tls".into(), build_outbound_tls(map, true)?);
         }
     }
     Ok(out)
@@ -242,11 +246,34 @@ fn tuic_outbound(map: &serde_yaml::Mapping, tag: &str) -> Result<Value> {
         "uuid": yaml_str(map, "uuid")?,
         "password": yaml_str(map, "password")?,
         "congestion_control": yaml_optional_str(map, "congestion-controller").unwrap_or_else(|| "cubic".into()),
-        "tls": {
-            "enabled": true,
-            "server_name": yaml_optional_str(map, "sni").or_else(|| yaml_optional_str(map, "server"))
-        }
+        "tls": build_outbound_tls(map, true)?
     }))
+}
+
+fn anytls_outbound(map: &serde_yaml::Mapping, tag: &str) -> Result<Value> {
+    let mut out = json!({
+        "type": "anytls",
+        "tag": tag,
+        "server": yaml_str(map, "server")?,
+        "server_port": yaml_u16(map, "port")?,
+        "password": yaml_str(map, "password")?
+    });
+    if let Some(obj) = out.as_object_mut() {
+        if let Some(n) = yaml_u64(map, "idle-session-check-interval") {
+            obj.insert(
+                "idle_session_check_interval".into(),
+                json!(format!("{n}s")),
+            );
+        }
+        if let Some(n) = yaml_u64(map, "idle-session-timeout") {
+            obj.insert("idle_session_timeout".into(), json!(format!("{n}s")));
+        }
+        if let Some(n) = yaml_u64(map, "min-idle-session") {
+            obj.insert("min_idle_session".into(), json!(n));
+        }
+        obj.insert("tls".into(), build_outbound_tls(map, true)?);
+    }
+    Ok(out)
 }
 
 fn socks_outbound(
@@ -292,34 +319,136 @@ fn wireguard_outbound(map: &serde_yaml::Mapping, tag: &str) -> Result<Value> {
     }))
 }
 
-fn apply_transport_tls(
+fn apply_transport_and_tls(
     map: &serde_yaml::Mapping,
     out: &mut Value,
+    proxy_type: &str,
+    port: u16,
 ) -> Result<()> {
-    let network = yaml_optional_str(map, "network");
-    if let Some(net) = network.as_deref() {
+    apply_transport(map, out)?;
+    if outbound_tls_enabled(map, proxy_type, port) {
         if let Some(obj) = out.as_object_mut() {
-            obj.insert(
-                "transport".into(),
-                json!({ "type": net, "path": yaml_optional_str(map, "ws-path").or_else(|| yaml_optional_str(map, "path")), "headers": yaml_optional_map(map, "ws-headers") }),
-            );
-        }
-    }
-    if yaml_bool(map, "tls").unwrap_or(false)
-        || yaml_optional_str(map, "sni").is_some()
-    {
-        if let Some(obj) = out.as_object_mut() {
-            obj.insert(
-                "tls".into(),
-                json!({
-                    "enabled": true,
-                    "server_name": yaml_optional_str(map, "sni").or_else(|| yaml_optional_str(map, "server")),
-                    "insecure": yaml_bool(map, "skip-cert-verify").unwrap_or(false)
-                }),
-            );
+            obj.insert("tls".into(), build_outbound_tls(map, false)?);
         }
     }
     Ok(())
+}
+
+fn apply_transport(map: &serde_yaml::Mapping, out: &mut Value) -> Result<()> {
+    let network = yaml_optional_str(map, "network")
+        .unwrap_or_else(|| "tcp".into())
+        .to_lowercase();
+    if network == "tcp" {
+        return Ok(());
+    }
+    let Some(obj) = out.as_object_mut() else {
+        return Ok(());
+    };
+    let transport = match network.as_str() {
+        "ws" | "websocket" => {
+            let mut headers = yaml_nested_map(map, "ws-opts", "headers")
+                .or_else(|| yaml_optional_map(map, "ws-headers"));
+            if headers.is_none() {
+                if let Some(host) = yaml_optional_str(map, "host") {
+                    let mut h = Map::new();
+                    h.insert("Host".to_string(), json!(host));
+                    headers = Some(h);
+                }
+            }
+            json!({
+                "type": "ws",
+                "path": yaml_nested_str(map, "ws-opts", "path")
+                    .or_else(|| yaml_optional_str(map, "ws-path"))
+                    .or_else(|| yaml_optional_str(map, "path")),
+                "headers": headers
+            })
+        }
+        "grpc" => json!({
+            "type": "grpc",
+            "service_name": yaml_nested_str(map, "grpc-opts", "grpc-service-name")
+                .or_else(|| yaml_optional_str(map, "grpc-service-name"))
+        }),
+        "h2" | "http" => json!({
+            "type": "http",
+            "path": yaml_optional_str(map, "path"),
+            "host": yaml_string_array(map, "host").ok()
+        }),
+        other => {
+            json!({ "type": other })
+        }
+    };
+    obj.insert("transport".into(), transport);
+    Ok(())
+}
+
+fn outbound_tls_enabled(
+    map: &serde_yaml::Mapping,
+    proxy_type: &str,
+    port: u16,
+) -> bool {
+    if yaml_bool(map, "tls").unwrap_or(false) {
+        return true;
+    }
+    if reality_opts(map).is_some() {
+        return true;
+    }
+    if yaml_optional_str(map, "flow").is_some() {
+        return true;
+    }
+    if yaml_optional_str(map, "sni").is_some()
+        || yaml_optional_str(map, "servername").is_some()
+    {
+        return true;
+    }
+    matches!(proxy_type, "trojan" | "anytls")
+        || (proxy_type == "vless" && port == 443)
+}
+
+/// Clash/Mihomo SNI: `sni`, `servername`, then `host`, then `server`.
+fn tls_server_name(map: &serde_yaml::Mapping) -> Option<String> {
+    yaml_optional_str(map, "sni")
+        .or_else(|| yaml_optional_str(map, "servername"))
+        .or_else(|| yaml_optional_str(map, "host"))
+        .or_else(|| yaml_optional_str(map, "server"))
+}
+
+fn build_outbound_tls(
+    map: &serde_yaml::Mapping,
+    _required: bool,
+) -> Result<Value> {
+    let mut tls = json!({
+        "enabled": true,
+        "server_name": tls_server_name(map),
+        "insecure": yaml_bool(map, "skip-cert-verify").unwrap_or(false)
+    });
+    if let Some(alpn) = yaml_string_array(map, "alpn")
+        .ok()
+        .filter(|a| !a.is_empty())
+    {
+        tls["alpn"] = json!(alpn);
+    }
+    if let Some(fp) = yaml_optional_str(map, "client-fingerprint")
+        .or_else(|| yaml_optional_str(map, "fingerprint"))
+    {
+        tls["utls"] = json!({ "enabled": true, "fingerprint": fp });
+    }
+    if let Some(reality) = reality_opts(map) {
+        tls["reality"] = reality;
+    }
+    Ok(tls)
+}
+
+fn reality_opts(map: &serde_yaml::Mapping) -> Option<Value> {
+    let nested = map.get(YamlValue::from("reality-opts"))?.as_mapping()?;
+    let public_key = yaml_mapping_str(nested, "public-key")?;
+    let mut reality = json!({
+        "enabled": true,
+        "public_key": public_key
+    });
+    if let Some(short_id) = yaml_mapping_str(nested, "short-id") {
+        reality["short_id"] = json!(short_id);
+    }
+    Some(reality)
 }
 
 fn yaml_str<'a>(map: &'a serde_yaml::Mapping, key: &str) -> Result<&'a str> {
@@ -393,6 +522,75 @@ password: secret
         assert_eq!(out["type"], "shadowsocks");
         assert_eq!(out["tag"], "test-ss");
     }
+
+    #[test]
+    fn converts_anytls_proxy() {
+        let raw = r#"
+name: jp-anytls
+type: anytls
+server: example.com
+port: 443
+password: secret
+sni: example.com
+client-fingerprint: chrome
+idle-session-check-interval: 30
+min-idle-session: 4
+skip-cert-verify: true
+"#;
+        let proxy: Value = serde_yaml::from_str(raw).unwrap();
+        let out = convert_proxy(&proxy, None).unwrap().unwrap();
+        assert_eq!(out["type"], "anytls");
+        assert_eq!(out["password"], "secret");
+        assert_eq!(out["idle_session_check_interval"], "30s");
+        assert_eq!(out["min_idle_session"], 4);
+        assert_eq!(out["tls"]["server_name"], "example.com");
+        assert_eq!(out["tls"]["utls"]["fingerprint"], "chrome");
+        assert!(out["tls"]["insecure"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn vless_uses_servername_for_tls_sni() {
+        let raw = r#"
+name: sg-vless
+type: vless
+server: cm91.tiggert.com
+port: 443
+uuid: 11111111-2222-3333-4444-555555555555
+network: tcp
+tls: true
+servername: dnpa5t1ieentty2kaux-sgweb-01.rarasafe.com
+client-fingerprint: chrome
+"#;
+        let proxy: Value = serde_yaml::from_str(raw).unwrap();
+        let out = convert_proxy(&proxy, None).unwrap().unwrap();
+        assert_eq!(
+            out["tls"]["server_name"],
+            "dnpa5t1ieentty2kaux-sgweb-01.rarasafe.com"
+        );
+        assert_eq!(out["tls"]["utls"]["fingerprint"], "chrome");
+    }
+
+    #[test]
+    fn vless_reality_opts_mapped() {
+        let raw = r#"
+name: reality
+type: vless
+server: edge.example.net
+port: 443
+uuid: 11111111-2222-3333-4444-555555555555
+flow: xtls-rprx-vision
+tls: true
+servername: www.microsoft.com
+client-fingerprint: chrome
+reality-opts:
+  public-key: testpubkey==
+  short-id: abcd
+"#;
+        let proxy: Value = serde_yaml::from_str(raw).unwrap();
+        let out = convert_proxy(&proxy, None).unwrap().unwrap();
+        assert_eq!(out["tls"]["reality"]["public_key"], "testpubkey==");
+        assert_eq!(out["tls"]["reality"]["short_id"], "abcd");
+    }
 }
 
 fn yaml_optional_map(
@@ -400,6 +598,37 @@ fn yaml_optional_map(
     key: &str,
 ) -> Option<Map<String, Value>> {
     let v = map.get(YamlValue::from(key))?;
+    yaml_value_to_map(v)
+}
+
+fn yaml_nested_str(
+    map: &serde_yaml::Mapping,
+    parent: &str,
+    key: &str,
+) -> Option<String> {
+    map.get(YamlValue::from(parent))?
+        .as_mapping()
+        .and_then(|nested| yaml_mapping_str(nested, key))
+}
+
+fn yaml_nested_map(
+    map: &serde_yaml::Mapping,
+    parent: &str,
+    key: &str,
+) -> Option<Map<String, Value>> {
+    map.get(YamlValue::from(parent))?
+        .as_mapping()?
+        .get(YamlValue::from(key))
+        .and_then(yaml_value_to_map)
+}
+
+fn yaml_mapping_str(map: &serde_yaml::Mapping, key: &str) -> Option<String> {
+    map.get(YamlValue::from(key))
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
+fn yaml_value_to_map(v: &YamlValue) -> Option<Map<String, Value>> {
     let mapping = v.as_mapping()?;
     let mut out = Map::new();
     for (k, val) in mapping {

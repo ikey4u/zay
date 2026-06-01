@@ -4,7 +4,15 @@ pub mod easytier;
 pub mod mesh;
 pub mod mihomo;
 
-use std::{fs, net::Ipv4Addr, path::PathBuf, process::Child, sync::Arc};
+use std::{
+    fs,
+    net::Ipv4Addr,
+    path::PathBuf,
+    process::Child,
+    sync::{Arc, RwLock},
+    thread,
+    time::Duration,
+};
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
@@ -120,12 +128,17 @@ pub fn run(cli: StackCli) -> Result<()> {
                 "mesh hub: sing-box TUN disabled (EasyTier relay only; SSH stays on eth0)"
             );
         } else {
-            eprintln!(
-                "mesh client: TUN captures only [mesh].mesh_routes (relay SSH + public traffic stay on physical NIC)"
-            );
-            if crate::singbox::tun_route::tun_selective_mesh_routes(
+            let mesh_proxy = !prepared.settings.subscriptions.is_empty();
+            if mesh_proxy {
+                eprintln!(
+                    "mesh client + proxy: full TUN capture (Google/etc. via sing-box; mesh still uses easytier-wg)"
+                );
+            } else if crate::singbox::tun_route::tun_selective_mesh_routes(
                 &prepared.settings,
             ) {
+                eprintln!(
+                    "mesh client: TUN captures only [mesh].mesh_routes (relay SSH + public traffic stay on physical NIC)"
+                );
                 if let Some(routes) = prepared
                     .settings
                     .mesh
@@ -181,30 +194,41 @@ pub fn run(cli: StackCli) -> Result<()> {
         }
         let wg_listen =
             cfg.wireguard_listen.as_deref().unwrap_or("127.0.0.1:51820");
-        crate::singbox::tun_route::wait_for_wireguard_port(
+        match crate::singbox::tun_route::wait_for_wireguard_port(
             wg_listen,
-            std::time::Duration::from_secs(30),
-        )
-        .with_context(|| {
-            format!(
-                "EasyTier WireGuard portal {wg_listen} not ready — sing-box cannot reach mesh. \
-                 Check EasyTier logs above; port may be in use (lsof -iUDP:{})",
-                wg_listen.rsplit_once(':').map(|(_, p)| p).unwrap_or("51820")
+            std::time::Duration::from_secs(10),
+        ) {
+            Ok(()) => {}
+            Err(e) => {
+                eprintln!(
+                    "warn: {e:#} — continuing; mesh 10.x via easytier-wg may be down until portal is up"
+                );
+            }
+        }
+        if std::env::var("ZAY_MESH_REQUIRE_PEERS").ok().as_deref() == Some("1")
+        {
+            easytier::wait_for_mesh_peers(
+                std::time::Duration::from_secs(45),
+                cfg,
             )
-        })?;
-        easytier::wait_for_mesh_peers(std::time::Duration::from_secs(45), cfg)
             .context("EasyTier mesh not ready")?;
+        } else {
+            easytier::spawn_mesh_peer_watch(cfg.clone());
+            eprintln!(
+                "mesh: peer discovery in background — starting sing-box now"
+            );
+        }
         true
     } else {
         false
     };
 
     // Hot reload while `easytier-wg` is up hangs sing-box (endpoint close never finishes).
-    // Prefetch rules and write the final config before starting sing-box.
-    if flags.mesh
+    // Mesh-only: prefetch rules before sing-box (direct HTTP). Mesh + proxy: fetch after sing-box starts.
+    let mesh_rules_pending = flags.mesh
         && !flags.no_rules
-        && !rules::files_present(&prepared.settings.singbox_dir())
-    {
+        && !rules::files_present(&prepared.settings.singbox_dir());
+    if mesh_rules_pending && prepared.settings.subscriptions.is_empty() {
         eprintln!(
             "mesh: prefetching clash-rules before sing-box (hot reload disabled with --mesh)…"
         );
@@ -253,6 +277,13 @@ pub fn run(cli: StackCli) -> Result<()> {
         "stack – {proxy_scope} on {listen_host}:{} (gateway={}, mesh={}, tun={})",
         state.settings.mixed_port, flags.gateway, flags.mesh, state.tun_enabled,
     );
+    if state.tun_enabled && !state.settings.subscriptions.is_empty() {
+        eprintln!(
+            "tip: desktop Firefox (RDP) — Settings → Network → **No proxy** when TUN is on; \
+             do NOT use Manual proxy localhost:7890 (curl uses tun0, not mixed). \
+             If system proxy is stuck: gsettings set org.gnome.system.proxy mode 'none'"
+        );
+    }
 
     let config_path = state.settings.config_path();
 
@@ -282,6 +313,38 @@ pub fn run(cli: StackCli) -> Result<()> {
     }
     if let Some(stderr) = child.stderr.take() {
         assets::pipe_logs(stderr);
+    }
+
+    if state.tun_enabled {
+        let settings = state.settings.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_secs(3));
+            singbox::tun_route::linux_register_tun_dns(&settings);
+        });
+    }
+
+    if mesh_rules_pending && !state.settings.subscriptions.is_empty() {
+        match mesh_fetch_rules_restart_singbox(
+            &state.settings,
+            &engine,
+            &config_path,
+            state.tun_enabled,
+            &mut child,
+            &state.config_json,
+        ) {
+            Ok(()) => {
+                if let Some(stdout) = child.stdout.take() {
+                    assets::pipe_logs(stdout);
+                }
+                if let Some(stderr) = child.stderr.take() {
+                    assets::pipe_logs(stderr);
+                }
+            }
+            Err(e) => eprintln!(
+                "warn: clash-rules fetch via proxy failed: {e:#}; \
+                 fallback routes still apply (final outbound → Proxy)"
+            ),
+        }
     }
 
     if !flags.mesh
@@ -331,6 +394,31 @@ fn spawn_singbox(
         false,
         tun_enabled,
     )
+}
+
+/// After sing-box is up, download clash-rules through mixed proxy and restart (mesh hot reload is unsafe).
+fn mesh_fetch_rules_restart_singbox(
+    settings: &Settings,
+    engine: &std::path::Path,
+    config_path: &std::path::Path,
+    tun_enabled: bool,
+    child: &mut Child,
+    config_json: &Arc<RwLock<String>>,
+) -> Result<()> {
+    eprintln!("mesh: fetching clash-rules via local proxy (sing-box is up)…");
+    rules::download_all(settings)?;
+    let base = singbox::builder::build_config(settings, true)?;
+    let json = mixin::merge_config(&base, settings)?;
+    fs::write(config_path, &json)
+        .with_context(|| format!("writing {}", config_path.display()))?;
+    *config_json.write().expect("config lock") = json;
+    eprintln!("config updated with clash-rules; restarting sing-box…");
+    assets::terminate_process(child.id());
+    let _ = child
+        .wait()
+        .context("waiting for sing-box before rules restart")?;
+    *child = spawn_singbox(engine, settings, config_path, tun_enabled)?;
+    Ok(())
 }
 
 fn ensure_stack_config_exists(common: &ProxyOpts) -> Result<()> {

@@ -201,7 +201,49 @@ mod imp {
         log_mesh_status_now();
     }
 
-    /// Poll until at least one remote peer appears, or timeout.
+    /// Log mesh peer/routes in the background (default). Does not block stack startup.
+    pub fn spawn_mesh_peer_watch(mesh: MeshConfig) {
+        if std::env::var("ZAY_MESH_REQUIRE_PEERS").ok().as_deref() == Some("1")
+        {
+            return;
+        }
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            log_mesh_status_now();
+            let mut logged_no_peer = false;
+            loop {
+                match mesh_peer_count() {
+                    Ok(n) if n > 0 => {
+                        eprintln!("mesh: {n} remote peer(s) connected");
+                        log_mesh_status_now();
+                        return;
+                    }
+                    Ok(_) => {
+                        if !logged_no_peer {
+                            if mesh::is_hub(&mesh) {
+                                eprintln!(
+                                    "mesh: hub waiting for clients on :11010 (no remote peers yet — normal)"
+                                );
+                            } else {
+                                eprintln!(
+                                    "mesh: no remote peers yet — 10.x mesh routes inactive until hub/clients connect; \
+                                     proxy/TUN continues"
+                                );
+                            }
+                            logged_no_peer = true;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("warn: mesh status query failed: {e:#}");
+                        return;
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_secs(30));
+            }
+        });
+    }
+
+    /// Block until at least one remote peer appears (opt-in: `ZAY_MESH_REQUIRE_PEERS=1`).
     ///
     /// Hub nodes (with `[mesh].listeners`) skip the hard failure — they normally have
     /// zero peers until macOS/Linux clients connect.
@@ -323,7 +365,10 @@ mod imp {
     }
 }
 
-pub use imp::{log_mesh_status, start, stop_all, wait_for_mesh_peers};
+pub use imp::{
+    log_mesh_status, spawn_mesh_peer_watch, start, stop_all,
+    wait_for_mesh_peers,
+};
 
 pub fn start_for_singbox(
     mesh: &MeshConfig,

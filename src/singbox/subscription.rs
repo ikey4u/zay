@@ -78,7 +78,7 @@ fn fetch_subscription(
     Ok(body)
 }
 
-fn client_via_bootstrap(bp: &BootstrapProxy) -> Result<Client> {
+pub fn client_via_bootstrap(bp: &BootstrapProxy) -> Result<Client> {
     let proxy = proxy::singbox_outbound_to_proxy_url(&bp.proxy)?;
     let proxy = reqwest::Proxy::all(&proxy)
         .with_context(|| format!("invalid bootstrap proxy URL {proxy}"))?;

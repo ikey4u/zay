@@ -74,6 +74,7 @@ fn prepare_inner(settings: Settings, flags: StackFlags) -> Result<Prepared> {
     }
 
     let has_rules = rules::files_present(&settings.singbox_dir());
+    rules::log_routing_mode(&settings, has_rules);
     if flags.no_rules {
         if has_rules {
             eprintln!(

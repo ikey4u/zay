@@ -1,10 +1,13 @@
 //! TUN `route_exclude_address` helpers — keep LAN/SSH and mesh control traffic off the tunnel.
 
 use std::{
+    env,
     net::Ipv4Addr,
     process::Command,
     time::{Duration, Instant},
 };
+
+use serde_json::{Value, json};
 
 use crate::{settings::Settings, stack::mesh};
 
@@ -17,6 +20,27 @@ pub fn tun_address(settings: &Settings) -> String {
         .as_ref()
         .and_then(|m| mesh::portal_tun_prefix_cidr(m))
         .unwrap_or_else(|| TUN_ADDRESS_FALLBACK.to_string())
+}
+
+/// TUN `address` list: IPv4 portal prefix + optional IPv6 /126 for full-capture stacks.
+pub fn tun_addresses(settings: &Settings) -> Vec<String> {
+    let mut addrs = vec![tun_address(settings)];
+    if let Some(v6) = tun_inet6_prefix(settings) {
+        addrs.push(v6);
+    }
+    addrs
+}
+
+/// ULA /126 on full-capture TUN so desktop browsers (Firefox IPv6/AAAA) enter sing-box instead of leaking.
+///
+/// Must be the **first** host in a /126 (e.g. `::1/126`), not the last (e.g. `::3/126`):
+/// sing-box system/mixed stack needs `addr+1` inside the same prefix for TUN DNS.
+pub fn tun_inet6_prefix(settings: &Settings) -> Option<String> {
+    if !singbox_tun_enabled(settings) || tun_selective_mesh_routes(settings) {
+        return None;
+    }
+    let _ = settings;
+    Some("fdfe:dcba:9876::1/126".to_string())
 }
 
 /// RFC1918-style ranges that must not be captured by TUN (except mesh routes in 10.x).
@@ -83,9 +107,62 @@ pub fn tun_auto_route(_settings: &Settings) -> bool {
     true
 }
 
-/// Mesh client/hub: only `[mesh].mesh_routes` on TUN — not 0.0.0.0/0 (keeps SSH to relay public IP on en0/eth0).
+/// Linux full-capture TUN: `system` stack (Mihomo default) integrates with systemd-resolved better than `mixed`.
+pub fn tun_stack(settings: &Settings) -> &'static str {
+    #[cfg(target_os = "linux")]
+    {
+        if singbox_tun_enabled(settings) && !tun_selective_mesh_routes(settings)
+        {
+            return "system";
+        }
+    }
+    "mixed"
+}
+
+/// Opt-in: nftables DNS redirect (`ZAY_TUN_AUTO_REDIRECT=1`). Fails if stale nft rules exist (`file exists`).
+pub fn tun_auto_redirect(settings: &Settings) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        if env::var("ZAY_TUN_AUTO_REDIRECT").ok().as_deref() != Some("1") {
+            return false;
+        }
+        return singbox_tun_enabled(settings)
+            && tun_auto_route(settings)
+            && !tun_selective_mesh_routes(settings);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = settings;
+        false
+    }
+}
+
+/// DNS addresses sing-box registers on the TUN link (next IP after each `address` entry).
+pub fn tun_derived_dns_servers(settings: &Settings) -> Vec<String> {
+    tun_addresses(settings)
+        .iter()
+        .filter_map(|cidr| next_address_host(cidr))
+        .collect()
+}
+
+fn next_address_host(cidr: &str) -> Option<String> {
+    let (host, _) = cidr.split_once('/')?;
+    if host.contains(':') {
+        return None;
+    }
+    let addr: Ipv4Addr = host.parse().ok()?;
+    Some(Ipv4Addr::from(u32::from(addr).saturating_add(1)).to_string())
+}
+
+/// Mesh client/hub: only `[mesh].mesh_routes` on TUN — not 0.0.0.0/0 (keeps SSH to relay public IP on en0).
+///
+/// Disabled when a subscription is configured (`--proxy`): user expects global proxy capture on TUN,
+/// not mesh-only routing. Peer/SSH excludes still apply on full TUN.
 pub fn tun_selective_mesh_routes(settings: &Settings) -> bool {
     if !settings.stack.mesh || settings.stack.gateway {
+        return false;
+    }
+    if !settings.subscriptions.is_empty() {
         return false;
     }
     // Hub skips sing-box TUN entirely; this applies to Mac/Linux mesh clients.
@@ -145,12 +222,194 @@ pub fn log_tun_routing(config_json: &str) {
             "tun routing: auto_route=true, route_address=[{route_address}] ({excludes} excludes; mesh-only capture, SSH-safe)"
         );
     } else if auto_route {
-        eprintln!(
-            "tun routing: auto_route=true, full capture ({excludes} excludes)"
-        );
+        let redirect = tun
+            .get("auto_redirect")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if redirect {
+            eprintln!(
+                "tun routing: auto_route=true, auto_redirect=true, full capture ({excludes} excludes)"
+            );
+        } else {
+            eprintln!(
+                "tun routing: auto_route=true, full capture ({excludes} excludes)"
+            );
+        }
     } else {
         eprintln!("tun routing: auto_route=false ({excludes} excludes)");
     }
+}
+
+#[cfg(target_os = "linux")]
+fn systemd_resolved_running() -> bool {
+    Command::new("systemctl")
+        .args(["is-active", "--quiet", "systemd-resolved"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// After sing-box brings up tun0: register TUN DNS on systemd-resolved when present (Mihomo does this in-core).
+#[cfg(target_os = "linux")]
+pub fn linux_register_tun_dns(settings: &Settings) {
+    if env::var("ZAY_NO_RESOLVECTL_DNS").is_ok() {
+        return;
+    }
+    if !singbox_tun_enabled(settings) || tun_selective_mesh_routes(settings) {
+        return;
+    }
+    let servers = tun_derived_dns_servers(settings);
+    if servers.is_empty() {
+        return;
+    }
+    if !systemd_resolved_running() {
+        log_glibc_dns_hint(&servers);
+        return;
+    }
+    let ifname = tun_interface_name();
+    let mut cmd = Command::new("resolvectl");
+    cmd.arg("dns").arg(&ifname);
+    for s in &servers {
+        cmd.arg(s);
+    }
+    match cmd.status() {
+        Ok(s) if s.success() => {
+            eprintln!(
+                "linux DNS: resolvectl dns {ifname} {} (systemd-resolved → sing-box FakeIP)",
+                servers.join(" ")
+            );
+        }
+        Ok(s) => {
+            eprintln!(
+                "warn: resolvectl dns {ifname} exited {}; check: resolvectl status {ifname}",
+                s
+            );
+        }
+        Err(e) => {
+            eprintln!("warn: resolvectl failed ({e})");
+            log_glibc_dns_hint(&servers);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn log_glibc_dns_hint(tun_dns: &[String]) {
+    eprintln!(
+        "linux DNS: no systemd-resolved — glibc reads /etc/resolv.conf directly \
+         (resolvectl does not apply on this host)"
+    );
+    eprintln!(
+        "dns: FakeIP needs port-53 queries to reach sing-box (TUN hijack-dns). \
+         Avoid stub 127.0.0.53 with no resolver behind it; use routable nameservers \
+         (e.g. 223.5.5.5) or set ZAY_TUN_AUTO_REDIRECT=1 if nftables is clean. \
+         TUN DNS gateway: {}",
+        tun_dns.join(", ")
+    );
+    if let Ok(raw) = std::fs::read_to_string("/etc/resolv.conf") {
+        let preview: String =
+            raw.lines().take(4).collect::<Vec<_>>().join("; ");
+        if !preview.is_empty() {
+            eprintln!("dns: /etc/resolv.conf → {preview}");
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn linux_register_tun_dns(_settings: &Settings) {}
+
+pub fn log_fakeip_dns_hint(settings: &Settings, clash_dns: bool) {
+    if !clash_dns || !singbox_tun_enabled(settings) {
+        return;
+    }
+    let servers = tun_derived_dns_servers(settings);
+    if servers.is_empty() {
+        return;
+    }
+    eprintln!(
+        "dns: FakeIP active — with sing-box running, check: getent ahostsv4 google.com \
+         (expect 198.18.x.x, not 173.x or 2607:…). TUN DNS: {}",
+        servers.join(", ")
+    );
+    #[cfg(target_os = "linux")]
+    if systemd_resolved_running() {
+        eprintln!(
+            "dns: systemd-resolved — after start: resolvectl status {}",
+            tun_interface_name()
+        );
+    } else {
+        eprintln!(
+            "dns: no systemd-resolved — use getent ahostsv4; see /etc/resolv.conf"
+        );
+    }
+}
+
+fn tun_interface_name() -> String {
+    env::var("ZAY_TUN_INTERFACE").unwrap_or_else(|_| "tun0".into())
+}
+
+/// `direct` outbound; bind to the physical NIC on full TUN (sing-box config only — avoids DNS loops).
+pub fn direct_outbound_json(settings: &Settings, tun_enabled: bool) -> Value {
+    let mut ob = json!({ "type": "direct", "tag": "direct" });
+    if tun_enabled && !tun_selective_mesh_routes(settings) {
+        if let Some(iface) = default_route_interface() {
+            ob["bind_interface"] = json!(iface);
+        }
+    }
+    ob
+}
+
+pub fn default_route_interface() -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        default_route_interface_linux()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        default_route_interface_macos()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        None
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn default_route_interface_linux() -> Option<String> {
+    let out = Command::new("ip")
+        .args(["route", "show", "default"])
+        .output()
+        .ok()?;
+    parse_ip_route_dev(&String::from_utf8_lossy(&out.stdout))
+}
+
+#[cfg(target_os = "macos")]
+fn default_route_interface_macos() -> Option<String> {
+    let out = Command::new("route")
+        .args(["-n", "get", "default"])
+        .output()
+        .ok()?;
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("interface:") {
+            let iface = rest.trim();
+            if !iface.is_empty() {
+                return Some(iface.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn parse_ip_route_dev(text: &str) -> Option<String> {
+    for line in text.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if let Some(i) = parts.iter().position(|&p| p == "dev") {
+            if let Some(dev) = parts.get(i + 1) {
+                return Some((*dev).to_string());
+            }
+        }
+    }
+    None
 }
 
 /// `strict_route` breaks SSH/LAN when combined with mesh; keep it off for `--mesh`.
@@ -775,6 +1034,102 @@ ssh     999 user   12u  IPv4 0xdeadbeef      0t0  TCP 192.168.1.5:54321->43.138.
     }
 
     #[test]
+    fn mesh_client_with_proxy_uses_full_tun() {
+        use std::path::PathBuf;
+
+        use crate::settings::{MeshConfig, Settings, StackFlags};
+
+        let settings = Settings {
+            subscriptions: vec!["https://example.com/sub".into()],
+            data_dir: PathBuf::from("/tmp"),
+            mixed_port: 7890,
+            allow_lan: false,
+            tun: true,
+            log_level: "info".into(),
+            health_check_url: "https://example.com".into(),
+            update_interval: 3600,
+            tun_exclude_routes: Vec::new(),
+            external_controller: "127.0.0.1:19090".into(),
+            api_secret: "".into(),
+            mihomo_mixin: None,
+            singbox_mixin: None,
+            bootstrap_proxy: None,
+            mesh: Some(MeshConfig {
+                instance_name: None,
+                network_name: "n".into(),
+                network_secret: "s".into(),
+                dhcp: None,
+                ipv4: Some("10.126.126.2/24".into()),
+                listeners: None,
+                peers: Some(vec!["tcp://43.138.178.37:11010".into()]),
+                proxy_networks: None,
+                mesh_routes: Some(vec!["10.126.126.0/24".into()]),
+                wireguard_listen: None,
+                wireguard_client_cidr: None,
+                wireguard_client_address: None,
+                wireguard_endpoint: None,
+            }),
+            stack: StackFlags {
+                mesh: true,
+                gateway: false,
+                tun: true,
+                no_rules: false,
+            },
+        };
+        assert!(!tun_selective_mesh_routes(&settings));
+        assert!(tun_route_address(&settings).is_none());
+        assert!(!is_selective_mesh_tun(&settings));
+    }
+
+    #[test]
+    fn full_capture_tun_includes_ipv6_prefix() {
+        use std::path::PathBuf;
+
+        use crate::settings::{MeshConfig, Settings, StackFlags};
+
+        let settings = Settings {
+            subscriptions: vec!["https://example.com/sub".into()],
+            data_dir: PathBuf::from("/tmp"),
+            mixed_port: 7890,
+            allow_lan: false,
+            tun: true,
+            log_level: "info".into(),
+            health_check_url: "https://example.com".into(),
+            update_interval: 3600,
+            tun_exclude_routes: Vec::new(),
+            external_controller: "127.0.0.1:19090".into(),
+            api_secret: "".into(),
+            mihomo_mixin: None,
+            singbox_mixin: None,
+            bootstrap_proxy: None,
+            mesh: Some(MeshConfig {
+                instance_name: None,
+                network_name: "n".into(),
+                network_secret: "s".into(),
+                dhcp: None,
+                ipv4: Some("10.126.126.2/24".into()),
+                listeners: None,
+                peers: Some(vec!["tcp://43.138.178.37:11010".into()]),
+                proxy_networks: None,
+                mesh_routes: Some(vec!["10.126.126.0/24".into()]),
+                wireguard_listen: None,
+                wireguard_client_cidr: None,
+                wireguard_client_address: None,
+                wireguard_endpoint: None,
+            }),
+            stack: StackFlags {
+                mesh: true,
+                gateway: false,
+                tun: true,
+                no_rules: false,
+            },
+        };
+        let addrs = tun_addresses(&settings);
+        assert_eq!(addrs.len(), 2);
+        assert!(addrs[1].contains("fdfe:dcba:9876::1/126"));
+    }
+
+    #[test]
     fn mesh_hub_route_address_defined_but_tun_disabled() {
         use std::path::PathBuf;
 
@@ -870,5 +1225,77 @@ ssh     999 user   12u  IPv4 0xdeadbeef      0t0  TCP 192.168.1.5:54321->43.138.
         assert!(!tun_strict_route(&settings));
         let ex = tun_exclude_addresses(&settings);
         assert!(ex.iter().any(|c| c == "192.168.0.0/16"));
+    }
+
+    #[test]
+    fn parse_ip_route_dev_extracts_interface() {
+        let text =
+            "default via 192.168.1.1 dev eth0 proto dhcp src 192.168.1.100\n";
+        assert_eq!(super::parse_ip_route_dev(text).as_deref(), Some("eth0"));
+    }
+
+    #[test]
+    fn derived_dns_is_next_host_after_tun_address() {
+        assert_eq!(
+            super::next_address_host("10.14.14.9/30").as_deref(),
+            Some("10.14.14.10")
+        );
+        assert_eq!(
+            super::next_address_host("172.18.0.1/30").as_deref(),
+            Some("172.18.0.2")
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn linux_full_capture_uses_system_stack() {
+        use std::path::PathBuf;
+
+        use crate::settings::{MeshConfig, Settings, StackFlags};
+
+        let settings = Settings {
+            subscriptions: vec!["https://example.com/sub".into()],
+            data_dir: PathBuf::from("/tmp"),
+            mixed_port: 7890,
+            allow_lan: false,
+            tun: true,
+            log_level: "info".into(),
+            health_check_url: "https://www.gstatic.com/generate_204".into(),
+            update_interval: 3600,
+            tun_exclude_routes: Vec::new(),
+            external_controller: "127.0.0.1:19090".into(),
+            api_secret: "secret".into(),
+            mihomo_mixin: None,
+            singbox_mixin: None,
+            bootstrap_proxy: None,
+            mesh: Some(MeshConfig {
+                instance_name: Some("zay".into()),
+                network_name: "n".into(),
+                network_secret: "s".into(),
+                dhcp: None,
+                ipv4: Some("10.126.126.2/24".into()),
+                listeners: None,
+                peers: None,
+                proxy_networks: None,
+                mesh_routes: None,
+                wireguard_listen: None,
+                wireguard_client_cidr: None,
+                wireguard_client_address: None,
+                wireguard_endpoint: None,
+            }),
+            stack: StackFlags {
+                mesh: true,
+                gateway: false,
+                tun: true,
+                no_rules: false,
+            },
+        };
+        assert_eq!(super::tun_stack(&settings), "system");
+        assert_eq!(
+            super::tun_derived_dns_servers(&settings)
+                .first()
+                .map(String::as_str),
+            Some("10.14.14.10")
+        );
     }
 }

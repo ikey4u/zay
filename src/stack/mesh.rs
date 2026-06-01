@@ -76,7 +76,7 @@ pub fn portal_tun_prefix_cidr(mesh: &MeshConfig) -> Option<String> {
     Some(format!("10.14.14.{}/30", base + 1))
 }
 
-fn mesh_ipv4_last_octet(mesh: &MeshConfig) -> Option<u8> {
+pub fn mesh_ipv4_last_octet(mesh: &MeshConfig) -> Option<u8> {
     let host = mesh.ipv4.as_deref()?.split('/').next()?;
     let ip: Ipv4Addr = host.parse().ok()?;
     Some(ip.octets()[3])
