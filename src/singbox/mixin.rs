@@ -23,11 +23,16 @@ pub fn merge_config(base_json: &str, settings: &Settings) -> Result<String> {
         .context("serializing merged sing-box config")
 }
 
-/// Keep peer bypass + `[mesh].mesh_routes → easytier-wg` ahead of mixin / clash rules.
+/// Keep EasyTier process bypass + peer bypass + mesh rules ahead of mixin / clash rules.
 fn prioritize_mesh_route_rules(base: &mut Value, settings: &Settings) {
+    let process_rules =
+        crate::singbox::mesh::easytier_process_bypass_route_rules(settings);
     let peer_rules = crate::singbox::mesh::peer_bypass_route_rules(settings);
     let mesh_rules = crate::singbox::mesh::mesh_route_rules(settings);
-    if peer_rules.is_empty() && mesh_rules.is_empty() {
+    if process_rules.is_empty()
+        && peer_rules.is_empty()
+        && mesh_rules.is_empty()
+    {
         return;
     }
     let Some(rules) = base
@@ -37,10 +42,12 @@ fn prioritize_mesh_route_rules(base: &mut Value, settings: &Settings) {
         return;
     };
     rules.retain(|rule| {
-        !crate::singbox::mesh::is_mesh_route_rule(rule)
+        !crate::singbox::mesh::is_easytier_process_bypass_route_rule(rule)
+            && !crate::singbox::mesh::is_mesh_route_rule(rule)
             && !crate::singbox::mesh::is_peer_bypass_route_rule(rule, settings)
     });
-    let mut merged = peer_rules;
+    let mut merged = process_rules;
+    merged.extend(peer_rules);
     merged.extend(mesh_rules);
     merged.extend(rules.drain(..));
     if let Some(route) = base.get_mut("route")
@@ -116,7 +123,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::settings::{MeshConfig, Settings, StackFlags};
+    use crate::settings::{MeshConfig, MeshRole, Settings, StackFlags};
 
     fn mesh_settings() -> Settings {
         Settings {
@@ -137,6 +144,7 @@ mod tests {
             ),
             bootstrap_proxy: None,
             mesh: Some(MeshConfig {
+                role: MeshRole::Node,
                 instance_name: None,
                 network_name: "n".into(),
                 network_secret: "s".into(),
@@ -152,7 +160,7 @@ mod tests {
                 wireguard_endpoint: None,
             }),
             stack: StackFlags {
-                mesh: true,
+                mesh: Some(MeshRole::Node),
                 gateway: false,
                 tun: true,
                 no_rules: true,

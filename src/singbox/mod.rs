@@ -3,6 +3,7 @@
 pub mod assets;
 pub mod builder;
 pub mod clash;
+mod embedded_rules;
 pub mod mesh;
 pub mod mixin;
 pub mod reload;

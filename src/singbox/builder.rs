@@ -64,8 +64,12 @@ pub fn build_value(settings: &Settings, has_rules: bool) -> Result<Value> {
 
     let include_applications =
         has_rules && rules::applications_present(&settings.singbox_dir());
+    let find_process = include_applications
+        || tun_route::tun_full_capture_mesh_proxy(&settings);
 
     let mut route_rules = Vec::new();
+    // EasyTier (in-process) + relay/STUN bypass before mesh/proxy rules.
+    route_rules.extend(mesh::easytier_process_bypass_route_rules(settings));
     // Relay/public peer IPs must bypass TUN path (SSH + EasyTier :11010) before mesh 10.x rules.
     route_rules.extend(mesh::peer_bypass_route_rules(settings));
     // Mesh CIDRs must win before sniff / clash private rules (10.x is ip_is_private).
@@ -96,19 +100,12 @@ pub fn build_value(settings: &Settings, has_rules: bool) -> Result<Value> {
             "outbound": proxy_final
         }));
     } else if tun_enabled {
-        let mesh_routes_mesh_only = settings.stack.mesh
-            && settings
-                .mesh
-                .as_ref()
-                .and_then(|m| m.mesh_routes.as_ref())
-                .is_some_and(|routes| !routes.is_empty());
-        if !mesh_routes_mesh_only {
-            route_rules.push(json!({
-                "action": "route",
-                "ip_is_private": true,
-                "outbound": "direct"
-            }));
-        }
+        // Mesh CIDR rules above already win for 10.x; keep RFC1918 on direct before final fallback.
+        route_rules.push(json!({
+            "action": "route",
+            "ip_is_private": true,
+            "outbound": "direct"
+        }));
         route_rules.push(json!({
             "action": "route",
             "outbound": proxy_final
@@ -153,10 +150,10 @@ pub fn build_value(settings: &Settings, has_rules: bool) -> Result<Value> {
         "default_domain_resolver": dns_resolver_tag
     });
 
+    if find_process {
+        route["find_process"] = json!(true);
+    }
     if has_rules {
-        if include_applications {
-            route["find_process"] = json!(true);
-        }
         route["rule_set"] = json!(rules::rule_set_definitions(settings));
     }
 
@@ -268,25 +265,7 @@ fn dns_config(
         });
     }
 
-    // Match Mihomo `enhanced-mode: fake-ip` + `nameserver: 223.5.5.5` (see mihomo/config/zay.rs).
-    let mut dns_rules = vec![json!({
-        "domain_suffix": [".lan", ".local", ".internal"],
-        "action": "route",
-        "server": "dns-direct"
-    })];
-    if has_rules {
-        dns_rules.push(json!({
-            "rule_set": ["private", "lancidr"],
-            "query_type": ["A", "AAAA"],
-            "action": "route",
-            "server": "dns-direct"
-        }));
-    }
-    dns_rules.push(json!({
-        "query_type": ["A", "AAAA"],
-        "action": "route",
-        "server": "fake-ip"
-    }));
+    let dns_rules = rules::clash_dns_rules(has_rules);
 
     let _ = settings;
     json!({
@@ -312,7 +291,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::settings::{MeshConfig, Settings, StackFlags};
+    use crate::settings::{MeshConfig, MeshRole, Settings, StackFlags};
 
     #[test]
     fn mesh_enables_wireguard_endpoint_and_tun() {
@@ -332,6 +311,7 @@ mod tests {
             singbox_mixin: None,
             bootstrap_proxy: None,
             mesh: Some(MeshConfig {
+                role: MeshRole::Node,
                 instance_name: Some("zay".into()),
                 network_name: "my-network".into(),
                 network_secret: "change-me".into(),
@@ -347,7 +327,7 @@ mod tests {
                 wireguard_endpoint: None,
             }),
             stack: StackFlags {
-                mesh: true,
+                mesh: Some(MeshRole::Node),
                 gateway: false,
                 tun: true,
                 no_rules: false,
@@ -391,6 +371,7 @@ mod tests {
             singbox_mixin: None,
             bootstrap_proxy: None,
             mesh: Some(MeshConfig {
+                role: MeshRole::Node,
                 instance_name: Some("zay".into()),
                 network_name: "my-network".into(),
                 network_secret: "change-me".into(),
@@ -406,7 +387,7 @@ mod tests {
                 wireguard_endpoint: None,
             }),
             stack: StackFlags {
-                mesh: true,
+                mesh: Some(MeshRole::Node),
                 gateway: false,
                 tun: true,
                 no_rules: false,
@@ -439,6 +420,81 @@ mod tests {
     }
 
     #[test]
+    fn mesh_client_with_proxy_bypasses_easytier_process() {
+        let settings = Settings {
+            subscriptions: vec!["https://example.com/sub".into()],
+            data_dir: PathBuf::from("/tmp/zay-singbox-test"),
+            mixed_port: 17890,
+            allow_lan: false,
+            tun: true,
+            log_level: "info".into(),
+            health_check_url: "https://www.gstatic.com/generate_204".into(),
+            update_interval: 3600,
+            tun_exclude_routes: Vec::new(),
+            external_controller: "127.0.0.1:19090".into(),
+            api_secret: "secret".into(),
+            mihomo_mixin: None,
+            singbox_mixin: None,
+            bootstrap_proxy: None,
+            mesh: Some(MeshConfig {
+                role: MeshRole::Node,
+                instance_name: Some("zay".into()),
+                network_name: "my-network".into(),
+                network_secret: "change-me".into(),
+                dhcp: None,
+                ipv4: Some("10.144.144.2/24".into()),
+                listeners: None,
+                peers: Some(vec!["tcp://43.138.178.37:11010".into()]),
+                proxy_networks: None,
+                mesh_routes: Some(vec!["10.144.144.0/24".into()]),
+                wireguard_listen: Some("127.0.0.1:51820".into()),
+                wireguard_client_cidr: None,
+                wireguard_client_address: None,
+                wireguard_endpoint: None,
+            }),
+            stack: StackFlags {
+                mesh: Some(MeshRole::Node),
+                gateway: false,
+                tun: true,
+                no_rules: false,
+            },
+        };
+
+        let json = build_config(&settings, false).unwrap();
+        assert!(json.contains("\"find_process\": true"));
+        assert!(json.contains("\"process_name\""));
+        assert!(!json.contains("\"route_address\""));
+        let doc: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let rules = doc["route"]["rules"].as_array().unwrap();
+        let process_rule = rules
+            .iter()
+            .position(|rule| {
+                crate::singbox::mesh::is_easytier_process_bypass_route_rule(
+                    rule,
+                )
+            })
+            .expect("easytier process bypass rule");
+        let peer_rule = rules
+            .iter()
+            .position(|rule| {
+                rule.get("ip_cidr").and_then(|v| v.as_array()).is_some_and(
+                    |cidrs| {
+                        cidrs
+                            .iter()
+                            .any(|c| c.as_str() == Some("43.138.178.37/32"))
+                    },
+                )
+            })
+            .unwrap();
+        let mesh_rule = rules
+            .iter()
+            .position(|rule| crate::singbox::mesh::is_mesh_route_rule(rule))
+            .unwrap();
+        assert!(process_rule < peer_rule);
+        assert!(peer_rule < mesh_rule);
+    }
+
+    #[test]
     fn mesh_hub_skips_singbox_tun() {
         let settings = Settings {
             subscriptions: Vec::new(),
@@ -456,25 +512,26 @@ mod tests {
             singbox_mixin: None,
             bootstrap_proxy: None,
             mesh: Some(MeshConfig {
+                role: MeshRole::Relay,
                 instance_name: Some("relay".into()),
                 network_name: "my-network".into(),
                 network_secret: "change-me".into(),
                 dhcp: None,
-                ipv4: Some("10.126.126.1/24".into()),
+                ipv4: None,
                 listeners: Some(vec![
                     "tcp://0.0.0.0:11010".into(),
                     "udp://0.0.0.0:11010".into(),
                 ]),
                 peers: None,
                 proxy_networks: None,
-                mesh_routes: Some(vec!["10.126.126.0/24".into()]),
-                wireguard_listen: Some("127.0.0.1:51820".into()),
+                mesh_routes: None,
+                wireguard_listen: None,
                 wireguard_client_cidr: None,
                 wireguard_client_address: None,
                 wireguard_endpoint: None,
             }),
             stack: StackFlags {
-                mesh: true,
+                mesh: Some(MeshRole::Relay),
                 gateway: false,
                 tun: true,
                 no_rules: true,
@@ -483,8 +540,8 @@ mod tests {
 
         let json = build_config(&settings, false).unwrap();
         assert!(!json.contains("\"type\": \"tun\""));
-        assert!(json.contains("\"easytier-wg\""));
-        assert!(json.contains("10.126.126.0/24"));
+        assert!(!json.contains("\"easytier-wg\""));
+        assert!(!json.contains("10.126.126.0/24"));
         assert!(!json.contains("\"port\": 53"));
         assert!(!json.contains("\"outbound\": \"any\""));
         assert!(json.contains("\"default_domain_resolver\": \"local-dns\""));
@@ -508,6 +565,7 @@ mod tests {
             singbox_mixin: None,
             bootstrap_proxy: None,
             mesh: Some(MeshConfig {
+                role: MeshRole::Node,
                 instance_name: Some("zay".into()),
                 network_name: "my-network".into(),
                 network_secret: "change-me".into(),
@@ -523,7 +581,7 @@ mod tests {
                 wireguard_endpoint: Some("nas.example.com:51820".into()),
             }),
             stack: StackFlags {
-                mesh: true,
+                mesh: Some(MeshRole::Node),
                 gateway: false,
                 tun: true,
                 no_rules: false,
@@ -553,7 +611,7 @@ mod tests {
             bootstrap_proxy: None,
             mesh: None,
             stack: StackFlags {
-                mesh: false,
+                mesh: None,
                 gateway: false,
                 tun: true,
                 no_rules: false,
@@ -561,7 +619,7 @@ mod tests {
         };
         let with_rules = build_config(&settings, true).unwrap();
         assert!(with_rules.contains("\"final\": \"direct\""));
-        assert!(with_rules.contains("\"applications\""));
+        assert!(with_rules.contains("\"gfw\""));
         assert!(with_rules.contains("\"geoip-cn\""));
         assert!(with_rules.contains("\"reverse_mapping\": true"));
         assert!(with_rules.contains("\"fake-ip\""));
@@ -590,6 +648,38 @@ mod tests {
             reject_idx < icloud_idx,
             "reject must precede icloud (Mihomo order)"
         );
+        let gfw_idx =
+            route_rules
+                .iter()
+                .position(|r| {
+                    r.get("rule_set").and_then(|s| s.as_array()).is_some_and(
+                        |a| a.iter().any(|v| v.as_str() == Some("gfw")),
+                    )
+                })
+                .unwrap();
+        let cncidr_idx = route_rules
+            .iter()
+            .position(|r| {
+                r.get("rule_set")
+                    .and_then(|s| s.as_array())
+                    .is_some_and(|a| {
+                        a.first().and_then(|v| v.as_str()) == Some("cncidr")
+                    })
+            })
+            .unwrap();
+        assert!(
+            gfw_idx < cncidr_idx,
+            "gfw must precede cncidr (blocked domains → Proxy before CN IP → direct)"
+        );
+        let dns_rules = rules["dns"]["rules"].as_array().unwrap();
+        let gfw_dns = dns_rules.iter().any(|r| {
+            r.get("rule_set")
+                .and_then(|s| s.as_array())
+                .is_some_and(|a| a.iter().any(|v| v.as_str() == Some("gfw")))
+                && r.get("server").and_then(|v| v.as_str())
+                    == Some("dns-direct")
+        });
+        assert!(gfw_dns, "gfw DNS queries must use dns-direct, not fake-ip");
 
         let without_rules = build_config(&settings, false).unwrap();
         assert!(without_rules.contains("\"reverse_mapping\": true"));

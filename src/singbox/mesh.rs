@@ -5,13 +5,52 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use easytier::tunnel::wireguard::WgConfig;
 use serde_json::{Value, json};
 
-use crate::settings::{MeshConfig, Settings};
+use crate::{
+    settings::{MeshConfig, Settings},
+    singbox::tun_route,
+};
 
 pub const MESH_ENDPOINT_TAG: &str = "easytier-wg";
 
+/// Full-capture TUN + subscription: EasyTier runs inside the `zay` process — keep all its sockets direct.
+pub fn easytier_process_bypass_route_rules(settings: &Settings) -> Vec<Value> {
+    if !tun_route::tun_full_capture_mesh_proxy(settings) {
+        return Vec::new();
+    }
+    let mut names = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(stem) = exe.file_stem().and_then(|s| s.to_str()) {
+            names.push(stem.to_string());
+        }
+        if let Some(file) = exe.file_name().and_then(|s| s.to_str()) {
+            names.push(file.to_string());
+        }
+    }
+    names.sort();
+    names.dedup();
+    if names.is_empty() {
+        names.push("zay".into());
+    }
+    vec![json!({
+        "action": "route",
+        "process_name": names,
+        "outbound": "direct"
+    })]
+}
+
+pub fn is_easytier_process_bypass_route_rule(rule: &Value) -> bool {
+    rule.get("outbound").and_then(|v| v.as_str()) == Some("direct")
+        && rule
+            .get("process_name")
+            .and_then(|v| v.as_array())
+            .is_some_and(|a| !a.is_empty())
+        && rule.get("ip_cidr").is_none()
+        && rule.get("ip_is_private").is_none()
+}
+
 /// WireGuard endpoint JSON for sing-box 1.12+ (`endpoints`, not deprecated outbound WG).
 pub fn wireguard_endpoint(settings: &Settings) -> Result<Option<Value>> {
-    if !settings.stack.mesh {
+    if !settings.mesh_is_node() {
         return Ok(None);
     }
     let mesh = settings
@@ -42,7 +81,7 @@ pub fn wireguard_endpoint(settings: &Settings) -> Result<Option<Value>> {
 
 /// `[mesh].peers` host `/32` → direct (before mesh rules). Keeps SSH/TCP :11010 off the WG path.
 pub fn peer_bypass_route_rules(settings: &Settings) -> Vec<Value> {
-    if !settings.stack.mesh {
+    if !settings.mesh_is_node() {
         return Vec::new();
     }
     let cidrs = crate::stack::mesh::peer_exclude_cidrs(settings);
@@ -86,7 +125,7 @@ pub fn is_peer_bypass_route_rule(rule: &Value, settings: &Settings) -> bool {
 }
 
 pub fn mesh_route_rules(settings: &Settings) -> Vec<Value> {
-    if !settings.stack.mesh {
+    if !settings.mesh_is_node() {
         return Vec::new();
     }
     let Some(routes) =
@@ -166,7 +205,7 @@ fn resolve_wg_peer(mesh: &MeshConfig) -> Result<(String, u16)> {
     if mesh.wireguard_endpoint.is_some() {
         bail!(
             "[mesh].wireguard_endpoint is not supported: mesh is managed by local EasyTier. \
-Remove wireguard_endpoint and run `zay stack --mesh` with listeners/peers in [mesh]. \
+Remove wireguard_endpoint and run `zay stack --mesh node` with listeners/peers in [mesh]. \
 Sing-box connects to [mesh].wireguard_listen (default 127.0.0.1:51820)."
         );
     }

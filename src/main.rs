@@ -20,7 +20,7 @@ use clap::{Parser, Subcommand};
 const LONG_ABOUT: &str = r#"Zay – network stack and connection tools.
 
 Network stack:
-  zay stack --mesh --gateway
+  zay stack --mesh node --gateway
   zay stack --gateway
   zay stack --proxy "https://..." --gateway
   zay stack --help

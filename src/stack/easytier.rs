@@ -1,27 +1,27 @@
-//! EasyTier mesh leg for `zay stack --mesh`.
+//! EasyTier mesh leg for `zay stack --mesh <relay|node>`.
 
 use std::{fmt::Write as _, path::Path};
 
 use anyhow::{Context, Result, bail};
 
-use crate::settings::MeshConfig;
+use crate::settings::{MeshConfig, MeshRole};
 
 /// Serialize `[mesh]` to EasyTier TOML for `TomlConfigLoader`.
-///
-/// With sing-box, EasyTier runs `no_tun` and exposes a WireGuard VPN portal on
-/// `127.0.0.1:51820`. The **only** system TUN is sing-box; mesh CIDRs route to the
-/// `easytier-wg` endpoint. `[mesh].ipv4` is the virtual address on the mesh (not `edge0`).
-pub fn to_easytier_toml(
-    mesh: &MeshConfig,
-    singbox_mesh: bool,
-) -> Result<String> {
-    let instance_name = mesh.instance_name.as_deref().unwrap_or("zay").trim();
-    if instance_name.is_empty() {
-        bail!("[mesh].instance_name must not be empty");
+pub fn to_easytier_toml(mesh: &MeshConfig) -> Result<String> {
+    match mesh.role {
+        MeshRole::Relay => to_easytier_relay_toml(mesh),
+        MeshRole::Node => to_easytier_node_toml(mesh),
     }
+}
 
-    let mut out = String::new();
-    writeln!(out, "instance_name = {instance_name:?}")?;
+fn write_easytier_security_flags(out: &mut String) -> Result<()> {
+    writeln!(out)?;
+    writeln!(out, "[flags]")?;
+    writeln!(out, "no_tun = true")?;
+    Ok(())
+}
+
+fn write_ipv4_and_dhcp(out: &mut String, mesh: &MeshConfig) -> Result<()> {
     if let Some(ipv4) = mesh
         .ipv4
         .as_deref()
@@ -38,8 +38,117 @@ pub fn to_easytier_toml(
     } else {
         writeln!(out, "dhcp = false")?;
     }
+    Ok(())
+}
 
-    // Must be root-level keys: TOML assigns keys after [network_identity] to that table.
+fn write_vpn_portal(out: &mut String, mesh: &MeshConfig) -> Result<()> {
+    if mesh
+        .ipv4
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .is_none()
+    {
+        return Ok(());
+    }
+    let listen = mesh
+        .wireguard_listen
+        .as_deref()
+        .unwrap_or("127.0.0.1:51820");
+    let client_cidr = crate::stack::mesh::portal_client_network_cidr(mesh);
+    writeln!(out)?;
+    writeln!(out, "[vpn_portal_config]")?;
+    writeln!(out, "wireguard_listen = {listen:?}")?;
+    writeln!(out, "client_cidr = {client_cidr:?}")?;
+    Ok(())
+}
+
+/// Relay-only: no `ipv4`, no WG portal.
+fn to_easytier_relay_toml(mesh: &MeshConfig) -> Result<String> {
+    if mesh.role != MeshRole::Relay {
+        bail!("[mesh].role must be \"relay\"");
+    }
+    if mesh.dhcp == Some(true) {
+        bail!("[mesh].dhcp must be false or omitted when role = \"relay\"");
+    }
+    if mesh.peers.as_ref().is_some_and(|peers| !peers.is_empty()) {
+        bail!("[mesh].peers must be empty when role = \"relay\"");
+    }
+    if mesh
+        .mesh_routes
+        .as_ref()
+        .is_some_and(|routes| !routes.is_empty())
+    {
+        bail!("[mesh].mesh_routes is only for role = \"node\"");
+    }
+
+    let instance_name = mesh.instance_name.as_deref().unwrap_or("zay").trim();
+    if instance_name.is_empty() {
+        bail!("[mesh].instance_name must not be empty");
+    }
+
+    let mut out = String::new();
+    writeln!(out, "instance_name = {instance_name:?}")?;
+    if mesh
+        .ipv4
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .is_some()
+    {
+        write_ipv4_and_dhcp(&mut out, mesh)?;
+    } else {
+        writeln!(out, "dhcp = false")?;
+    }
+
+    let listeners: Vec<String> = mesh
+        .listeners
+        .as_ref()
+        .filter(|l| !l.is_empty())
+        .cloned()
+        .unwrap_or_else(|| {
+            eprintln!(
+                "easytier relay: [mesh].listeners unset — using {}",
+                crate::stack::mesh::DEFAULT_RELAY_LISTENERS.join(", ")
+            );
+            crate::stack::mesh::default_relay_listeners()
+        });
+    writeln!(out)?;
+    write!(out, "listeners = [")?;
+    for (i, l) in listeners.iter().enumerate() {
+        if i > 0 {
+            write!(out, ", ")?;
+        }
+        write!(out, "{l:?}")?;
+    }
+    writeln!(out, "]")?;
+
+    writeln!(out)?;
+    writeln!(out, "[network_identity]")?;
+    writeln!(out, "network_name = {:?}", mesh.network_name)?;
+    writeln!(out, "network_secret = {:?}", mesh.network_secret)?;
+
+    write_easytier_security_flags(&mut out)?;
+    write_vpn_portal(&mut out, mesh)?;
+
+    Ok(out)
+}
+
+/// Mesh member with sing-box WireGuard portal (no system TUN).
+fn to_easytier_node_toml(mesh: &MeshConfig) -> Result<String> {
+    if mesh.role != MeshRole::Node {
+        bail!("[mesh].role must be \"node\"");
+    }
+
+    let instance_name = mesh.instance_name.as_deref().unwrap_or("zay").trim();
+    if instance_name.is_empty() {
+        bail!("[mesh].instance_name must not be empty");
+    }
+
+    let mut out = String::new();
+    writeln!(out, "instance_name = {instance_name:?}")?;
+    write_ipv4_and_dhcp(&mut out, mesh)?;
+
     if let Some(listeners) = &mesh.listeners
         && !listeners.is_empty()
     {
@@ -76,21 +185,8 @@ pub fn to_easytier_toml(
     writeln!(out, "network_name = {:?}", mesh.network_name)?;
     writeln!(out, "network_secret = {:?}", mesh.network_secret)?;
 
-    if singbox_mesh {
-        writeln!(out)?;
-        writeln!(out, "[flags]")?;
-        writeln!(out, "no_tun = true")?;
-
-        let listen = mesh
-            .wireguard_listen
-            .as_deref()
-            .unwrap_or("127.0.0.1:51820");
-        let client_cidr = crate::stack::mesh::portal_client_network_cidr(mesh);
-        writeln!(out)?;
-        writeln!(out, "[vpn_portal_config]")?;
-        writeln!(out, "wireguard_listen = {listen:?}")?;
-        writeln!(out, "client_cidr = {client_cidr:?}")?;
-    }
+    write_easytier_security_flags(&mut out)?;
+    write_vpn_portal(&mut out, mesh)?;
 
     Ok(out)
 }
@@ -135,48 +231,78 @@ mod imp {
     use uuid::Uuid;
 
     use super::to_easytier_toml;
-    use crate::{settings::MeshConfig, stack::mesh};
+    use crate::settings::{MeshConfig, MeshRole};
 
     static INSTANCE_MANAGER: Lazy<NetworkInstanceManager> =
         Lazy::new(NetworkInstanceManager::new);
 
-    pub fn start(
-        mesh: &MeshConfig,
-        _data_dir: &Path,
-        singbox_mesh: bool,
-    ) -> Result<Uuid> {
-        if singbox_mesh {
-            #[cfg(target_os = "linux")]
-            super::warn_stale_easytier_iface();
-            eprintln!(
-                "easytier mesh: no_tun (sing-box owns the only system TUN + WG portal)"
-            );
+    pub fn start(mesh: &MeshConfig, _data_dir: &Path) -> Result<Uuid> {
+        match mesh.role {
+            MeshRole::Relay => {
+                if mesh.ipv4.as_deref().is_some_and(|s| !s.trim().is_empty()) {
+                    eprintln!(
+                        "easytier relay: hub-style (virtual ipv4 {}, listeners on :11010)",
+                        mesh.ipv4.as_deref().unwrap_or("?")
+                    );
+                } else {
+                    eprintln!(
+                        "easytier relay: forward-only (no mesh IP — prefer --mesh-ip 10.x.1/24 on VPS)"
+                    );
+                }
+            }
+            MeshRole::Node => {
+                #[cfg(target_os = "linux")]
+                super::warn_stale_easytier_iface();
+                eprintln!(
+                    "easytier mesh node: no_tun (sing-box owns the only system TUN + WG portal)"
+                );
+            }
         }
         eprintln!(
-            "easytier mesh: network_name={:?} (secret {} chars) — must be identical on Mac, Linux, and relay",
+            "easytier: network_name={:?} (secret {} chars) — must match on every mesh peer",
             mesh.network_name,
             mesh.network_secret.len()
         );
-        if let Some(ipv4) =
-            mesh.ipv4.as_deref().filter(|s| !s.trim().is_empty())
-        {
-            eprintln!(
-                "easytier mesh: virtual ipv4 {ipv4} (mesh routing, not edge0)"
-            );
-        } else {
-            eprintln!(
-                "easytier mesh: DHCP enabled (set [mesh].ipv4 for a fixed mesh address)"
-            );
+        match mesh.role {
+            MeshRole::Relay => {
+                if let Some(ipv4) =
+                    mesh.ipv4.as_deref().filter(|s| !s.trim().is_empty())
+                {
+                    eprintln!(
+                        "easytier relay: virtual ipv4 {ipv4} (hub-style; sing-box TUN stays off on VPS)"
+                    );
+                } else {
+                    eprintln!(
+                        "easytier relay: forward-only — no virtual ipv4 (nodes may not reach each other)"
+                    );
+                }
+            }
+            MeshRole::Node => {
+                if let Some(ipv4) =
+                    mesh.ipv4.as_deref().filter(|s| !s.trim().is_empty())
+                {
+                    eprintln!(
+                        "easytier mesh node: virtual ipv4 {ipv4} (mesh routing, not edge0)"
+                    );
+                } else {
+                    eprintln!(
+                        "easytier mesh node: DHCP enabled (set [mesh].ipv4 for a fixed mesh address)"
+                    );
+                }
+            }
         }
-        let toml = to_easytier_toml(mesh, singbox_mesh)?;
+        let toml = to_easytier_toml(mesh)?;
         if let Some(listeners) =
             mesh.listeners.as_ref().filter(|l| !l.is_empty())
         {
-            eprintln!("easytier mesh: listeners → {}", listeners.join(", "));
+            eprintln!("easytier: listeners → {}", listeners.join(", "));
+        } else if mesh.role == MeshRole::Relay {
+            eprintln!(
+                "warn: [mesh].listeners empty — add listeners or rely on default :11010"
+            );
         } else {
             eprintln!(
-                "warn: [mesh].listeners empty — this node will not accept inbound mesh on :11010; \
-                 add listeners = [\"tcp://0.0.0.0:11010\", \"udp://0.0.0.0:11010\"] on hub/VPS"
+                "warn: [mesh].listeners empty — add listeners on the VPS relay, or peers on this node"
             );
         }
         let cfg = TomlConfigLoader::new_from_str(&toml)
@@ -184,7 +310,7 @@ mod imp {
         let id = INSTANCE_MANAGER
             .run_network_instance(cfg, false, ConfigFileControl::STATIC_CONFIG)
             .context("starting EasyTier mesh")?;
-        eprintln!("mesh started (instance {id})");
+        eprintln!("mesh started (instance {id}, role={:?})", mesh.role);
         Ok(id)
     }
 
@@ -195,18 +321,12 @@ mod imp {
         Ok(())
     }
 
-    /// Log peer/routes after startup; warn when the EasyTier mesh has no remote peers yet.
-    pub fn log_mesh_status(wait: std::time::Duration) {
-        std::thread::sleep(wait);
-        log_mesh_status_now();
-    }
-
-    /// Log mesh peer/routes in the background (default). Does not block stack startup.
     pub fn spawn_mesh_peer_watch(mesh: MeshConfig) {
         if std::env::var("ZAY_MESH_REQUIRE_PEERS").ok().as_deref() == Some("1")
         {
             return;
         }
+        let role = mesh.role;
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_secs(2));
             log_mesh_status_now();
@@ -220,14 +340,13 @@ mod imp {
                     }
                     Ok(_) => {
                         if !logged_no_peer {
-                            if mesh::is_hub(&mesh) {
+                            if role == MeshRole::Relay {
                                 eprintln!(
-                                    "mesh: hub waiting for clients on :11010 (no remote peers yet — normal)"
+                                    "mesh relay: waiting for clients on :11010 (no remote peers yet — normal)"
                                 );
                             } else {
                                 eprintln!(
-                                    "mesh: no remote peers yet — 10.x mesh routes inactive until hub/clients connect; \
-                                     proxy/TUN continues"
+                                    "mesh node: no remote peers yet — 10.x mesh routes inactive until peers connect"
                                 );
                             }
                             logged_no_peer = true;
@@ -243,15 +362,11 @@ mod imp {
         });
     }
 
-    /// Block until at least one remote peer appears (opt-in: `ZAY_MESH_REQUIRE_PEERS=1`).
-    ///
-    /// Hub nodes (with `[mesh].listeners`) skip the hard failure — they normally have
-    /// zero peers until macOS/Linux clients connect.
     pub fn wait_for_mesh_peers(
         timeout: std::time::Duration,
         mesh: &MeshConfig,
     ) -> Result<()> {
-        let is_hub = mesh::is_hub(mesh);
+        let is_relay = mesh.role == MeshRole::Relay;
         let deadline = std::time::Instant::now() + timeout;
         loop {
             if mesh_peer_count()? > 0 {
@@ -260,10 +375,10 @@ mod imp {
             }
             if std::time::Instant::now() >= deadline {
                 log_mesh_status_now();
-                if is_hub {
+                if is_relay {
                     eprintln!(
-                        "easytier hub: no remote peers yet (normal until other nodes run \
-                         `zay stack --mesh`; keep this listener running on :11010)"
+                        "easytier relay: no remote peers yet (normal until nodes run \
+                         `zay stack --mesh node`; keep :11010 listening)"
                     );
                     return Ok(());
                 }
@@ -271,9 +386,9 @@ mod imp {
                     "EasyTier mesh has no remote peers after {}s — sing-box cannot reach \
                      10.x mesh IPs until EasyTier P2P is up.\n\
                      Checklist:\n\
-                     1) Both macOS and Linux run `zay stack --mesh` at the same time\n\
+                     1) Both sides run `zay stack --mesh node` with matching [mesh].role\n\
                      2) Same [mesh].network_name and network_secret on every node\n\
-                     3) A hub node with listeners is running, or VPS runs EasyTier in the same network\n\
+                     3) A relay (role = \"relay\") is listening on :11010\n\
                      4) Firewall allows TCP+UDP :11010",
                     timeout.as_secs()
                 );
@@ -302,9 +417,9 @@ mod imp {
                 .as_ref()
                 .and_then(|n| n.virtual_ipv4.as_ref())
                 .map(|ip| ip.to_string())
-                .unwrap_or_else(|| "?".into());
+                .unwrap_or_else(|| "(none — relay)".into());
             eprintln!(
-                "easytier mesh status ({id}): virtual ipv4 {my_ip}, {peers} remote peer(s), {routes} route(s)"
+                "easytier status ({id}): virtual ipv4 {my_ip}, {peers} remote peer(s), {routes} route(s)"
             );
             if let Some(node) = &info.my_node_info {
                 let active: Vec<String> =
@@ -319,12 +434,9 @@ mod imp {
             }
             if peers == 0 {
                 eprintln!(
-                    "warn: EasyTier has no remote peers yet — ping to mesh IPs will fail until \
-                     another node joins the same network_name/network_secret. \
-                     Check: both nodes run `zay stack --mesh`, peers/listeners, VPS/firewall on :11010"
+                    "warn: EasyTier has no remote peers yet — check [mesh].role, network_name/secret, relay :11010"
                 );
             } else {
-                let mut remote_ips = Vec::new();
                 for pair in &info.peer_route_pairs {
                     let Some(route) = &pair.route else {
                         continue;
@@ -340,15 +452,6 @@ mod imp {
                         .map(|a| a.to_string())
                         .unwrap_or_else(|| "?".into());
                     eprintln!("  {host} mesh ipv4 {ip}");
-                    if ip != "?" {
-                        remote_ips.push(ip);
-                    }
-                }
-                if peers == 1 && remote_ips.len() <= 1 {
-                    eprintln!(
-                        "warn: only one mesh node visible — if Mac should reach Linux (weapon), \
-                         the relay hub must show 2+ peers and this node must list weapon's mesh IP above"
-                    );
                 }
             }
             if info
@@ -365,16 +468,13 @@ mod imp {
     }
 }
 
-pub use imp::{
-    log_mesh_status, spawn_mesh_peer_watch, start, stop_all,
-    wait_for_mesh_peers,
-};
+pub use imp::{spawn_mesh_peer_watch, start, stop_all, wait_for_mesh_peers};
 
 pub fn start_for_singbox(
     mesh: &MeshConfig,
     data_dir: &Path,
 ) -> Result<uuid::Uuid> {
-    start(mesh, data_dir, true)
+    start(mesh, data_dir)
 }
 
 #[cfg(test)]
@@ -382,8 +482,9 @@ mod tests {
     use super::*;
     use crate::settings::MeshConfig;
 
-    fn mesh() -> MeshConfig {
+    fn mesh(role: MeshRole) -> MeshConfig {
         MeshConfig {
+            role,
             instance_name: Some("zay".into()),
             network_name: "test-net".into(),
             network_secret: "secret".into(),
@@ -401,38 +502,43 @@ mod tests {
     }
 
     #[test]
-    fn emits_dhcp_by_default() {
-        let toml = to_easytier_toml(&mesh(), false).unwrap();
+    fn node_emits_dhcp_by_default() {
+        let toml = to_easytier_toml(&mesh(MeshRole::Node)).unwrap();
         assert!(toml.contains("dhcp = true"));
-        assert!(!toml.contains("no_tun"));
+        assert!(toml.contains("no_tun = true"));
+        assert!(!toml.contains("private_mode"));
     }
 
     #[test]
-    fn singbox_mesh_always_no_tun_and_vpn_portal() {
-        let mut mesh = mesh();
-        mesh.ipv4 = Some("10.126.126.10/24".into());
-        mesh.listeners = Some(vec![
+    fn relay_forward_only_has_no_ipv4_or_portal() {
+        let mut m = mesh(MeshRole::Relay);
+        m.listeners = Some(vec![
             "tcp://0.0.0.0:11010".into(),
             "udp://0.0.0.0:11010".into(),
         ]);
-        let toml = to_easytier_toml(&mesh, true).unwrap();
+        let toml = to_easytier_toml(&m).unwrap();
+        assert!(!toml.contains("ipv4 = "));
+        assert!(!toml.contains("[vpn_portal_config]"));
         assert!(toml.contains("no_tun = true"));
+    }
+
+    #[test]
+    fn relay_hub_emits_ipv4_and_portal() {
+        let mut m = mesh(MeshRole::Relay);
+        m.ipv4 = Some("10.126.126.1/24".into());
+        m.listeners = Some(vec!["tcp://0.0.0.0:11010".into()]);
+        let toml = to_easytier_toml(&m).unwrap();
+        assert!(toml.contains("ipv4 = \"10.126.126.1/24\""));
         assert!(toml.contains("[vpn_portal_config]"));
-        assert!(toml.contains("wireguard_listen = \"127.0.0.1:51820\""));
-        // listeners must appear before [network_identity] (root-level EasyTier field)
-        let ni = toml.find("[network_identity]").unwrap();
-        let listeners = toml.find("listeners = ").unwrap();
-        assert!(
-            listeners < ni,
-            "listeners must be root-level, before [network_identity]\n{toml}"
-        );
-        let cfg =
-            easytier::common::config::TomlConfigLoader::new_from_str(&toml)
-                .unwrap();
-        use easytier::common::config::ConfigLoader as _;
-        let uris = cfg.get_listener_uris();
-        assert_eq!(uris.len(), 2);
-        assert_eq!(uris[0].to_string(), "tcp://0.0.0.0:11010");
-        assert_eq!(uris[1].to_string(), "udp://0.0.0.0:11010");
+        assert!(!toml.contains("private_mode"));
+    }
+
+    #[test]
+    fn node_has_portal_when_ipv4_set() {
+        let mut m = mesh(MeshRole::Node);
+        m.ipv4 = Some("10.126.126.10/24".into());
+        let toml = to_easytier_toml(&m).unwrap();
+        assert!(toml.contains("[vpn_portal_config]"));
+        assert!(!toml.contains("private_mode"));
     }
 }

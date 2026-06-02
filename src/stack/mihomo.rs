@@ -277,7 +277,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::build_config;
-    use crate::settings::{MeshConfig, Settings, StackFlags};
+    use crate::settings::{MeshConfig, MeshRole, Settings, StackFlags};
 
     fn settings_with_mesh() -> Settings {
         Settings {
@@ -296,6 +296,7 @@ mod tests {
             singbox_mixin: None,
             bootstrap_proxy: None,
             mesh: Some(MeshConfig {
+                role: MeshRole::Node,
                 instance_name: Some("zay".into()),
                 network_name: "my-network".into(),
                 network_secret: "change-me".into(),
@@ -311,7 +312,7 @@ mod tests {
                 wireguard_endpoint: None,
             }),
             stack: StackFlags {
-                mesh: true,
+                mesh: Some(MeshRole::Node),
                 gateway: false,
                 tun: true,
                 no_rules: false,

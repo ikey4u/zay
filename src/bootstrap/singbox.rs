@@ -29,7 +29,7 @@ fn prepare_inner(settings: Settings, flags: StackFlags) -> Result<Prepared> {
         eprintln!("external-controller {}", settings.external_controller);
     } else {
         eprintln!(
-            "external-controller {} (reload after rules download)",
+            "external-controller {} (reload after rules update)",
             settings.external_controller
         );
     }
@@ -47,13 +47,24 @@ fn prepare_inner(settings: Settings, flags: StackFlags) -> Result<Prepared> {
                 settings.singbox_dir().join("providers").display()
             )
         })?;
-    std::fs::create_dir_all(rules::ruleset_dir(&settings.singbox_dir()))
-        .with_context(|| {
-            format!(
-                "creating {}",
-                rules::ruleset_dir(&settings.singbox_dir()).display()
-            )
-        })?;
+    std::fs::create_dir_all(rules::embedded_ruleset_dir(
+        &settings.singbox_dir(),
+    ))
+    .with_context(|| {
+        format!(
+            "creating {}",
+            rules::embedded_ruleset_dir(&settings.singbox_dir()).display()
+        )
+    })?;
+    std::fs::create_dir_all(rules::download_ruleset_dir(
+        &settings.singbox_dir(),
+    ))
+    .with_context(|| {
+        format!(
+            "creating {}",
+            rules::download_ruleset_dir(&settings.singbox_dir()).display()
+        )
+    })?;
 
     // sing-box opens cache.db under `-D`; create an empty file so first start never fails on ENOENT.
     let cache_db = settings.singbox_dir().join("cache.db");
@@ -73,24 +84,29 @@ fn prepare_inner(settings: Settings, flags: StackFlags) -> Result<Prepared> {
         );
     }
 
+    if !flags.no_rules {
+        rules::ensure_embedded_rules(&settings)?;
+    }
     let has_rules = rules::files_present(&settings.singbox_dir());
     rules::log_routing_mode(&settings, has_rules);
     if flags.no_rules {
         if has_rules {
             eprintln!(
-                "clash-rules: using cached rule-sets (--no-rules, no download)"
+                "clash-rules: using cached rule-sets (--no-rules, no network update)"
             );
         } else {
             eprintln!(
                 "clash-rules skipped (--no-rules); using simple fallback routes"
             );
         }
-    } else if !has_rules {
-        if settings.subscriptions.is_empty() {
-            eprintln!("clash-rules missing; using simple fallback routes");
-        } else {
+    } else if has_rules {
+        log_clash_rules_layout(&settings);
+        if !settings.subscriptions.is_empty()
+            || settings.bootstrap_proxy.is_some()
+        {
             eprintln!(
-                "clash-rules missing; will download via proxy after startup"
+                "clash-rules: will refresh {}/ via proxy after startup",
+                rules::DOWNLOAD_RULESET_DIR
             );
         }
     }
@@ -117,11 +133,7 @@ fn prepare_inner(settings: Settings, flags: StackFlags) -> Result<Prepared> {
         eprintln!("TUN enabled in merged config (e.g. [singbox].mixin)");
     } else if !tun_enabled
         && singbox::config_has_tun(&config_json)
-        && settings.stack.mesh
-        && settings
-            .mesh
-            .as_ref()
-            .is_some_and(|m| crate::stack::mesh::is_hub(m))
+        && settings.mesh_is_relay()
     {
         eprintln!(
             "mesh hub: ignoring TUN in [singbox].mixin (relay stays SSH-safe)"
@@ -133,6 +145,21 @@ fn prepare_inner(settings: Settings, flags: StackFlags) -> Result<Prepared> {
         settings,
         tun_enabled,
     })
+}
+
+fn log_clash_rules_layout(settings: &Settings) {
+    let dir = settings.singbox_dir();
+    let downloaded = rules::RULE_SETS
+        .iter()
+        .filter(|def| {
+            rules::rule_file_valid(&rules::download_rule_path(&dir, def.id))
+        })
+        .count();
+    eprintln!(
+        "clash-rules: {}/ (embedded) + {}/ (runtime, {downloaded} present); config uses download when both exist",
+        rules::EMBEDDED_RULESET_DIR,
+        rules::DOWNLOAD_RULESET_DIR,
+    );
 }
 
 /// Rebuild sing-box config immediately before spawn (SSH client IPs, hub route_address).

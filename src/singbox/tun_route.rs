@@ -65,6 +65,16 @@ pub fn tun_exclude_addresses(settings: &Settings) -> Vec<String> {
         );
     }
     excludes.extend(peer_excludes);
+    if tun_full_capture_mesh_proxy(settings) {
+        let stun = mesh::easytier_stun_exclude_cidrs();
+        if !stun.is_empty() {
+            eprintln!(
+                "tun exclude: EasyTier STUN (NAT probes) → {}",
+                stun.join(", ")
+            );
+        }
+        excludes.extend(stun);
+    }
     excludes.extend(detect_os_ipv4_cidrs());
     let ssh_servers = detect_ssh_server_cidrs();
     if !ssh_servers.is_empty() {
@@ -84,7 +94,63 @@ pub fn tun_exclude_addresses(settings: &Settings) -> Vec<String> {
     excludes.extend(ssh_clients);
     excludes.sort();
     excludes.dedup();
+    filter_fakeip_route_excludes(settings, &mut excludes);
     excludes
+}
+
+/// FakeIP pool used with Loyalsoldier + sing-box TUN (must not appear in `route_exclude_address`).
+const FAKEIP_V4_NET: Ipv4Addr = Ipv4Addr::new(198, 18, 0, 0);
+const FAKEIP_V4_PREFIX: u8 = 15;
+
+fn fakeip_excludes_active(settings: &Settings) -> bool {
+    if !singbox_tun_enabled(settings) {
+        return false;
+    }
+    if settings.stack.no_rules {
+        return !settings.subscriptions.is_empty();
+    }
+    crate::singbox::rules::files_present(&settings.singbox_dir())
+        || !settings.subscriptions.is_empty()
+}
+
+fn ipv4_in_fakeip_range(addr: Ipv4Addr) -> bool {
+    let n = u32::from(addr);
+    let base = u32::from(FAKEIP_V4_NET);
+    let mask = if FAKEIP_V4_PREFIX == 0 {
+        0
+    } else {
+        u32::MAX << (32 - FAKEIP_V4_PREFIX)
+    };
+    (n & mask) == (base & mask)
+}
+
+/// Drop `/32` (or any) excludes inside 198.18.0.0/15 — e.g. SSH/lsof can record a FakeIP peer and break curl.
+fn filter_fakeip_route_excludes(
+    settings: &Settings,
+    excludes: &mut Vec<String>,
+) {
+    if !fakeip_excludes_active(settings) {
+        return;
+    }
+    let mut dropped = Vec::new();
+    excludes.retain(|cidr| {
+        let host = cidr.split('/').next().unwrap_or(cidr).trim();
+        let Ok(addr) = host.parse::<Ipv4Addr>() else {
+            return true;
+        };
+        if ipv4_in_fakeip_range(addr) {
+            dropped.push(cidr.clone());
+            false
+        } else {
+            true
+        }
+    });
+    if !dropped.is_empty() {
+        eprintln!(
+            "warn: removed route_exclude inside FakeIP 198.18.0.0/15 (fixes curl connection refused): {}",
+            dropped.join(", ")
+        );
+    }
 }
 
 /// Whether sing-box should open a system TUN inbound.
@@ -95,9 +161,7 @@ pub fn singbox_tun_enabled(settings: &Settings) -> bool {
     if !(settings.tun || settings.stack.tun) {
         return false;
     }
-    if settings.stack.mesh
-        && settings.mesh.as_ref().is_some_and(|m| mesh::is_hub(m))
-    {
+    if settings.mesh_is_relay() {
         return false;
     }
     true
@@ -107,11 +171,10 @@ pub fn tun_auto_route(_settings: &Settings) -> bool {
     true
 }
 
-/// Linux full-capture TUN: `system` stack (Mihomo default) integrates with systemd-resolved better than `mixed`.
+/// Full-capture TUN: `system` stack (Linux + macOS). `mixed` on macOS often breaks TCP (curl → :80 refused).
 pub fn tun_stack(settings: &Settings) -> &'static str {
-    #[cfg(target_os = "linux")]
-    {
-        if singbox_tun_enabled(settings) && !tun_selective_mesh_routes(settings)
+    if singbox_tun_enabled(settings) && !tun_selective_mesh_routes(settings) {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             return "system";
         }
@@ -154,19 +217,26 @@ fn next_address_host(cidr: &str) -> Option<String> {
     Some(Ipv4Addr::from(u32::from(addr).saturating_add(1)).to_string())
 }
 
-/// Mesh client/hub: only `[mesh].mesh_routes` on TUN — not 0.0.0.0/0 (keeps SSH to relay public IP on en0).
+/// Mesh client: only `[mesh].mesh_routes` on TUN — not 0.0.0.0/0 (keeps SSH + relay on physical NIC).
 ///
-/// Disabled when a subscription is configured (`--proxy`): user expects global proxy capture on TUN,
-/// not mesh-only routing. Peer/SSH excludes still apply on full TUN.
+/// With `--proxy` / `-s`, use full TUN for transparent proxy; EasyTier control plane is kept off TUN
+/// via `route_exclude_address` (relay/STUN) and a `process_name → direct` rule for the `zay` binary.
 pub fn tun_selective_mesh_routes(settings: &Settings) -> bool {
-    if !settings.stack.mesh || settings.stack.gateway {
+    if !settings.mesh_is_node() || settings.stack.gateway {
         return false;
     }
     if !settings.subscriptions.is_empty() {
         return false;
     }
-    // Hub skips sing-box TUN entirely; this applies to Mac/Linux mesh clients.
-    !settings.mesh.as_ref().is_some_and(|m| mesh::is_hub(m))
+    settings.mesh_is_node()
+}
+
+/// `--mesh node` with subscription: full TUN for gfw/Proxy, mesh CIDR via `easytier-wg` route rules.
+pub fn tun_full_capture_mesh_proxy(settings: &Settings) -> bool {
+    singbox_tun_enabled(settings)
+        && settings.mesh_is_node()
+        && !settings.subscriptions.is_empty()
+        && !settings.stack.gateway
 }
 
 pub fn tun_route_address(settings: &Settings) -> Option<Vec<String>> {
@@ -414,7 +484,7 @@ fn parse_ip_route_dev(text: &str) -> Option<String> {
 
 /// `strict_route` breaks SSH/LAN when combined with mesh; keep it off for `--mesh`.
 pub fn tun_strict_route(settings: &Settings) -> bool {
-    !settings.stack.mesh
+    !settings.stack.mesh_enabled()
 }
 
 /// Best-effort: add CIDRs of live global IPv4 interfaces (SSH client subnet, default route NIC).
@@ -886,6 +956,46 @@ mod tests {
     use super::*;
 
     #[test]
+    #[test]
+    fn filter_drops_fakeip_from_route_excludes() {
+        use std::path::PathBuf;
+
+        use crate::settings::{Settings, StackFlags};
+
+        let mut excludes = vec![
+            "192.168.0.0/16".into(),
+            "198.18.0.15/32".into(),
+            "43.138.178.37/32".into(),
+        ];
+        let settings = Settings {
+            subscriptions: vec!["https://example.com/sub".into()],
+            data_dir: PathBuf::from("/tmp"),
+            mixed_port: 7890,
+            allow_lan: false,
+            tun: true,
+            log_level: "info".into(),
+            health_check_url: "https://example.com".into(),
+            update_interval: 3600,
+            tun_exclude_routes: Vec::new(),
+            external_controller: "127.0.0.1:19090".into(),
+            api_secret: "".into(),
+            mihomo_mixin: None,
+            singbox_mixin: None,
+            bootstrap_proxy: None,
+            mesh: None,
+            stack: StackFlags {
+                mesh: None,
+                gateway: false,
+                tun: true,
+                no_rules: false,
+            },
+        };
+        filter_fakeip_route_excludes(&settings, &mut excludes);
+        assert!(!excludes.iter().any(|c| c.starts_with("198.18.")));
+        assert!(excludes.iter().any(|c| c.contains("192.168")));
+    }
+
+    #[test]
     fn parse_macos_ifconfig_skips_utun() {
         let text = "\
 utun4: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST>
@@ -938,7 +1048,7 @@ ssh     999 user   12u  IPv4 0xdeadbeef      0t0  TCP 192.168.1.5:54321->43.138.
     fn mesh_hub_skips_singbox_tun() {
         use std::path::PathBuf;
 
-        use crate::settings::{MeshConfig, Settings, StackFlags};
+        use crate::settings::{MeshConfig, MeshRole, Settings, StackFlags};
 
         let settings = Settings {
             subscriptions: Vec::new(),
@@ -956,22 +1066,23 @@ ssh     999 user   12u  IPv4 0xdeadbeef      0t0  TCP 192.168.1.5:54321->43.138.
             singbox_mixin: None,
             bootstrap_proxy: None,
             mesh: Some(MeshConfig {
-                instance_name: None,
+                role: MeshRole::Relay,
+                instance_name: Some("relay".into()),
                 network_name: "n".into(),
                 network_secret: "s".into(),
                 dhcp: None,
-                ipv4: Some("10.126.126.1/24".into()),
+                ipv4: None,
                 listeners: Some(vec!["tcp://0.0.0.0:11010".into()]),
                 peers: None,
                 proxy_networks: None,
-                mesh_routes: Some(vec!["10.126.126.0/24".into()]),
+                mesh_routes: None,
                 wireguard_listen: None,
                 wireguard_client_cidr: None,
                 wireguard_client_address: None,
                 wireguard_endpoint: None,
             }),
             stack: StackFlags {
-                mesh: true,
+                mesh: Some(MeshRole::Relay),
                 gateway: false,
                 tun: true,
                 no_rules: false,
@@ -985,7 +1096,7 @@ ssh     999 user   12u  IPv4 0xdeadbeef      0t0  TCP 192.168.1.5:54321->43.138.
     fn mesh_client_uses_selective_route_address() {
         use std::path::PathBuf;
 
-        use crate::settings::{MeshConfig, Settings, StackFlags};
+        use crate::settings::{MeshConfig, MeshRole, Settings, StackFlags};
 
         let settings = Settings {
             subscriptions: Vec::new(),
@@ -1003,6 +1114,7 @@ ssh     999 user   12u  IPv4 0xdeadbeef      0t0  TCP 192.168.1.5:54321->43.138.
             singbox_mixin: None,
             bootstrap_proxy: None,
             mesh: Some(MeshConfig {
+                role: MeshRole::Node,
                 instance_name: None,
                 network_name: "n".into(),
                 network_secret: "s".into(),
@@ -1018,7 +1130,7 @@ ssh     999 user   12u  IPv4 0xdeadbeef      0t0  TCP 192.168.1.5:54321->43.138.
                 wireguard_endpoint: None,
             }),
             stack: StackFlags {
-                mesh: true,
+                mesh: Some(MeshRole::Node),
                 gateway: false,
                 tun: true,
                 no_rules: false,
@@ -1037,7 +1149,7 @@ ssh     999 user   12u  IPv4 0xdeadbeef      0t0  TCP 192.168.1.5:54321->43.138.
     fn mesh_client_with_proxy_uses_full_tun() {
         use std::path::PathBuf;
 
-        use crate::settings::{MeshConfig, Settings, StackFlags};
+        use crate::settings::{MeshConfig, MeshRole, Settings, StackFlags};
 
         let settings = Settings {
             subscriptions: vec!["https://example.com/sub".into()],
@@ -1055,6 +1167,7 @@ ssh     999 user   12u  IPv4 0xdeadbeef      0t0  TCP 192.168.1.5:54321->43.138.
             singbox_mixin: None,
             bootstrap_proxy: None,
             mesh: Some(MeshConfig {
+                role: MeshRole::Node,
                 instance_name: None,
                 network_name: "n".into(),
                 network_secret: "s".into(),
@@ -1070,7 +1183,7 @@ ssh     999 user   12u  IPv4 0xdeadbeef      0t0  TCP 192.168.1.5:54321->43.138.
                 wireguard_endpoint: None,
             }),
             stack: StackFlags {
-                mesh: true,
+                mesh: Some(MeshRole::Node),
                 gateway: false,
                 tun: true,
                 no_rules: false,
@@ -1079,13 +1192,21 @@ ssh     999 user   12u  IPv4 0xdeadbeef      0t0  TCP 192.168.1.5:54321->43.138.
         assert!(!tun_selective_mesh_routes(&settings));
         assert!(tun_route_address(&settings).is_none());
         assert!(!is_selective_mesh_tun(&settings));
+        assert!(tun_full_capture_mesh_proxy(&settings));
+        let json =
+            crate::singbox::builder::build_config(&settings, false).unwrap();
+        assert!(json.contains("\"find_process\": true"));
+        assert!(json.contains("\"process_name\""));
+        assert!(!json.contains("\"route_address\""));
+        let excludes = tun_exclude_addresses(&settings);
+        assert!(excludes.iter().any(|c| c.starts_with("43.138.178.37/")));
     }
 
     #[test]
     fn full_capture_tun_includes_ipv6_prefix() {
         use std::path::PathBuf;
 
-        use crate::settings::{MeshConfig, Settings, StackFlags};
+        use crate::settings::{MeshConfig, MeshRole, Settings, StackFlags};
 
         let settings = Settings {
             subscriptions: vec!["https://example.com/sub".into()],
@@ -1103,6 +1224,7 @@ ssh     999 user   12u  IPv4 0xdeadbeef      0t0  TCP 192.168.1.5:54321->43.138.
             singbox_mixin: None,
             bootstrap_proxy: None,
             mesh: Some(MeshConfig {
+                role: MeshRole::Node,
                 instance_name: None,
                 network_name: "n".into(),
                 network_secret: "s".into(),
@@ -1118,7 +1240,7 @@ ssh     999 user   12u  IPv4 0xdeadbeef      0t0  TCP 192.168.1.5:54321->43.138.
                 wireguard_endpoint: None,
             }),
             stack: StackFlags {
-                mesh: true,
+                mesh: Some(MeshRole::Node),
                 gateway: false,
                 tun: true,
                 no_rules: false,
@@ -1133,7 +1255,7 @@ ssh     999 user   12u  IPv4 0xdeadbeef      0t0  TCP 192.168.1.5:54321->43.138.
     fn mesh_hub_route_address_defined_but_tun_disabled() {
         use std::path::PathBuf;
 
-        use crate::settings::{MeshConfig, Settings, StackFlags};
+        use crate::settings::{MeshConfig, MeshRole, Settings, StackFlags};
 
         let settings = Settings {
             subscriptions: Vec::new(),
@@ -1151,22 +1273,23 @@ ssh     999 user   12u  IPv4 0xdeadbeef      0t0  TCP 192.168.1.5:54321->43.138.
             singbox_mixin: None,
             bootstrap_proxy: None,
             mesh: Some(MeshConfig {
-                instance_name: None,
+                role: MeshRole::Relay,
+                instance_name: Some("relay".into()),
                 network_name: "n".into(),
                 network_secret: "s".into(),
                 dhcp: None,
-                ipv4: Some("10.126.126.1/24".into()),
+                ipv4: None,
                 listeners: Some(vec!["tcp://0.0.0.0:11010".into()]),
                 peers: None,
                 proxy_networks: None,
-                mesh_routes: Some(vec!["10.126.126.0/24".into()]),
+                mesh_routes: None,
                 wireguard_listen: None,
                 wireguard_client_cidr: None,
                 wireguard_client_address: None,
                 wireguard_endpoint: None,
             }),
             stack: StackFlags {
-                mesh: true,
+                mesh: Some(MeshRole::Relay),
                 gateway: false,
                 tun: true,
                 no_rules: false,
@@ -1183,7 +1306,7 @@ ssh     999 user   12u  IPv4 0xdeadbeef      0t0  TCP 192.168.1.5:54321->43.138.
     fn mesh_disables_strict_route() {
         use std::path::PathBuf;
 
-        use crate::settings::{MeshConfig, Settings, StackFlags};
+        use crate::settings::{MeshConfig, MeshRole, Settings, StackFlags};
 
         let settings = Settings {
             subscriptions: Vec::new(),
@@ -1201,6 +1324,7 @@ ssh     999 user   12u  IPv4 0xdeadbeef      0t0  TCP 192.168.1.5:54321->43.138.
             singbox_mixin: None,
             bootstrap_proxy: None,
             mesh: Some(MeshConfig {
+                role: MeshRole::Node,
                 instance_name: None,
                 network_name: "n".into(),
                 network_secret: "s".into(),
@@ -1216,7 +1340,7 @@ ssh     999 user   12u  IPv4 0xdeadbeef      0t0  TCP 192.168.1.5:54321->43.138.
                 wireguard_endpoint: None,
             }),
             stack: StackFlags {
-                mesh: true,
+                mesh: Some(MeshRole::Node),
                 gateway: false,
                 tun: true,
                 no_rules: false,
@@ -1251,7 +1375,7 @@ ssh     999 user   12u  IPv4 0xdeadbeef      0t0  TCP 192.168.1.5:54321->43.138.
     fn linux_full_capture_uses_system_stack() {
         use std::path::PathBuf;
 
-        use crate::settings::{MeshConfig, Settings, StackFlags};
+        use crate::settings::{MeshConfig, MeshRole, Settings, StackFlags};
 
         let settings = Settings {
             subscriptions: vec!["https://example.com/sub".into()],
@@ -1269,6 +1393,7 @@ ssh     999 user   12u  IPv4 0xdeadbeef      0t0  TCP 192.168.1.5:54321->43.138.
             singbox_mixin: None,
             bootstrap_proxy: None,
             mesh: Some(MeshConfig {
+                role: MeshRole::Node,
                 instance_name: Some("zay".into()),
                 network_name: "n".into(),
                 network_secret: "s".into(),
@@ -1284,7 +1409,7 @@ ssh     999 user   12u  IPv4 0xdeadbeef      0t0  TCP 192.168.1.5:54321->43.138.
                 wireguard_endpoint: None,
             }),
             stack: StackFlags {
-                mesh: true,
+                mesh: Some(MeshRole::Node),
                 gateway: false,
                 tun: true,
                 no_rules: false,

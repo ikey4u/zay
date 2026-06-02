@@ -4,7 +4,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_yaml::Value;
 use toml::Value as TomlValue;
 
@@ -140,8 +140,10 @@ mixin = '''
     raw.push_str(
         r#"'''
 
-# EasyTier mesh (used with: zay stack --mesh). See docs/stack.md — no separate easytier.toml.
+# EasyTier mesh: zay stack --mesh relay|node --mesh-auth user:pass[@tcp://host:port]
+# Node also needs: --mesh-ip 10.x.x.x/24 when auto-creating [mesh]. See docs/stack.md.
 # [mesh]
+# role = "relay"   # or "node"
 # instance_name = "zay"
 # network_name = "my-network"
 # network_secret = "change-me"
@@ -159,6 +161,7 @@ mixin = '''
 /// EasyTier mesh section in `zay.toml` (see `docs/stack.md`).
 #[derive(Debug, Clone, Deserialize)]
 pub struct MeshConfig {
+    pub role: MeshRole,
     pub instance_name: Option<String>,
     pub network_name: String,
     pub network_secret: String,
@@ -240,14 +243,38 @@ pub struct BootstrapProxy {
     pub proxy: Value,
 }
 
+/// `[mesh].role` and `zay stack --mesh <relay|node>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MeshRole {
+    /// Public rendezvous only: no virtual mesh IP, no WG portal.
+    Relay,
+    /// Full mesh member: virtual IP, WG portal, sing-box routes `mesh_routes`.
+    Node,
+}
+
 /// Flags passed to `zay stack` (Mihomo always runs; these shape the profile).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct StackFlags {
-    pub mesh: bool,
+    pub mesh: Option<MeshRole>,
     pub gateway: bool,
     pub tun: bool,
     /// Do not download Loyalsoldier clash-rules from the network.
     pub no_rules: bool,
+}
+
+impl StackFlags {
+    pub fn mesh_enabled(&self) -> bool {
+        self.mesh.is_some()
+    }
+
+    pub fn is_mesh_relay(&self) -> bool {
+        self.mesh == Some(MeshRole::Relay)
+    }
+
+    pub fn is_mesh_node(&self) -> bool {
+        self.mesh == Some(MeshRole::Node)
+    }
 }
 
 #[derive(Clone)]
@@ -273,7 +300,27 @@ pub struct Settings {
     pub stack: StackFlags,
 }
 
+impl MeshConfig {
+    pub fn is_relay(&self) -> bool {
+        self.role == MeshRole::Relay
+    }
+
+    pub fn is_node(&self) -> bool {
+        self.role == MeshRole::Node
+    }
+}
+
 impl Settings {
+    pub fn mesh_is_relay(&self) -> bool {
+        self.stack.mesh_enabled()
+            && self.mesh.as_ref().is_some_and(MeshConfig::is_relay)
+    }
+
+    pub fn mesh_is_node(&self) -> bool {
+        self.stack.mesh_enabled()
+            && self.mesh.as_ref().is_some_and(MeshConfig::is_node)
+    }
+
     /// Directory passed to Mihomo `-d` (generated config, geo, rules, subscription cache).
     pub fn mihomo_dir(&self) -> PathBuf {
         self.data_dir.join(MIHOMO_DIR)
