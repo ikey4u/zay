@@ -24,7 +24,7 @@ mod tests {
   - '1.2.3.0/24'
 "#;
         let json = loyalsoldier_yaml_to_singbox_source(raw).unwrap();
-        assert!(json.contains("\"version\": 3"));
+        assert!(json.contains("\"version\": 4"));
         assert!(json.contains(".example.com"));
         assert!(json.contains("1.2.3.0/24"));
         assert!(is_valid_singbox_ruleset_json(&json));

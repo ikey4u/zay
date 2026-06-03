@@ -154,7 +154,15 @@ pub fn build_value(settings: &Settings, has_rules: bool) -> Result<Value> {
         route["find_process"] = json!(true);
     }
     if has_rules {
-        route["rule_set"] = json!(rules::rule_set_definitions(settings));
+        let rule_sets = rules::rule_set_definitions(settings);
+        if rule_sets.is_empty() {
+            eprintln!(
+                "warn: clash-rules files missing under {}; routing without rule-sets",
+                settings.singbox_dir().display()
+            );
+        } else {
+            route["rule_set"] = json!(rule_sets);
+        }
     }
 
     let mut cache_file = json!({
@@ -480,6 +488,7 @@ mod tests {
         assert!(with_rules.contains("\"final\": \"direct\""));
         assert!(with_rules.contains("\"gfw\""));
         assert!(with_rules.contains("\"geoip-cn\""));
+        assert!(with_rules.contains("\"geosite-cn\""));
         assert!(with_rules.contains("\"reverse_mapping\": true"));
         assert!(with_rules.contains("\"fake-ip\""));
         assert!(with_rules.contains("\"store_fakeip\": true"));

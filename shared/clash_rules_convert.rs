@@ -3,8 +3,8 @@
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
-/// sing-box 1.11+ source rule-set version (matches pinned sing-box 1.12.x).
-const RULESET_VERSION: u8 = 3;
+/// sing-box source rule-set version (pinned sing-box 1.13.x → version 4).
+const RULESET_VERSION: u8 = 4;
 
 /// Max entries per headless rule item (keeps JSON size reasonable).
 const CHUNK: usize = 512;

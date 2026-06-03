@@ -78,11 +78,17 @@ const CLASH_RULES_SOURCES: &[&str] = &[
     "https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release",
 ];
 
-const CLASH_RULES_STAMP_KEY: &str = "loyalsoldier-clash-rules@release+geoip-cn";
+const CLASH_RULES_STAMP_KEY: &str =
+    "loyalsoldier-clash-rules@release+geoip-cn+geosite-cn+ruleset-v4";
 
 const GEOIP_CN_RULESET_URLS: &[&str] = &[
     "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs",
     "https://cdn.jsdelivr.net/gh/SagerNet/sing-geoip@rule-set/rule-set/geoip-cn.srs",
+];
+
+const GEOSITE_CN_RULESET_URLS: &[&str] = &[
+    "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs",
+    "https://cdn.jsdelivr.net/gh/SagerNet/sing-geosite@rule-set/rule-set/geosite-cn.srs",
 ];
 
 fn embed_clash_rules(out_dir: &Path) {
@@ -98,6 +104,7 @@ fn embed_clash_rules_inner(out_dir: &Path) -> Result<(), String> {
     if clash_rules_stamp_matches(&stamp_path, CLASH_RULES_STAMP_KEY)
         && all_embedded_clash_rules_present(&rules_dir)
         && geoip_cn_srs_valid(&rules_dir.join("geoip-cn.srs"))
+        && geosite_cn_srs_valid(&rules_dir.join("geosite-cn.srs"))
     {
         return emit_embedded_clash_rules_rs(out_dir);
     }
@@ -115,9 +122,19 @@ fn embed_clash_rules_inner(out_dir: &Path) -> Result<(), String> {
         eprintln!("cargo:warning=zay: embedded clash-rules {id}");
     }
     let geoip_dest = rules_dir.join("geoip-cn.srs");
-    fs::write(&geoip_dest, download_geoip_cn_srs()?)
-        .map_err(|e| e.to_string())?;
+    fs::write(
+        &geoip_dest,
+        download_binary_ruleset("geoip-cn", GEOIP_CN_RULESET_URLS)?,
+    )
+    .map_err(|e| e.to_string())?;
     eprintln!("cargo:warning=zay: embedded geoip-cn.srs");
+    let geosite_dest = rules_dir.join("geosite-cn.srs");
+    fs::write(
+        &geosite_dest,
+        download_binary_ruleset("geosite-cn", GEOSITE_CN_RULESET_URLS)?,
+    )
+    .map_err(|e| e.to_string())?;
+    eprintln!("cargo:warning=zay: embedded geosite-cn.srs");
     write_clash_rules_stamp(&stamp_path, CLASH_RULES_STAMP_KEY)?;
     emit_embedded_clash_rules_rs(out_dir)
 }
@@ -126,16 +143,23 @@ fn geoip_cn_srs_valid(path: &Path) -> bool {
     fs::metadata(path).ok().is_some_and(|m| m.len() > 64)
 }
 
-fn download_geoip_cn_srs() -> Result<Vec<u8>, String> {
+fn geosite_cn_srs_valid(path: &Path) -> bool {
+    fs::metadata(path).ok().is_some_and(|m| m.len() > 64)
+}
+
+fn download_binary_ruleset(
+    name: &str,
+    urls: &[&str],
+) -> Result<Vec<u8>, String> {
     let mut last_err = String::from("no sources");
-    for url in GEOIP_CN_RULESET_URLS {
+    for url in urls {
         match fetch_clash_rules_bytes(url) {
             Ok(body) if body.len() > 64 => return Ok(body),
             Ok(_) => last_err = format!("{url}: empty body"),
             Err(e) => last_err = format!("{url}: {e}"),
         }
     }
-    Err(format!("failed to download geoip-cn.srs: {last_err}"))
+    Err(format!("failed to download {name}.srs: {last_err}"))
 }
 
 fn fetch_clash_rules_bytes(url: &str) -> Result<Vec<u8>, String> {
@@ -180,6 +204,9 @@ fn emit_embedded_clash_rules_rs(out_dir: &Path) -> Result<(), String> {
     body.push_str("];\n\n");
     body.push_str(
         "pub static EMBEDDED_GEOIP_CN_SRS: &[u8] = include_bytes!(concat!(env!(\"OUT_DIR\"), \"/embedded-clash-rules/geoip-cn.srs\"));\n",
+    );
+    body.push_str(
+        "pub static EMBEDDED_GEOSITE_CN_SRS: &[u8] = include_bytes!(concat!(env!(\"OUT_DIR\"), \"/embedded-clash-rules/geosite-cn.srs\"));\n",
     );
     fs::write(&path, &body).map_err(|e| e.to_string())?;
     println!("cargo:rustc-env=ZAY_EMBEDDED_RULES_RS={}", path.display());

@@ -101,6 +101,7 @@ fn prepare_inner(settings: Settings, flags: StackFlags) -> Result<Prepared> {
         }
     } else if has_rules {
         log_clash_rules_layout(&settings);
+        rules::log_singbox_rule_sets(&settings);
         if !settings.subscriptions.is_empty()
             || settings.bootstrap_proxy.is_some()
         {
@@ -115,7 +116,14 @@ fn prepare_inner(settings: Settings, flags: StackFlags) -> Result<Prepared> {
         eprintln!("bootstrap proxy \"{}\" will fetch subscription", bp.name);
     }
 
-    let base = singbox::build_config(&settings, has_rules)?;
+    let effective_has_rules =
+        has_rules && !rules::rule_set_definitions(&settings).is_empty();
+    if has_rules && !effective_has_rules {
+        eprintln!(
+            "warn: clash-rules on disk incomplete — rebuild with `cargo build` and restart"
+        );
+    }
+    let base = singbox::build_config(&settings, effective_has_rules)?;
     let config_json = mixin::merge_config(&base, &settings)?;
 
     let config_path = settings.config_path();
@@ -165,9 +173,13 @@ fn log_clash_rules_layout(settings: &Settings) {
 /// Rebuild sing-box config immediately before spawn (SSH client IPs, hub route_address).
 pub fn refresh_config(
     settings: &Settings,
-    _flags: StackFlags,
+    flags: StackFlags,
 ) -> Result<String> {
-    let has_rules = rules::files_present(&settings.singbox_dir());
+    if !flags.no_rules {
+        rules::ensure_embedded_rules(settings)?;
+    }
+    let has_rules = rules::files_present(&settings.singbox_dir())
+        && !rules::rule_set_definitions(settings).is_empty();
     let base = singbox::builder::build_config(settings, has_rules)?;
     let config_json = mixin::merge_config(&base, settings)?;
     fs::write(settings.config_path(), &config_json).with_context(|| {

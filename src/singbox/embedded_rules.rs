@@ -43,9 +43,16 @@ pub fn ensure_installed(settings: &Settings) -> Result<()> {
     }
 
     let geoip_path = dir.join("geoip-cn.srs");
-    if version_changed || !geoip_cn_srs_valid(&geoip_path) {
+    if version_changed || !binary_ruleset_srs_valid(&geoip_path) {
         fs::write(&geoip_path, EMBEDDED_GEOIP_CN_SRS)
             .with_context(|| format!("writing {}", geoip_path.display()))?;
+        written += 1;
+    }
+
+    let geosite_path = dir.join("geosite-cn.srs");
+    if version_changed || !binary_ruleset_srs_valid(&geosite_path) {
+        fs::write(&geosite_path, EMBEDDED_GEOSITE_CN_SRS)
+            .with_context(|| format!("writing {}", geosite_path.display()))?;
         written += 1;
     }
 
@@ -64,6 +71,6 @@ pub fn ensure_installed(settings: &Settings) -> Result<()> {
     Ok(())
 }
 
-fn geoip_cn_srs_valid(path: &std::path::Path) -> bool {
+fn binary_ruleset_srs_valid(path: &std::path::Path) -> bool {
     std::fs::metadata(path).ok().is_some_and(|m| m.len() > 64)
 }

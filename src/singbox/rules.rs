@@ -152,6 +152,14 @@ pub fn ensure_embedded_rules(settings: &Settings) -> Result<()> {
 pub const GEOIP_CN_TAG: &str = "geoip-cn";
 const GEOIP_CN_RULESET_URL: &str = "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs";
 
+/// sing-geosite CN rule-set (Clash `GEOSITE,cn,DIRECT`; works with FakeIP domain matching).
+pub const GEOSITE_CN_TAG: &str = "geosite-cn";
+const GEOSITE_CN_RULESET_URL: &str = "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs";
+
+fn binary_ruleset_srs_valid(path: &Path) -> bool {
+    path.is_file() && fs::metadata(path).ok().is_some_and(|m| m.len() > 64)
+}
+
 pub fn download_geoip_cn_path(singbox_dir: &Path) -> PathBuf {
     download_ruleset_dir(singbox_dir).join(format!("{GEOIP_CN_TAG}.srs"))
 }
@@ -161,7 +169,19 @@ pub fn embedded_geoip_cn_path(singbox_dir: &Path) -> PathBuf {
 }
 
 pub fn geoip_cn_srs_valid(path: &Path) -> bool {
-    path.is_file() && fs::metadata(path).ok().is_some_and(|m| m.len() > 64)
+    binary_ruleset_srs_valid(path)
+}
+
+pub fn download_geosite_cn_path(singbox_dir: &Path) -> PathBuf {
+    download_ruleset_dir(singbox_dir).join(format!("{GEOSITE_CN_TAG}.srs"))
+}
+
+pub fn embedded_geosite_cn_path(singbox_dir: &Path) -> PathBuf {
+    embedded_ruleset_dir(singbox_dir).join(format!("{GEOSITE_CN_TAG}.srs"))
+}
+
+pub fn geosite_cn_srs_valid(path: &Path) -> bool {
+    binary_ruleset_srs_valid(path)
 }
 
 /// Prefer runtime download, then build-time embedded copy (avoids cold-start fetch from GitHub).
@@ -185,6 +205,28 @@ fn geoip_cn_config_path(singbox_dir: &Path) -> String {
     }
 }
 
+/// Prefer runtime download, then build-time embedded copy.
+pub fn resolved_geosite_cn_path(singbox_dir: &Path) -> Option<PathBuf> {
+    let downloaded = download_geosite_cn_path(singbox_dir);
+    if geosite_cn_srs_valid(&downloaded) {
+        return Some(downloaded);
+    }
+    let embedded = embedded_geosite_cn_path(singbox_dir);
+    if geosite_cn_srs_valid(&embedded) {
+        return Some(embedded);
+    }
+    None
+}
+
+fn geosite_cn_config_path(singbox_dir: &Path) -> String {
+    if geosite_cn_srs_valid(&download_geosite_cn_path(singbox_dir)) {
+        format!("{DOWNLOAD_RULESET_DIR}/{GEOSITE_CN_TAG}.srs")
+    } else {
+        format!("{EMBEDDED_RULESET_DIR}/{GEOSITE_CN_TAG}.srs")
+    }
+}
+
+/// Paths wired into `route.rule_set` for sing-box (relative to `-D` / `singbox_dir`).
 pub fn rule_set_definitions(settings: &Settings) -> Vec<Value> {
     let singbox_dir = settings.singbox_dir();
     let mut defs: Vec<Value> = RULE_SETS
@@ -202,7 +244,30 @@ pub fn rule_set_definitions(settings: &Settings) -> Vec<Value> {
         })
         .collect();
     defs.push(geoip_cn_rule_set(settings));
+    defs.push(geosite_cn_rule_set(settings));
     defs
+}
+
+/// Log rule-sets that will be passed to sing-box (`route.rule_set`).
+pub fn log_singbox_rule_sets(settings: &Settings) {
+    let defs = rule_set_definitions(settings);
+    if defs.is_empty() {
+        eprintln!(
+            "warn: no rule-sets in config — run `cargo build` then restart (need {EMBEDDED_RULESET_DIR}/)"
+        );
+        return;
+    }
+    eprintln!(
+        "sing-box rule-sets: {} loaded into config.json (paths relative to {})",
+        defs.len(),
+        settings.singbox_dir().display()
+    );
+    for def in &defs {
+        let tag = def.get("tag").and_then(|v| v.as_str()).unwrap_or("?");
+        let path = def.get("path").and_then(|v| v.as_str()).unwrap_or("?");
+        let kind = def.get("type").and_then(|v| v.as_str()).unwrap_or("?");
+        eprintln!("  - {tag}: {kind} → {path}");
+    }
 }
 
 fn geoip_cn_rule_set(settings: &Settings) -> Value {
@@ -235,6 +300,35 @@ fn geoip_cn_rule_set(settings: &Settings) -> Value {
     })
 }
 
+fn geosite_cn_rule_set(settings: &Settings) -> Value {
+    let singbox_dir = settings.singbox_dir();
+    if resolved_geosite_cn_path(&singbox_dir).is_some() {
+        return json!({
+            "type": "local",
+            "tag": GEOSITE_CN_TAG,
+            "format": "binary",
+            "path": geosite_cn_config_path(&singbox_dir)
+        });
+    }
+    let detour = if settings.subscriptions.is_empty() {
+        "direct"
+    } else {
+        "Proxy"
+    };
+    eprintln!(
+        "warn: geosite-cn.srs missing locally — sing-box will fetch from GitHub via {detour} \
+         (slow/blocked networks may hang at \"initialize rule-set\")"
+    );
+    json!({
+        "type": "remote",
+        "tag": GEOSITE_CN_TAG,
+        "format": "binary",
+        "url": GEOSITE_CN_RULESET_URL,
+        "update_interval": "168h",
+        "download_detour": detour
+    })
+}
+
 /// DNS rules for Mihomo-style FakeIP + Loyalsoldier rule-sets.
 ///
 /// GFW/proxy and domestic direct lists use real DNS (`dns-direct`) so route `rule_set`
@@ -254,7 +348,7 @@ pub fn clash_dns_rules(has_rules: bool) -> Vec<Value> {
                 "server": "dns-direct"
             }),
             json!({
-                "rule_set": ["direct", "icloud", "apple"],
+                "rule_set": ["geosite-cn", "direct", "icloud", "apple"],
                 "query_type": ["A", "AAAA"],
                 "action": "route",
                 "server": "dns-direct"
@@ -282,7 +376,7 @@ pub fn log_routing_mode(settings: &Settings, has_rules: bool) {
     }
     if has_rules {
         eprintln!(
-            "routing: Loyalsoldier blacklist (same as Mihomo/Clash: gfw → Proxy, cncidr/direct → direct, geoip-cn → direct, final → direct)"
+            "routing: Loyalsoldier blacklist (Clash GEOSITE,cn via geosite-cn; gfw → Proxy; cncidr/direct/geosite-cn → direct; final → direct)"
         );
     } else {
         eprintln!(
@@ -307,7 +401,7 @@ pub fn builtin_route_rules(
         json!({ "action": "reject", "rule_set": ["reject"] }),
         json!({ "action": "route", "rule_set": ["icloud"], "outbound": "direct" }),
         json!({ "action": "route", "rule_set": ["apple"], "outbound": "direct" }),
-        json!({ "action": "route", "rule_set": ["direct"], "outbound": "direct" }),
+        json!({ "action": "route", "rule_set": ["geosite-cn", "direct"], "outbound": "direct" }),
         json!({ "action": "route", "rule_set": ["gfw", "proxy"], "outbound": proxy_tag }),
         json!({ "action": "route", "rule_set": ["telegramcidr"], "outbound": proxy_tag }),
         json!({ "action": "route", "rule_set": ["lancidr"], "outbound": "direct" }),
@@ -320,7 +414,7 @@ pub fn builtin_route_rules(
     rules
 }
 
-/// Non-CN HTTP to raw IP (no SNI/Host yet) → Proxy; CN IPs already matched by cncidr above.
+/// Non-CN HTTP to raw IP (no SNI/Host yet) → Proxy; skip when domain is in geosite-cn/direct.
 fn foreign_http_proxy_fallback(proxy_tag: &str) -> Value {
     json!({
         "type": "logical",
@@ -329,7 +423,8 @@ fn foreign_http_proxy_fallback(proxy_tag: &str) -> Value {
             { "network": "tcp", "port": [80] },
             { "ip_is_private": false },
             { "rule_set": ["geoip-cn"], "invert": true },
-            { "rule_set": ["cncidr"], "invert": true }
+            { "rule_set": ["cncidr"], "invert": true },
+            { "rule_set": ["geosite-cn", "direct"], "invert": true }
         ],
         "action": "route",
         "outbound": proxy_tag
@@ -415,28 +510,47 @@ pub fn download_all(settings: &Settings, force: bool) -> Result<()> {
         let dest = download_rule_path(&singbox_dir, def.id);
         fetch_rule(&clients, def.id, &dest, force)?;
     }
-    fetch_geoip_cn_srs(&clients, &download_geoip_cn_path(&singbox_dir), force)?;
+    fetch_binary_ruleset_srs(
+        &clients,
+        &download_geoip_cn_path(&singbox_dir),
+        GEOIP_CN_TAG,
+        &[
+            GEOIP_CN_RULESET_URL,
+            "https://cdn.jsdelivr.net/gh/SagerNet/sing-geoip@rule-set/rule-set/geoip-cn.srs",
+        ],
+        force,
+    )?;
+    fetch_binary_ruleset_srs(
+        &clients,
+        &download_geosite_cn_path(&singbox_dir),
+        GEOSITE_CN_TAG,
+        &[
+            GEOSITE_CN_RULESET_URL,
+            "https://cdn.jsdelivr.net/gh/SagerNet/sing-geosite@rule-set/rule-set/geosite-cn.srs",
+        ],
+        force,
+    )?;
     Ok(())
 }
 
-fn fetch_geoip_cn_srs(
+fn fetch_binary_ruleset_srs(
     clients: &[Client],
     dest: &Path,
+    tag: &str,
+    urls: &[&str],
     force: bool,
 ) -> Result<()> {
-    if !force && geoip_cn_srs_valid(dest) {
+    if !force && binary_ruleset_srs_valid(dest) {
         return Ok(());
     }
-    let urls = [
-        GEOIP_CN_RULESET_URL,
-        "https://cdn.jsdelivr.net/gh/SagerNet/sing-geoip@rule-set/rule-set/geoip-cn.srs",
-    ];
     let mut last_err = None;
     for url in urls {
         for client in clients {
-            match client.get(url).send() {
+            match client.get(*url).send() {
                 Ok(resp) if resp.status().is_success() => {
-                    let body = resp.bytes().context("reading geoip-cn.srs")?;
+                    let body = resp
+                        .bytes()
+                        .with_context(|| format!("reading {tag}.srs"))?;
                     if body.len() <= 64 {
                         last_err =
                             Some(anyhow::anyhow!("{url}: body too small"));
@@ -448,10 +562,7 @@ fn fetch_geoip_cn_srs(
                     fs::write(dest, &body).with_context(|| {
                         format!("writing {}", dest.display())
                     })?;
-                    eprintln!(
-                        "saved rule-set {GEOIP_CN_TAG} → {}",
-                        dest.display()
-                    );
+                    eprintln!("saved rule-set {tag} → {}", dest.display());
                     return Ok(());
                 }
                 Ok(resp) => {
@@ -462,7 +573,7 @@ fn fetch_geoip_cn_srs(
             }
         }
     }
-    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("geoip-cn download failed")))
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("{tag} download failed")))
 }
 
 /// HTTP clients for runtime rule updates — always via proxy when subscriptions are configured.
@@ -559,6 +670,66 @@ fn fetch_rule(
 mod tests {
     use super::*;
     #[test]
+    fn geosite_cn_uses_local_when_srs_present() {
+        let data_dir = std::env::temp_dir()
+            .join(format!("zay-geosite-{}", std::process::id()));
+        let cleanup = data_dir.clone();
+        let _ = fs::remove_dir_all(&cleanup);
+        let singbox_dir = data_dir.join("singbox");
+        fs::create_dir_all(embedded_ruleset_dir(&singbox_dir)).unwrap();
+        fs::write(embedded_geosite_cn_path(&singbox_dir), vec![0u8; 128])
+            .unwrap();
+        let settings = Settings {
+            subscriptions: vec!["https://example.com/sub".into()],
+            data_dir,
+            mixed_port: 7890,
+            allow_lan: false,
+            tun: true,
+            log_level: "info".into(),
+            health_check_url: "https://example.com".into(),
+            update_interval: 3600,
+            tun_exclude_routes: Vec::new(),
+            external_controller: "127.0.0.1:19090".into(),
+            api_secret: "".into(),
+            mihomo_mixin: None,
+            singbox_mixin: None,
+            bootstrap_proxy: None,
+            mesh: None,
+            stack: crate::settings::StackFlags {
+                mesh: None,
+                gateway: false,
+                tun: true,
+                no_rules: false,
+            },
+        };
+        let defs = rule_set_definitions(&settings);
+        let geosite = defs
+            .iter()
+            .find(|d| {
+                d.get("tag").and_then(|t| t.as_str()) == Some(GEOSITE_CN_TAG)
+            })
+            .expect("geosite-cn rule-set");
+        assert_eq!(geosite.get("type").and_then(|t| t.as_str()), Some("local"));
+        assert!(!geosite.get("url").is_some());
+        let _ = fs::remove_dir_all(&cleanup);
+    }
+
+    #[test]
+    fn foreign_http_fallback_skips_geosite_cn_domains() {
+        let rule = foreign_http_proxy_fallback("Proxy");
+        let logical = rule.get("rules").and_then(|r| r.as_array()).unwrap();
+        let excludes_geosite = logical.iter().any(|r| {
+            r.get("rule_set")
+                .and_then(|s| s.as_array())
+                .is_some_and(|a| {
+                    a.iter().any(|v| v.as_str() == Some("geosite-cn"))
+                })
+                && r.get("invert").and_then(|v| v.as_bool()) == Some(true)
+        });
+        assert!(excludes_geosite);
+    }
+
+    #[test]
     fn geoip_cn_uses_local_when_srs_present() {
         let data_dir = std::env::temp_dir()
             .join(format!("zay-geoip-{}", std::process::id()));
@@ -611,7 +782,7 @@ mod tests {
         fs::create_dir_all(embedded_ruleset_dir(&tmp)).unwrap();
         fs::create_dir_all(download_ruleset_dir(&tmp)).unwrap();
         let valid =
-            r#"{"version":3,"rules":[{"domain_suffix":[".example.com"]}]}"#;
+            r#"{"version":4,"rules":[{"domain_suffix":[".example.com"]}]}"#;
         fs::write(embedded_rule_path(&tmp, "gfw"), valid).unwrap();
         fs::write(download_rule_path(&tmp, "gfw"), valid).unwrap();
         assert_eq!(
