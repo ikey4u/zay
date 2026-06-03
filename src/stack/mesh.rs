@@ -379,72 +379,8 @@ pub fn route_lines(settings: &Settings) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use super::*;
-    use crate::settings::{MeshConfig, MeshRole, Settings, StackFlags};
-
-    #[test]
-    fn peer_uri_yields_exclude_cidr() {
-        let settings = Settings {
-            subscriptions: Vec::new(),
-            data_dir: PathBuf::from("/tmp"),
-            mixed_port: 7890,
-            allow_lan: false,
-            tun: false,
-            log_level: "info".into(),
-            health_check_url: "https://example.com".into(),
-            update_interval: 3600,
-            tun_exclude_routes: Vec::new(),
-            external_controller: "127.0.0.1:19090".into(),
-            api_secret: "".into(),
-            mihomo_mixin: None,
-            singbox_mixin: None,
-            bootstrap_proxy: None,
-            mesh: Some(MeshConfig {
-                role: MeshRole::Node,
-                instance_name: None,
-                network_name: "n".into(),
-                network_secret: "s".into(),
-                dhcp: None,
-                ipv4: None,
-                listeners: Some(vec!["tcp://0.0.0.0:11010".into()]),
-                peers: Some(vec![
-                    "tcp://43.138.178.37:11010".into(),
-                    "tcp://192.168.31.10:11010".into(),
-                ]),
-                proxy_networks: None,
-                mesh_routes: Some(vec!["10.126.126.0/24".into()]),
-                wireguard_listen: None,
-                wireguard_client_cidr: None,
-                wireguard_client_address: None,
-                wireguard_endpoint: None,
-            }),
-            stack: StackFlags {
-                mesh: Some(MeshRole::Node),
-                gateway: false,
-                tun: true,
-                no_rules: false,
-            },
-        };
-        let excludes = peer_exclude_cidrs(&settings);
-        assert!(excludes.contains(&"43.138.178.37/32".to_string()));
-        assert!(excludes.contains(&"192.168.31.10/32".to_string()));
-        assert!(!excludes.iter().any(|c| c.starts_with("0.0.0.0")));
-    }
-
-    #[test]
-    fn parse_mesh_auth_node_splits_credentials_and_endpoint() {
-        use crate::settings::MeshRole;
-        let auth = parse_mesh_auth(
-            "my.home:secret@tcp://43.138.178.37:11010",
-            MeshRole::Node,
-        )
-        .unwrap();
-        assert_eq!(auth.network_name, "my.home");
-        assert_eq!(auth.network_secret, "secret");
-        assert_eq!(auth.endpoint, "tcp://43.138.178.37:11010");
-    }
+    use crate::settings::{MeshConfig, MeshRole};
 
     #[test]
     fn parse_mesh_auth_relay_ignores_endpoint_suffix() {

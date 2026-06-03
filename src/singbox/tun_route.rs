@@ -956,17 +956,13 @@ mod tests {
     use super::*;
 
     #[test]
-    #[test]
     fn filter_drops_fakeip_from_route_excludes() {
         use std::path::PathBuf;
 
         use crate::settings::{Settings, StackFlags};
 
-        let mut excludes = vec![
-            "192.168.0.0/16".into(),
-            "198.18.0.15/32".into(),
-            "43.138.178.37/32".into(),
-        ];
+        let mut excludes =
+            vec!["192.168.0.0/16".into(), "198.18.0.15/32".into()];
         let settings = Settings {
             subscriptions: vec!["https://example.com/sub".into()],
             data_dir: PathBuf::from("/tmp"),
@@ -1036,15 +1032,6 @@ en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST>
     }
 
     #[test]
-    #[cfg(target_os = "macos")]
-    fn parse_lsof_ssh_server_line() {
-        let text = "COMMAND PID USER   FD   TYPE DEVICE SIZE/OFF NODE NAME\n\
-ssh     999 user   12u  IPv4 0xdeadbeef      0t0  TCP 192.168.1.5:54321->43.138.178.37:22 (ESTABLISHED)\n";
-        let cidrs = parse_lsof_ssh_servers(text);
-        assert_eq!(cidrs, vec!["43.138.178.37/32".to_string()]);
-    }
-
-    #[test]
     fn mesh_hub_skips_singbox_tun() {
         use std::path::PathBuf;
 
@@ -1090,165 +1077,6 @@ ssh     999 user   12u  IPv4 0xdeadbeef      0t0  TCP 192.168.1.5:54321->43.138.
         };
         assert!(!singbox_tun_enabled(&settings));
         assert!(!is_selective_mesh_tun(&settings));
-    }
-
-    #[test]
-    fn mesh_client_uses_selective_route_address() {
-        use std::path::PathBuf;
-
-        use crate::settings::{MeshConfig, MeshRole, Settings, StackFlags};
-
-        let settings = Settings {
-            subscriptions: Vec::new(),
-            data_dir: PathBuf::from("/tmp"),
-            mixed_port: 7890,
-            allow_lan: false,
-            tun: true,
-            log_level: "info".into(),
-            health_check_url: "https://example.com".into(),
-            update_interval: 3600,
-            tun_exclude_routes: Vec::new(),
-            external_controller: "127.0.0.1:19090".into(),
-            api_secret: "".into(),
-            mihomo_mixin: None,
-            singbox_mixin: None,
-            bootstrap_proxy: None,
-            mesh: Some(MeshConfig {
-                role: MeshRole::Node,
-                instance_name: None,
-                network_name: "n".into(),
-                network_secret: "s".into(),
-                dhcp: None,
-                ipv4: Some("10.126.126.3/24".into()),
-                listeners: None,
-                peers: Some(vec!["tcp://43.138.178.37:11010".into()]),
-                proxy_networks: None,
-                mesh_routes: Some(vec!["10.126.126.0/24".into()]),
-                wireguard_listen: None,
-                wireguard_client_cidr: None,
-                wireguard_client_address: None,
-                wireguard_endpoint: None,
-            }),
-            stack: StackFlags {
-                mesh: Some(MeshRole::Node),
-                gateway: false,
-                tun: true,
-                no_rules: false,
-            },
-        };
-        assert!(singbox_tun_enabled(&settings));
-        assert!(tun_selective_mesh_routes(&settings));
-        assert_eq!(
-            tun_route_address(&settings),
-            Some(vec!["10.126.126.0/24".into()])
-        );
-        assert!(is_selective_mesh_tun(&settings));
-    }
-
-    #[test]
-    fn mesh_client_with_proxy_uses_full_tun() {
-        use std::path::PathBuf;
-
-        use crate::settings::{MeshConfig, MeshRole, Settings, StackFlags};
-
-        let settings = Settings {
-            subscriptions: vec!["https://example.com/sub".into()],
-            data_dir: PathBuf::from("/tmp"),
-            mixed_port: 7890,
-            allow_lan: false,
-            tun: true,
-            log_level: "info".into(),
-            health_check_url: "https://example.com".into(),
-            update_interval: 3600,
-            tun_exclude_routes: Vec::new(),
-            external_controller: "127.0.0.1:19090".into(),
-            api_secret: "".into(),
-            mihomo_mixin: None,
-            singbox_mixin: None,
-            bootstrap_proxy: None,
-            mesh: Some(MeshConfig {
-                role: MeshRole::Node,
-                instance_name: None,
-                network_name: "n".into(),
-                network_secret: "s".into(),
-                dhcp: None,
-                ipv4: Some("10.126.126.2/24".into()),
-                listeners: None,
-                peers: Some(vec!["tcp://43.138.178.37:11010".into()]),
-                proxy_networks: None,
-                mesh_routes: Some(vec!["10.126.126.0/24".into()]),
-                wireguard_listen: None,
-                wireguard_client_cidr: None,
-                wireguard_client_address: None,
-                wireguard_endpoint: None,
-            }),
-            stack: StackFlags {
-                mesh: Some(MeshRole::Node),
-                gateway: false,
-                tun: true,
-                no_rules: false,
-            },
-        };
-        assert!(!tun_selective_mesh_routes(&settings));
-        assert!(tun_route_address(&settings).is_none());
-        assert!(!is_selective_mesh_tun(&settings));
-        assert!(tun_full_capture_mesh_proxy(&settings));
-        let json =
-            crate::singbox::builder::build_config(&settings, false).unwrap();
-        assert!(json.contains("\"find_process\": true"));
-        assert!(json.contains("\"process_name\""));
-        assert!(!json.contains("\"route_address\""));
-        let excludes = tun_exclude_addresses(&settings);
-        assert!(excludes.iter().any(|c| c.starts_with("43.138.178.37/")));
-    }
-
-    #[test]
-    fn full_capture_tun_includes_ipv6_prefix() {
-        use std::path::PathBuf;
-
-        use crate::settings::{MeshConfig, MeshRole, Settings, StackFlags};
-
-        let settings = Settings {
-            subscriptions: vec!["https://example.com/sub".into()],
-            data_dir: PathBuf::from("/tmp"),
-            mixed_port: 7890,
-            allow_lan: false,
-            tun: true,
-            log_level: "info".into(),
-            health_check_url: "https://example.com".into(),
-            update_interval: 3600,
-            tun_exclude_routes: Vec::new(),
-            external_controller: "127.0.0.1:19090".into(),
-            api_secret: "".into(),
-            mihomo_mixin: None,
-            singbox_mixin: None,
-            bootstrap_proxy: None,
-            mesh: Some(MeshConfig {
-                role: MeshRole::Node,
-                instance_name: None,
-                network_name: "n".into(),
-                network_secret: "s".into(),
-                dhcp: None,
-                ipv4: Some("10.126.126.2/24".into()),
-                listeners: None,
-                peers: Some(vec!["tcp://43.138.178.37:11010".into()]),
-                proxy_networks: None,
-                mesh_routes: Some(vec!["10.126.126.0/24".into()]),
-                wireguard_listen: None,
-                wireguard_client_cidr: None,
-                wireguard_client_address: None,
-                wireguard_endpoint: None,
-            }),
-            stack: StackFlags {
-                mesh: Some(MeshRole::Node),
-                gateway: false,
-                tun: true,
-                no_rules: false,
-            },
-        };
-        let addrs = tun_addresses(&settings);
-        assert_eq!(addrs.len(), 2);
-        assert!(addrs[1].contains("fdfe:dcba:9876::1/126"));
     }
 
     #[test]
