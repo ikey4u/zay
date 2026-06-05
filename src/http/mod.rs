@@ -11,7 +11,7 @@ use tower_http::{
     services::{ServeDir, ServeFile},
 };
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, serde::Deserialize)]
 pub struct HttpCli {
     /// Directory to serve
     #[arg(long, value_name = "DIR", default_value = ".")]

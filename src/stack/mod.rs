@@ -1,5 +1,6 @@
 //! `zay stack` — sing-box TUN + optional EasyTier mesh (WireGuard portal).
 
+pub mod controller;
 pub mod easytier;
 pub mod mesh;
 pub mod mihomo;
@@ -263,6 +264,7 @@ pub fn run(cli: StackCli) -> Result<()> {
         &state.settings,
         &config_path,
         state.tun_enabled,
+        None,
     ) {
         Ok(child) => child,
         Err(e) => {
@@ -318,11 +320,12 @@ pub fn run(cli: StackCli) -> Result<()> {
     Ok(())
 }
 
-fn spawn_singbox(
+pub(crate) fn spawn_singbox(
     engine: &std::path::Path,
     settings: &Settings,
     config_path: &std::path::Path,
     tun_enabled: bool,
+    sudo_password: Option<&str>,
 ) -> Result<Child> {
     singbox::spawn(
         engine,
@@ -330,10 +333,11 @@ fn spawn_singbox(
         config_path,
         false,
         tun_enabled,
+        sudo_password,
     )
 }
 
-fn ensure_stack_config_exists(common: &ProxyOpts) -> Result<()> {
+pub(crate) fn ensure_stack_config_exists(common: &ProxyOpts) -> Result<()> {
     let (data_dir, toml_path) = stack_config_paths(common);
     if toml_path.is_file() {
         return Ok(());
@@ -590,7 +594,7 @@ fn build_mesh_config_from_cli(
     }
 }
 
-pub fn log_mesh_effective_config(settings: &Settings) {
+pub(crate) fn log_mesh_effective_config(settings: &Settings) {
     let Some(mesh) = settings.mesh.as_ref() else {
         return;
     };
@@ -614,7 +618,10 @@ pub fn log_mesh_effective_config(settings: &Settings) {
     }
 }
 
-fn validate_mesh_cli(cli: &StackCli, flags: StackFlags) -> Result<()> {
+pub(crate) fn validate_mesh_cli(
+    cli: &StackCli,
+    flags: StackFlags,
+) -> Result<()> {
     let Some(cli_role) = flags.mesh else {
         return Ok(());
     };
@@ -657,7 +664,7 @@ fn validate_mesh_cli(cli: &StackCli, flags: StackFlags) -> Result<()> {
     Ok(())
 }
 
-fn ensure_mesh_config_from_stack(
+pub(crate) fn ensure_mesh_config_from_stack(
     cli: &StackCli,
     flags: StackFlags,
 ) -> Result<()> {

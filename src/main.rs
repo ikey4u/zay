@@ -5,10 +5,12 @@ mod config;
 mod fwd;
 mod http;
 mod mihomo;
+mod serve;
 mod settings;
 mod singbox;
 mod ssh;
 mod stack;
+mod webui;
 mod yaml;
 
 #[cfg(unix)]
@@ -41,6 +43,11 @@ Static HTTP server:
 HTTP API (stack mode):
   GET  /api/health
   GET  /api/config
+
+Web control plane:
+  zay serve
+  GET  /api/v1/meta
+  GET  /api/v1/health
 "#;
 
 const AFTER_HELP: &str = include_str!("../docs/USAGE_EXAMPLE.md");
@@ -73,6 +80,8 @@ pub enum Command {
     Fwd(fwd::FwdCli),
     /// Stable SSH port forwarding with auto-reconnect
     Ssh(ssh::SshCli),
+    /// Web control plane (embedded UI + REST API)
+    Serve(serve::ServeCli),
 }
 
 /// Options for `zay stack`.
@@ -136,7 +145,14 @@ fn main() -> Result<()> {
         Command::Http(http) => run_http(http),
         Command::Fwd(fwd) => run_fwd(fwd),
         Command::Ssh(ssh) => run_ssh(ssh),
+        Command::Serve(serve) => run_serve(serve),
     }
+}
+
+fn run_serve(cli: serve::ServeCli) -> Result<()> {
+    tokio::runtime::Runtime::new()
+        .context("creating tokio runtime")?
+        .block_on(serve::run(cli))
 }
 
 fn run_http(cli: http::HttpCli) -> Result<()> {

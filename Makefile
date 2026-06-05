@@ -66,6 +66,7 @@ setup-zig: setup check-zig
 
 fmt:
 	cargo +nightly fmt
+	pnpm --dir webui exec biome format --write .
 
 build: setup
 	$(CARGO) cargo build --release

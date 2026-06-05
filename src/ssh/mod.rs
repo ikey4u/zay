@@ -2,7 +2,7 @@
 
 pub(crate) mod client;
 pub(crate) mod config;
-pub(crate) mod forward;
+pub mod forward;
 pub(crate) mod session;
 pub(crate) mod tunnel;
 
@@ -11,7 +11,7 @@ use clap::Args;
 use forward::{ForwardKind, SshForward};
 use tracing_subscriber::EnvFilter;
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, serde::Deserialize)]
 #[command(
     about = "Stable SSH port forwarding with auto-reconnect",
     long_about = concat!(
@@ -92,6 +92,11 @@ pub struct SshArgs {
 pub async fn run_cli(cli: SshCli) -> Result<()> {
     init_tracing();
     tunnel::run(parse(cli)?).await
+}
+
+/// Parse CLI for WebUI / serve job API.
+pub fn parse_ssh_cli(cli: SshCli) -> Result<SshArgs> {
+    parse(cli)
 }
 
 fn init_tracing() {

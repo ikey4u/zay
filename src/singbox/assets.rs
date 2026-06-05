@@ -79,6 +79,7 @@ pub fn spawn(
     config_path: &Path,
     quiet: bool,
     privileged: bool,
+    sudo_password: Option<&str>,
 ) -> anyhow::Result<Child> {
     let config_path = config_path.canonicalize().with_context(|| {
         format!("canonicalizing config {}", config_path.display())
@@ -96,7 +97,12 @@ pub fn spawn(
     }
 
     #[cfg(unix)]
-    let mut cmd = crate::privilege::command_for_program(binary, privileged)?;
+    let (mut cmd, write_password) =
+        crate::privilege::command_for_program_with_password(
+            binary,
+            privileged,
+            sudo_password,
+        )?;
 
     #[cfg(not(unix))]
     let mut cmd = Command::new(binary);
@@ -110,9 +116,13 @@ pub fn spawn(
 
     #[cfg(unix)]
     if needs_elevation {
-        // sudo/doas reads the password from the terminal.
-        cmd.stdin(Stdio::inherit());
-    } else {
+        if write_password {
+            // sudo -S: password written after spawn (WebUI / non-interactive).
+        } else {
+            // sudo/doas reads the password from the terminal (CLI).
+            cmd.stdin(Stdio::inherit());
+        }
+    } else if !write_password {
         cmd.stdin(Stdio::null());
     }
 
@@ -125,6 +135,16 @@ pub fn spawn(
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     }
 
-    cmd.spawn()
-        .with_context(|| format!("starting sing-box at {}", binary.display()))
+    let mut child = cmd.spawn().with_context(|| {
+        format!("starting sing-box at {}", binary.display())
+    })?;
+
+    #[cfg(unix)]
+    if write_password {
+        if let Some(password) = sudo_password {
+            crate::privilege::write_password_stdin(&mut child, password)?;
+        }
+    }
+
+    Ok(child)
 }

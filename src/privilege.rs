@@ -1,6 +1,7 @@
 use std::{
+    io::Write,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
 };
 
 use anyhow::{Context, Result, bail};
@@ -46,21 +47,65 @@ pub fn resolve_privilege_wrapper() -> Result<PathBuf> {
     bail!(NO_ELEVATION_TOOL_MSG);
 }
 
+fn wrapper_is_sudo(wrapper: &Path) -> bool {
+    wrapper
+        .file_name()
+        .and_then(|s| s.to_str())
+        .is_some_and(|name| name == "sudo" || name.ends_with("sudo"))
+}
+
 /// Build `sudo program …` when TUN needs root; otherwise `program …`.
 pub fn command_for_program(
     program: &Path,
     privileged: bool,
 ) -> Result<Command> {
+    Ok(command_for_program_with_password(program, privileged, None)?.0)
+}
+
+/// Like [`command_for_program`], but when `password` is set uses `sudo -S` with piped stdin.
+///
+/// Returns `(command, write_password_to_stdin)`; the caller must write the password after spawn
+/// when the second value is `true`.
+pub fn command_for_program_with_password(
+    program: &Path,
+    privileged: bool,
+    password: Option<&str>,
+) -> Result<(Command, bool)> {
     let program = program
         .canonicalize()
         .with_context(|| format!("canonicalizing {}", program.display()))?;
 
     if !privileged || is_root() {
-        return Ok(Command::new(program));
+        return Ok((Command::new(program), false));
     }
 
     let wrapper = resolve_privilege_wrapper()?;
+
+    if password.is_some() {
+        if !wrapper_is_sudo(&wrapper) {
+            bail!(
+                "non-interactive admin password requires sudo; found {}",
+                wrapper.display()
+            );
+        }
+        let mut cmd = Command::new(wrapper);
+        cmd.arg("-S").arg(&program).stdin(Stdio::piped());
+        return Ok((cmd, true));
+    }
+
     let mut cmd = Command::new(wrapper);
     cmd.arg(program);
-    Ok(cmd)
+    Ok((cmd, false))
+}
+
+/// Write `password` (+ newline) to a piped sudo stdin after spawn.
+pub fn write_password_stdin(
+    child: &mut std::process::Child,
+    password: &str,
+) -> Result<()> {
+    let mut stdin = child.stdin.take().context("sudo stdin pipe missing")?;
+    stdin
+        .write_all(format!("{password}\n").as_bytes())
+        .context("writing sudo password to stdin")?;
+    Ok(())
 }

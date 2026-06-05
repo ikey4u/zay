@@ -1,0 +1,397 @@
+{
+  "dns": {
+    "final": "dns-direct",
+    "reverse_mapping": true,
+    "rules": [
+      {
+        "action": "route",
+        "domain_suffix": [
+          ".lan",
+          ".local",
+          ".internal"
+        ],
+        "server": "dns-direct"
+      },
+      {
+        "action": "route",
+        "query_type": [
+          "A",
+          "AAAA"
+        ],
+        "rule_set": [
+          "gfw",
+          "proxy"
+        ],
+        "server": "dns-direct"
+      },
+      {
+        "action": "route",
+        "query_type": [
+          "A",
+          "AAAA"
+        ],
+        "rule_set": [
+          "geosite-cn",
+          "direct",
+          "icloud",
+          "apple"
+        ],
+        "server": "dns-direct"
+      },
+      {
+        "action": "route",
+        "query_type": [
+          "A",
+          "AAAA"
+        ],
+        "rule_set": [
+          "private",
+          "lancidr"
+        ],
+        "server": "dns-direct"
+      },
+      {
+        "action": "route",
+        "query_type": [
+          "A",
+          "AAAA"
+        ],
+        "server": "fake-ip"
+      }
+    ],
+    "servers": [
+      {
+        "server": "223.5.5.5",
+        "tag": "dns-direct",
+        "type": "udp"
+      },
+      {
+        "server": "114.114.114.114",
+        "tag": "dns-direct-alt",
+        "type": "udp"
+      },
+      {
+        "inet4_range": "198.18.0.0/15",
+        "inet6_range": "fc00::/18",
+        "tag": "fake-ip",
+        "type": "fakeip"
+      }
+    ],
+    "strategy": "prefer_ipv4"
+  },
+  "experimental": {
+    "cache_file": {
+      "enabled": true,
+      "path": "cache.db",
+      "store_fakeip": true
+    },
+    "clash_api": {
+      "default_mode": "rule",
+      "external_controller": "127.0.0.1:19090",
+      "secret": "zay-000000000000000018b5eaec3c9e0e80"
+    }
+  },
+  "inbounds": [
+    {
+      "listen": "127.0.0.1",
+      "listen_port": 7890,
+      "tag": "mixed-in",
+      "type": "mixed"
+    },
+    {
+      "listen": "::1",
+      "listen_port": 7890,
+      "tag": "mixed-in-v6",
+      "type": "mixed"
+    },
+    {
+      "address": [
+        "10.14.14.9/30",
+        "fdfe:dcba:9876::1/126"
+      ],
+      "auto_route": true,
+      "route_exclude_address": [
+        "127.0.0.0/8",
+        "169.254.0.0/16",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        "192.168.31.201/24",
+        "224.0.0.0/4",
+        "255.255.255.255/32"
+      ],
+      "stack": "system",
+      "strict_route": true,
+      "tag": "tun-in",
+      "type": "tun"
+    }
+  ],
+  "log": {
+    "level": "info",
+    "timestamp": true
+  },
+  "outbounds": [
+    {
+      "bind_interface": "en0",
+      "tag": "direct",
+      "type": "direct"
+    }
+  ],
+  "route": {
+    "auto_detect_interface": true,
+    "default_domain_resolver": "dns-direct",
+    "final": "direct",
+    "find_process": true,
+    "rule_set": [
+      {
+        "format": "source",
+        "path": "ruleset-embedded/applications.json",
+        "tag": "applications",
+        "type": "local"
+      },
+      {
+        "format": "source",
+        "path": "ruleset-embedded/reject.json",
+        "tag": "reject",
+        "type": "local"
+      },
+      {
+        "format": "source",
+        "path": "ruleset-embedded/icloud.json",
+        "tag": "icloud",
+        "type": "local"
+      },
+      {
+        "format": "source",
+        "path": "ruleset-embedded/apple.json",
+        "tag": "apple",
+        "type": "local"
+      },
+      {
+        "format": "source",
+        "path": "ruleset-embedded/google.json",
+        "tag": "google",
+        "type": "local"
+      },
+      {
+        "format": "source",
+        "path": "ruleset-embedded/proxy.json",
+        "tag": "proxy",
+        "type": "local"
+      },
+      {
+        "format": "source",
+        "path": "ruleset-embedded/direct.json",
+        "tag": "direct",
+        "type": "local"
+      },
+      {
+        "format": "source",
+        "path": "ruleset-embedded/private.json",
+        "tag": "private",
+        "type": "local"
+      },
+      {
+        "format": "source",
+        "path": "ruleset-embedded/gfw.json",
+        "tag": "gfw",
+        "type": "local"
+      },
+      {
+        "format": "source",
+        "path": "ruleset-embedded/telegramcidr.json",
+        "tag": "telegramcidr",
+        "type": "local"
+      },
+      {
+        "format": "source",
+        "path": "ruleset-embedded/cncidr.json",
+        "tag": "cncidr",
+        "type": "local"
+      },
+      {
+        "format": "source",
+        "path": "ruleset-embedded/lancidr.json",
+        "tag": "lancidr",
+        "type": "local"
+      },
+      {
+        "format": "binary",
+        "path": "ruleset-embedded/geoip-cn.srs",
+        "tag": "geoip-cn",
+        "type": "local"
+      },
+      {
+        "format": "binary",
+        "path": "ruleset-embedded/geosite-cn.srs",
+        "tag": "geosite-cn",
+        "type": "local"
+      }
+    ],
+    "rules": [
+      {
+        "action": "hijack-dns",
+        "port": 53
+      },
+      {
+        "action": "hijack-dns",
+        "protocol": "dns"
+      },
+      {
+        "action": "sniff",
+        "sniffer": [
+          "http",
+          "tls",
+          "quic"
+        ],
+        "timeout": "2s"
+      },
+      {
+        "action": "route",
+        "domain_suffix": [
+          "jsdelivr.net"
+        ],
+        "outbound": "direct"
+      },
+      {
+        "action": "route",
+        "domain_suffix": [
+          "githubusercontent.com"
+        ],
+        "outbound": "direct"
+      },
+      {
+        "action": "route",
+        "domain_suffix": [
+          "github.com"
+        ],
+        "outbound": "direct"
+      },
+      {
+        "action": "route",
+        "domain_keyword": [
+          "github"
+        ],
+        "outbound": "direct"
+      },
+      {
+        "action": "route",
+        "outbound": "direct",
+        "rule_set": [
+          "applications"
+        ]
+      },
+      {
+        "action": "route",
+        "outbound": "direct",
+        "rule_set": [
+          "private"
+        ]
+      },
+      {
+        "action": "reject",
+        "rule_set": [
+          "reject"
+        ]
+      },
+      {
+        "action": "route",
+        "outbound": "direct",
+        "rule_set": [
+          "icloud"
+        ]
+      },
+      {
+        "action": "route",
+        "outbound": "direct",
+        "rule_set": [
+          "apple"
+        ]
+      },
+      {
+        "action": "route",
+        "outbound": "direct",
+        "rule_set": [
+          "geosite-cn",
+          "direct"
+        ]
+      },
+      {
+        "action": "route",
+        "outbound": "direct",
+        "rule_set": [
+          "gfw",
+          "proxy"
+        ]
+      },
+      {
+        "action": "route",
+        "outbound": "direct",
+        "rule_set": [
+          "telegramcidr"
+        ]
+      },
+      {
+        "action": "route",
+        "outbound": "direct",
+        "rule_set": [
+          "lancidr"
+        ]
+      },
+      {
+        "action": "route",
+        "outbound": "direct",
+        "rule_set": [
+          "cncidr"
+        ]
+      },
+      {
+        "action": "route",
+        "mode": "and",
+        "outbound": "direct",
+        "rules": [
+          {
+            "network": "tcp",
+            "port": [
+              80
+            ]
+          },
+          {
+            "ip_is_private": false
+          },
+          {
+            "invert": true,
+            "rule_set": [
+              "geoip-cn"
+            ]
+          },
+          {
+            "invert": true,
+            "rule_set": [
+              "cncidr"
+            ]
+          },
+          {
+            "invert": true,
+            "rule_set": [
+              "geosite-cn",
+              "direct"
+            ]
+          }
+        ],
+        "type": "logical"
+      },
+      {
+        "action": "route",
+        "ip_is_private": true,
+        "outbound": "direct"
+      },
+      {
+        "action": "route",
+        "outbound": "direct",
+        "rule_set": [
+          "geoip-cn"
+        ]
+      }
+    ]
+  }
+}

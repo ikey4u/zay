@@ -1,0 +1,129 @@
+# Zay – simple settings (edit this file, then: zay stack)
+# Stack proxy URL(s) on the CLI: zay stack --proxy "https://..." [--proxy "https://..."]
+# Mihomo runtime files (config, geo, ruleset, providers) live in ./mihomo/
+# Reference: mihomo/config.template.yaml (upstream docs/config.yaml, created on first run)
+
+mixed_port = 7890
+log_level = "info"
+health_check_url = "http://cp.cloudflare.com/generate_204"
+update_interval = 3600
+# Extra CIDRs that Mihomo TUN should not capture. Useful for corporate proxy gateways.
+# tun_exclude_routes = ["11.155.134.0/24"]
+
+# Bootstrap proxy: used only to fetch stack proxy subscriptions when the URL is blocked on DIRECT.
+# Either a path to a YAML file (one Mihomo proxy), or an inline table — see below.
+# bootstrap_proxy = "bootstrap.yaml"
+#
+# [bootstrap_proxy]
+# name = "Bootstrap"
+# type = "ss"
+# server = "1.2.3.4"
+# port = 8388
+# cipher = "aes-256-gcm"
+# password = "secret"
+
+[mihomo]
+# YAML mixin merged into generated mihomo/config.yaml.
+mixin = '''
+# =============================================================================
+# [mihomo].mixin — 合并进 Zay 生成的 config.yaml（可选）
+# =============================================================================
+#
+# 位置：zay.toml 中的 [mihomo].mixin；Mihomo 文件在 mihomo/ 子目录
+#
+# 用法：
+#   1. 取消下方示例的行首 #，或自行添加 YAML
+#   2. 仅有注释/空行时不会参与合并
+#   3. mixin 里的 rules 会排在 Zay 内置规则 **之前**（先匹配先生效）
+#   4. rule-providers 与内置 Loyalsoldier 规则集 **合并**（可同时存在）
+#   5. proxy-groups 按 name **合并**（同名组合并字段；proxies/use 列表追加去重）
+#   6. 其它顶层键（mixed-port、tun、dns 等）按字段覆盖生成配置
+#   7. 修改后重启 zay 生效
+#
+# Zay 内置代理组名：Proxy、Auto（不是 PROXY）
+# 策略：DIRECT（直连）、REJECT（拒绝）、Proxy / Auto（走代理）
+#
+# =============================================================================
+# 其它全局项示例
+# =============================================================================
+#
+# mixed-port: 7891
+#
+# tun:
+#   enable: true
+#
+# =============================================================================
+# rule-providers — 外部规则集
+# =============================================================================
+#
+# 本地列表（在 mihomo/ruleset/ 新建 my-direct.txt，每行一个域名）：
+#
+# rule-providers:
+#   my-direct:
+#     type: file
+#     behavior: domain
+#     path: ./ruleset/my-direct.txt
+#
+# 远程规则：
+#
+# rule-providers:
+#   my-remote:
+#     type: http
+#     behavior: domain
+#     url: "https://example.com/rules.txt"
+#     path: ./ruleset/my-remote.yaml
+#     interval: 86400
+#
+# behavior：domain | ipcidr | classical
+#
+# =============================================================================
+# rules — 分流（从上到下，命中第一条即停止）
+# =============================================================================
+#
+# rules:
+#   - RULE-SET,my-direct,DIRECT
+#   - DOMAIN-SUFFIX,company.internal,DIRECT
+#   - DOMAIN,www.example.com,DIRECT
+#   - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
+#   - IP-CIDR,172.16.0.0/12,DIRECT,no-resolve
+#   - IP-CIDR,192.168.0.0/16,DIRECT,no-resolve
+#   - PROCESS-NAME,Telegram.exe,Proxy
+#
+# 避免在离线/受限网络启动阶段使用 GEOIP 规则；缺少 MMDB 时 Mihomo 会尝试联网下载。
+# Zay 会在 MMDB 缺失时把 GEOIP,PRIVATE 规则改写为私网 IP-CIDR 规则。
+#
+# 勿在 mixin 写 MATCH,DIRECT — 内置规则末尾已包含（黑名单模式：仅 GFW 等走 Proxy）。
+#
+# =============================================================================
+# proxy-groups — 按 name 合并（勿整段覆盖 Auto/Proxy）
+# =============================================================================
+#
+# proxy-groups:
+#   - name: Proxy
+#     proxies:
+#       - DIRECT
+#       - 我的备用节点
+#
+# =============================================================================
+# 你的配置
+# =============================================================================
+#
+# rule-providers:
+#
+# rules:
+#
+'''
+
+# EasyTier mesh: zay stack --mesh relay|node --mesh-auth user:pass[@tcp://host:port]
+# Node also needs: --mesh-ip 10.x.x.x/24 when auto-creating [mesh]. See docs/stack.md.
+# [mesh]
+# role = "relay"   # or "node"
+# instance_name = "zay"
+# network_name = "my-network"
+# network_secret = "change-me"
+# dhcp = true
+# ipv4 = "10.126.126.10/24"
+# Mihomo TUN excludes mesh_routes, so EasyTier TUN owns these CIDRs.
+# listeners = ["tcp://0.0.0.0:11010", "udp://0.0.0.0:11010"]
+# peers = ["tcp://public.easytier.top:11010"]
+# mesh_routes = ["10.126.126.0/24"]

@@ -20,7 +20,7 @@ anyhow = "1"
 
 [dependencies]
 anyhow = "1"
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 clap = { version = "4", features = ["derive"] }
 ctrlc = "3.4"
@@ -34,6 +34,8 @@ base64 = "0.22"
 sha2 = "0.10"
 indexmap = { version = "2", features = ["serde"] }
 tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 tower-http = { version = "0.6", features = ["cors", "fs"] }
 toml = "0.8"
 dirs = "6"

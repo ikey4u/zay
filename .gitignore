@@ -4,3 +4,5 @@
 .DS_Store
 Makefile.local
 inner
+webui/node_modules/
+webui/dist/
