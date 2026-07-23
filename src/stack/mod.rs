@@ -33,9 +33,9 @@ use crate::{
 /// CLI value for `--mesh <relay|node>`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
 pub enum MeshCliMode {
-    /// Forward-only public rendezvous (no virtual mesh IP).
+    /// Public rendezvous / optional hub; sing-box TUN is forced off.
     Relay,
-    /// Join the virtual network (mesh member + WG portal).
+    /// Join the virtual network (requires `--mesh-ip` + TUN + local WG portal).
     Node,
 }
 
@@ -48,29 +48,32 @@ impl From<MeshCliMode> for MeshRole {
     }
 }
 
-const LONG_ABOUT: &str = "Run the network stack: local proxy, LAN/VM gateway, private mesh, and TUN capture.";
+const LONG_ABOUT: &str = "\
+Run the network stack: sing-box (mixed proxy + optional system TUN) and optional EasyTier mesh.
 
-const AFTER_HELP: &str = include_str!("../../docs/USAGE_EXAMPLE.md");
+With -s/--proxy, Loyalsoldier rules send GFW domains to Proxy and CN/private to direct. \
+With --mesh node, mesh CIDRs go via a local WireGuard portal (easytier-wg). \
+With --mesh relay, this host is a rendezvous (TUN off; optional --mesh-ip hub).";
 
 #[derive(Args, Debug)]
-#[command(long_about = LONG_ABOUT, after_long_help = AFTER_HELP)]
+#[command(long_about = LONG_ABOUT)]
 pub struct StackCli {
     #[command(flatten, next_help_heading = "Runtime options")]
     pub common: ProxyOpts,
 
-    /// EasyTier mesh role: `relay` (forward-only, no mesh IP) or `node` (join virtual network)
+    /// EasyTier role: `relay` (rendezvous / optional hub, TUN off) or `node` (join mesh)
     #[arg(long, value_name = "relay|node", help_heading = "Stack options")]
     pub mesh: Option<MeshCliMode>,
 
-    /// Share the local proxy port with LAN/VM clients
+    /// Bind the mixed proxy port on LAN (0.0.0.0) so other hosts/VMs can use it
     #[arg(long, help_heading = "Stack options")]
     pub gateway: bool,
 
     /// Mesh credentials (`user` = network name, `password` = network secret).
     ///
-    /// Relay: `user:password` only (listens on 0.0.0.0:11010 TCP+UDP; `@host:port` ignored).
-    /// Optional `--mesh-ip 10.x.1/24` joins the virtual network as hub (recommended).
-    /// Node: `user:password@tcp://relay:port` (peer to dial).
+    /// Relay: `user:password` (listens 0.0.0.0:11010 TCP+UDP; `@host:port` ignored).
+    /// Optional `--mesh-ip 10.x.x.1/24` joins the virtual net as hub (recommended).
+    /// Node: `user:password@tcp://relay:port` (peer to dial; UDP also ok).
     #[arg(
         long = "mesh-auth",
         value_name = "USER:PASS[@tcp://HOST:PORT]",
@@ -78,11 +81,11 @@ pub struct StackCli {
     )]
     pub mesh_auth: Option<String>,
 
-    /// This node's virtual mesh IPv4 CIDR (`zay stack --mesh node`, or hub-style `relay`)
+    /// This node's virtual mesh IPv4 CIDR (required for `--mesh node`; recommended for hub `relay`)
     #[arg(long = "mesh-ip", value_name = "IP/MASK", help_heading = "Mesh")]
     pub mesh_ip: Option<String>,
 
-    /// Skip downloading clash-rules (use cached rule-sets or simple fallback routes)
+    /// Skip clash rule-sets (embedded/download); use simple fallback routes
     #[arg(long = "no-rules", help_heading = "Stack options")]
     pub no_rules: bool,
 }
