@@ -69,6 +69,38 @@ pub fn is_valid_singbox_ruleset_json(raw: &str) -> bool {
         && v.get("rules").and_then(|r| r.as_array()).is_some()
 }
 
+/// Rewrite rule-set JSON so `domain_suffix` entries have no leading `.`.
+/// Returns `Some(new_json)` when any entry was changed.
+pub fn strip_leading_dots_in_ruleset_json(raw: &str) -> Option<String> {
+    let mut v: Value = serde_json::from_str(raw).ok()?;
+    let rules = v.get_mut("rules")?.as_array_mut()?;
+    let mut changed = false;
+    for rule in rules.iter_mut() {
+        let Some(obj) = rule.as_object_mut() else {
+            continue;
+        };
+        let Some(suffixes) = obj.get_mut("domain_suffix") else {
+            continue;
+        };
+        let Some(arr) = suffixes.as_array_mut() else {
+            continue;
+        };
+        for item in arr.iter_mut() {
+            let Some(s) = item.as_str() else { continue };
+            if let Some(stripped) = s.strip_prefix('.') {
+                if !stripped.is_empty() {
+                    *item = Value::String(stripped.to_string());
+                    changed = true;
+                }
+            }
+        }
+    }
+    if !changed {
+        return None;
+    }
+    serde_json::to_string_pretty(&v).ok()
+}
+
 fn push_chunks(rules: &mut Vec<Value>, key: &str, values: &[String]) {
     for chunk in values.chunks(CHUNK) {
         rules.push(json!({ key: chunk }));
@@ -133,11 +165,11 @@ fn classify_line(
     }
 
     if let Some(rest) = line.strip_prefix("+.") {
-        domain_suffix.push(format!(".{rest}"));
+        domain_suffix.push(normalize_suffix(rest));
         return;
     }
     if line.starts_with('.') {
-        domain_suffix.push(line.to_string());
+        domain_suffix.push(normalize_suffix(line));
         return;
     }
     if line.starts_with('+') {
@@ -151,13 +183,13 @@ fn classify_line(
     domain_suffix.push(normalize_suffix(line));
 }
 
+/// Clash DOMAIN-SUFFIX / `+.host` means apex + subdomains.
+///
+/// sing-box ≥1.9: `domain_suffix` **with** a leading `.` matches subdomains only;
+/// **without** a leading `.` matches `(domain|.+\.domain)`. Strip dots so Loyalsoldier
+/// lists match apex hosts like `x.com`, not only `www.x.com`.
 fn normalize_suffix(s: &str) -> String {
-    let s = s.trim();
-    if s.starts_with('.') {
-        s.to_string()
-    } else {
-        format!(".{s}")
-    }
+    s.trim().trim_start_matches('.').to_string()
 }
 
 fn looks_like_cidr(s: &str) -> bool {

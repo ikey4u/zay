@@ -79,8 +79,7 @@ const CLASH_RULES_SOURCES: &[&str] = &[
     "https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release",
 ];
 
-const CLASH_RULES_STAMP_KEY: &str =
-    "loyalsoldier-clash-rules@release+geoip-cn+geosite-cn+ruleset-v4";
+const CLASH_RULES_STAMP_KEY: &str = "loyalsoldier-clash-rules@release+geoip-cn+geosite-cn+ruleset-v4+suffix-apex";
 
 const GEOIP_CN_RULESET_URLS: &[&str] = &[
     "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs",

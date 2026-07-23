@@ -145,7 +145,50 @@ pub fn migrate_legacy_ruleset(singbox_dir: &Path) -> Result<()> {
 /// Extract embedded rule-sets and migrate legacy paths.
 pub fn ensure_embedded_rules(settings: &Settings) -> Result<()> {
     migrate_legacy_ruleset(&settings.singbox_dir())?;
-    super::embedded_rules::ensure_installed(settings)
+    super::embedded_rules::ensure_installed(settings)?;
+    // Download copies may still use pre-1.9 leading-dot suffixes; strip so apex
+    // hosts (e.g. x.com) match Proxy/gfw instead of falling through to final direct.
+    migrate_domain_suffix_leading_dots(&settings.singbox_dir())
+}
+
+/// Strip leading `.` from `domain_suffix` in on-disk rule-set JSON (sing-box ≥1.9).
+fn migrate_domain_suffix_leading_dots(singbox_dir: &Path) -> Result<()> {
+    let mut fixed = 0usize;
+    for dir in [
+        download_ruleset_dir(singbox_dir),
+        embedded_ruleset_dir(singbox_dir),
+    ] {
+        if !dir.is_dir() {
+            continue;
+        }
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            let Ok(raw) = fs::read_to_string(&path) else {
+                continue;
+            };
+            let Some(new) =
+                super::rules_convert::strip_leading_dots_in_ruleset_json(&raw)
+            else {
+                continue;
+            };
+            fs::write(&path, new).with_context(|| {
+                format!("rewriting domain_suffix in {}", path.display())
+            })?;
+            fixed += 1;
+        }
+    }
+    if fixed > 0 {
+        eprintln!(
+            "clash-rules: normalized domain_suffix (no leading '.') in {fixed} rule-set(s)"
+        );
+    }
+    Ok(())
 }
 
 /// sing-geoip CN rule-set (replaces legacy GEOIP,CN / country.mmdb in Mihomo).

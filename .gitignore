@@ -3,6 +3,7 @@
 /bin/
 .DS_Store
 Makefile.local
+mise.local.toml
 inner
 webui/node_modules/
 webui/dist/
