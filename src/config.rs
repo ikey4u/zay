@@ -61,6 +61,32 @@ pub struct ConfigUnset {
     pub key: String,
 }
 
+/// Read raw `zay.toml` text (creates default file if missing).
+pub fn read_raw(opts: &ConfigPathOpts) -> Result<String> {
+    let toml_path = ensure_config(opts)?;
+    fs::read_to_string(&toml_path)
+        .with_context(|| format!("reading {}", toml_path.display()))
+}
+
+/// Replace entire `zay.toml` after TOML syntax check.
+pub fn write_raw(opts: &ConfigPathOpts, raw: &str) -> Result<()> {
+    raw.parse::<DocumentMut>()
+        .context("parsing zay.toml before write")?;
+    let toml_path = ensure_config(opts)?;
+    fs::write(&toml_path, raw)
+        .with_context(|| format!("writing {}", toml_path.display()))
+}
+
+/// Validate `zay.toml` syntax (and ensure readable tables).
+pub fn validate_file(opts: &ConfigPathOpts) -> Result<()> {
+    let toml_path = ensure_config(opts)?;
+    let raw = fs::read_to_string(&toml_path)
+        .with_context(|| format!("reading {}", toml_path.display()))?;
+    raw.parse::<DocumentMut>()
+        .with_context(|| format!("parsing {}", toml_path.display()))?;
+    Ok(())
+}
+
 pub fn run(cli: ConfigCli) -> Result<()> {
     match cli.command {
         ConfigCommand::Dump(opts) => dump(&opts),
@@ -81,6 +107,11 @@ fn ensure_config(opts: &ConfigPathOpts) -> Result<PathBuf> {
     let (data_dir, toml_path) = config_path(opts);
     settings::ensure_zay_toml(&data_dir, &toml_path)?;
     Ok(toml_path)
+}
+
+/// Public alias for serve API handlers.
+pub fn ensure_config_path(opts: &ConfigPathOpts) -> Result<PathBuf> {
+    ensure_config(opts)
 }
 
 fn dump(opts: &ConfigPathOpts) -> Result<()> {
@@ -131,7 +162,11 @@ where
         .with_context(|| format!("writing {}", toml_path.display()))
 }
 
-fn set_key(doc: &mut DocumentMut, key: &str, value_raw: &str) -> Result<()> {
+pub fn set_key(
+    doc: &mut DocumentMut,
+    key: &str,
+    value_raw: &str,
+) -> Result<()> {
     let path = parse_key_path(key)?;
     let value = parse_value(value_raw)?;
     let (parents, leaf) = path.split_at(path.len() - 1);
@@ -140,7 +175,7 @@ fn set_key(doc: &mut DocumentMut, key: &str, value_raw: &str) -> Result<()> {
     Ok(())
 }
 
-fn unset_key(doc: &mut DocumentMut, key: &str) -> Result<()> {
+pub fn unset_key(doc: &mut DocumentMut, key: &str) -> Result<()> {
     let path = parse_key_path(key)?;
     let (parents, leaf) = path.split_at(path.len() - 1);
     let table = parent_table_mut(doc.as_table_mut(), parents, false)?;
@@ -187,7 +222,7 @@ fn parse_key_path(key: &str) -> Result<Vec<&str>> {
     Ok(parts)
 }
 
-fn parse_value(raw: &str) -> Result<Item> {
+pub fn parse_value(raw: &str) -> Result<Item> {
     let wrapper = format!("value = {raw}\n");
     let mut doc = wrapper
         .parse::<DocumentMut>()

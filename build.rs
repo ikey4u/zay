@@ -7,8 +7,14 @@ use std::{
 
 use sha2::{Digest, Sha256};
 
+include!("shared/clash_rules_convert.rs");
+
 /// Pinned Mihomo release embedded by Zay (must match `mihomo::config` types).
 const PINNED_MIHOMO_VERSION: &str = "v1.19.25";
+/// Pinned sing-box release for `zay stack` on the singbox branch.
+const PINNED_SINGBOX_VERSION: &str = "v1.13.12";
+const SINGBOX_RELEASE_BASE: &str =
+    "https://github.com/SagerNet/sing-box/releases/download";
 const CONFIG_DOCS_URL: &str = "https://raw.githubusercontent.com/MetaCubeX/mihomo/v1.19.25/docs/config.yaml";
 const RELEASE_BASE: &str =
     "https://github.com/MetaCubeX/mihomo/releases/download";
@@ -46,12 +52,210 @@ fn main() {
     fetch_config_docs_template(&out_dir);
     prepare_windows_runtime(&out_dir, target);
 
-    let (artifact, ext) = artifact_for_target(&target).unwrap_or_else(|| {
-        panic!("unsupported build target for embedded Mihomo: {target}")
+    embed_mihomo(&out_dir, target);
+    embed_singbox(&out_dir, target);
+    embed_clash_rules(&out_dir);
+    embed_webui(&out_dir);
+}
+
+/// Keep in sync with `src/singbox/rules.rs` `RULE_SETS`.
+const CLASH_RULE_SET_IDS: &[&str] = &[
+    "applications",
+    "reject",
+    "icloud",
+    "apple",
+    "google",
+    "proxy",
+    "direct",
+    "private",
+    "gfw",
+    "telegramcidr",
+    "cncidr",
+    "lancidr",
+];
+
+const CLASH_RULES_SOURCES: &[&str] = &[
+    "https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release",
+    "https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release",
+];
+
+const CLASH_RULES_STAMP_KEY: &str = "loyalsoldier-clash-rules@release+geoip-cn+geosite-cn+ruleset-v4+suffix-apex";
+
+const GEOIP_CN_RULESET_URLS: &[&str] = &[
+    "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs",
+    "https://cdn.jsdelivr.net/gh/SagerNet/sing-geoip@rule-set/rule-set/geoip-cn.srs",
+];
+
+const GEOSITE_CN_RULESET_URLS: &[&str] = &[
+    "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs",
+    "https://cdn.jsdelivr.net/gh/SagerNet/sing-geosite@rule-set/rule-set/geosite-cn.srs",
+];
+
+fn embed_clash_rules(out_dir: &Path) {
+    println!("cargo:rerun-if-changed=shared/clash_rules_convert.rs");
+    embed_clash_rules_inner(out_dir).unwrap_or_else(|e| {
+        panic!("failed to embed Loyalsoldier clash-rules at build time: {e}");
     });
+}
+
+fn embed_clash_rules_inner(out_dir: &Path) -> Result<(), String> {
+    let rules_dir = out_dir.join("embedded-clash-rules");
+    let stamp_path = out_dir.join("clash-rules.stamp");
+    if clash_rules_stamp_matches(&stamp_path, CLASH_RULES_STAMP_KEY)
+        && all_embedded_clash_rules_present(&rules_dir)
+        && geoip_cn_srs_valid(&rules_dir.join("geoip-cn.srs"))
+        && geosite_cn_srs_valid(&rules_dir.join("geosite-cn.srs"))
+    {
+        return emit_embedded_clash_rules_rs(out_dir);
+    }
+
+    fs::create_dir_all(&rules_dir).map_err(|e| e.to_string())?;
+    for id in CLASH_RULE_SET_IDS {
+        let raw = download_clash_rule_txt(id)?;
+        let json = loyalsoldier_yaml_to_singbox_source(&raw)
+            .map_err(|e| format!("convert clash-rules {id}: {e}"))?;
+        if !is_valid_singbox_ruleset_json(&json) {
+            return Err(format!("invalid sing-box rule-set JSON for {id}"));
+        }
+        let dest = rules_dir.join(format!("{id}.json"));
+        fs::write(&dest, json).map_err(|e| e.to_string())?;
+        eprintln!("cargo:warning=zay: embedded clash-rules {id}");
+    }
+    let geoip_dest = rules_dir.join("geoip-cn.srs");
+    fs::write(
+        &geoip_dest,
+        download_binary_ruleset("geoip-cn", GEOIP_CN_RULESET_URLS)?,
+    )
+    .map_err(|e| e.to_string())?;
+    eprintln!("cargo:warning=zay: embedded geoip-cn.srs");
+    let geosite_dest = rules_dir.join("geosite-cn.srs");
+    fs::write(
+        &geosite_dest,
+        download_binary_ruleset("geosite-cn", GEOSITE_CN_RULESET_URLS)?,
+    )
+    .map_err(|e| e.to_string())?;
+    eprintln!("cargo:warning=zay: embedded geosite-cn.srs");
+    write_clash_rules_stamp(&stamp_path, CLASH_RULES_STAMP_KEY)?;
+    emit_embedded_clash_rules_rs(out_dir)
+}
+
+fn geoip_cn_srs_valid(path: &Path) -> bool {
+    fs::metadata(path).ok().is_some_and(|m| m.len() > 64)
+}
+
+fn geosite_cn_srs_valid(path: &Path) -> bool {
+    fs::metadata(path).ok().is_some_and(|m| m.len() > 64)
+}
+
+fn download_binary_ruleset(
+    name: &str,
+    urls: &[&str],
+) -> Result<Vec<u8>, String> {
+    let mut last_err = String::from("no sources");
+    for url in urls {
+        match fetch_clash_rules_bytes(url) {
+            Ok(body) if body.len() > 64 => return Ok(body),
+            Ok(_) => last_err = format!("{url}: empty body"),
+            Err(e) => last_err = format!("{url}: {e}"),
+        }
+    }
+    Err(format!("failed to download {name}.srs: {last_err}"))
+}
+
+fn fetch_clash_rules_bytes(url: &str) -> Result<Vec<u8>, String> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(120))
+        .build();
+    let resp = agent.get(url).call().map_err(|e| e.to_string())?;
+    if resp.status() != 200 {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+    let mut body = Vec::new();
+    resp.into_reader()
+        .read_to_end(&mut body)
+        .map_err(|e| e.to_string())?;
+    Ok(body)
+}
+
+fn all_embedded_clash_rules_present(rules_dir: &Path) -> bool {
+    CLASH_RULE_SET_IDS.iter().all(|id| {
+        let path = rules_dir.join(format!("{id}.json"));
+        path.is_file()
+            && fs::read_to_string(&path)
+                .ok()
+                .is_some_and(|raw| is_valid_singbox_ruleset_json(&raw))
+    })
+}
+
+fn emit_embedded_clash_rules_rs(out_dir: &Path) -> Result<(), String> {
+    let pkg_version =
+        env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0".into());
+    let embedded_version = format!("{CLASH_RULES_STAMP_KEY}+zay-{pkg_version}");
+    println!("cargo:rustc-env=ZAY_EMBEDDED_RULES_VERSION={embedded_version}");
+
+    let path = out_dir.join("embedded_clash_rules.rs");
+    let mut body = String::from("// Generated by build.rs — do not edit.\n\n");
+    body.push_str("pub static EMBEDDED_RULE_SETS: &[(&str, &str)] = &[\n");
+    for id in CLASH_RULE_SET_IDS {
+        body.push_str(&format!(
+            "    (\"{id}\", include_str!(concat!(env!(\"OUT_DIR\"), \"/embedded-clash-rules/{id}.json\"))),\n"
+        ));
+    }
+    body.push_str("];\n\n");
+    body.push_str(
+        "pub static EMBEDDED_GEOIP_CN_SRS: &[u8] = include_bytes!(concat!(env!(\"OUT_DIR\"), \"/embedded-clash-rules/geoip-cn.srs\"));\n",
+    );
+    body.push_str(
+        "pub static EMBEDDED_GEOSITE_CN_SRS: &[u8] = include_bytes!(concat!(env!(\"OUT_DIR\"), \"/embedded-clash-rules/geosite-cn.srs\"));\n",
+    );
+    fs::write(&path, &body).map_err(|e| e.to_string())?;
+    println!("cargo:rustc-env=ZAY_EMBEDDED_RULES_RS={}", path.display());
+    Ok(())
+}
+
+fn download_clash_rule_txt(id: &str) -> Result<String, String> {
+    let mut last_err = String::from("no sources");
+    for base in CLASH_RULES_SOURCES {
+        let url = format!("{base}/{id}.txt");
+        match fetch_clash_rules_text(&url) {
+            Ok(body) => return Ok(body),
+            Err(e) => last_err = format!("{url}: {e}"),
+        }
+    }
+    Err(format!("failed to download clash-rules {id}: {last_err}"))
+}
+
+fn fetch_clash_rules_text(url: &str) -> Result<String, String> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(120))
+        .build();
+    let resp = agent.get(url).call().map_err(|e| e.to_string())?;
+    if resp.status() != 200 {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+    resp.into_string().map_err(|e| e.to_string())
+}
+
+fn clash_rules_stamp_matches(path: &Path, expected: &str) -> bool {
+    fs::read_to_string(path)
+        .ok()
+        .is_some_and(|s| s.trim() == expected)
+}
+
+fn write_clash_rules_stamp(path: &Path, key: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    fs::write(path, key).map_err(|e| e.to_string())
+}
+
+fn embed_mihomo(out_dir: &Path, target: &str) {
+    let (artifact, ext) =
+        mihomo_artifact_for_target(target).unwrap_or_else(|| {
+            panic!("unsupported build target for embedded Mihomo: {target}")
+        });
 
     let version = PINNED_MIHOMO_VERSION.to_string();
-
     let exe_name = if target.contains("windows") {
         "mihomo.exe"
     } else {
@@ -60,8 +264,8 @@ fn main() {
     let embed_path = out_dir.join(exe_name);
     let stamp_path = out_dir.join("mihomo.stamp");
 
-    if stamp_matches(&stamp_path, &version, &target) && embed_path.is_file() {
-        emit_rustc_env(&embed_path, &version);
+    if stamp_matches(&stamp_path, &version, target) && embed_path.is_file() {
+        emit_mihomo_rustc_env(&embed_path, &version);
         return;
     }
 
@@ -81,20 +285,68 @@ fn main() {
     });
 
     let _ = fs::remove_file(&archive_path);
+    chmod_executable(&embed_path);
+    write_stamp(&stamp_path, &version, target).expect("write mihomo.stamp");
+    emit_mihomo_rustc_env(&embed_path, &version);
+}
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&embed_path)
-            .expect("mihomo metadata")
-            .permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&embed_path, perms).expect("chmod mihomo");
+fn embed_singbox(out_dir: &Path, target: &str) {
+    let version_tag = PINNED_SINGBOX_VERSION.trim_start_matches('v');
+    let (suffix, ext) =
+        singbox_artifact_for_target(target).unwrap_or_else(|| {
+            panic!("unsupported build target for embedded sing-box: {target}")
+        });
+    let artifact = format!("sing-box-{version_tag}-{suffix}");
+    let version = PINNED_SINGBOX_VERSION;
+    let exe_name = if target.contains("windows") {
+        "sing-box.exe"
+    } else {
+        "sing-box"
+    };
+    let embed_path = out_dir.join(exe_name);
+    let stamp_path = out_dir.join("singbox.stamp");
+
+    if stamp_matches(&stamp_path, version, target) && embed_path.is_file() {
+        emit_singbox_rustc_env(&embed_path, version);
+        return;
     }
 
-    write_stamp(&stamp_path, &version, &target).expect("write mihomo.stamp");
-    emit_rustc_env(&embed_path, &version);
+    let archive_path = out_dir.join(format!("{artifact}.{ext}"));
+    let url = format!("{SINGBOX_RELEASE_BASE}/{version}/{artifact}.{ext}");
+
+    eprintln!("cargo:warning=zay: downloading sing-box {version} for {target}");
+    download(&url, &archive_path).unwrap_or_else(|e| {
+        panic!("failed to download sing-box from {url}: {e}");
+    });
+
+    extract_singbox(&archive_path, ext, &embed_path, &artifact).unwrap_or_else(
+        |e| {
+            panic!(
+                "failed to extract sing-box archive {}: {e}",
+                archive_path.display()
+            );
+        },
+    );
+
+    let _ = fs::remove_file(&archive_path);
+    chmod_executable(&embed_path);
+    write_stamp(&stamp_path, version, target).expect("write singbox.stamp");
+    emit_singbox_rustc_env(&embed_path, version);
 }
+
+#[cfg(unix)]
+fn chmod_executable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = fs::metadata(path)
+        .unwrap_or_else(|e| panic!("metadata for {}: {e}", path.display()))
+        .permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(path, perms)
+        .unwrap_or_else(|e| panic!("chmod {}: {e}", path.display()));
+}
+
+#[cfg(not(unix))]
+fn chmod_executable(_path: &Path) {}
 
 fn fetch_config_docs_template(out_dir: &Path) {
     let dest = out_dir.join("mihomo-docs-config.yaml");
@@ -313,12 +565,56 @@ fn ensure_pe_x86_64(path: &Path) -> Result<(), String> {
     }
 }
 
-fn emit_rustc_env(embed_path: &Path, version: &str) {
+fn emit_mihomo_rustc_env(embed_path: &Path, version: &str) {
     println!(
         "cargo:rustc-env=MIHOMO_EMBED={}",
         embed_path.to_string_lossy()
     );
     println!("cargo:rustc-env=MIHOMO_VERSION={version}");
+}
+
+fn emit_singbox_rustc_env(embed_path: &Path, version: &str) {
+    println!(
+        "cargo:rustc-env=SINGBOX_EMBED={}",
+        embed_path.to_string_lossy()
+    );
+    println!("cargo:rustc-env=SINGBOX_VERSION={version}");
+}
+
+fn extract_singbox(
+    archive: &Path,
+    ext: &str,
+    dest: &Path,
+    artifact: &str,
+) -> Result<(), String> {
+    match ext {
+        "tar.gz" => extract_tar_gz(archive, dest),
+        "zip" => extract_zip(archive, dest, artifact),
+        other => Err(format!("unsupported archive extension: {other}")),
+    }
+}
+
+fn extract_tar_gz(archive_path: &Path, dest: &Path) -> Result<(), String> {
+    let file = File::open(archive_path).map_err(|e| e.to_string())?;
+    let decoder = flate2::read::GzDecoder::new(file);
+    let mut tar = tar::Archive::new(decoder);
+    for entry in tar.entries().map_err(|e| e.to_string())? {
+        let mut entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path().map_err(|e| e.to_string())?;
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        if name == "sing-box" || name == "sing-box.exe" {
+            let mut output = File::create(dest).map_err(|e| e.to_string())?;
+            copy(&mut entry, &mut output).map_err(|e| e.to_string())?;
+            return Ok(());
+        }
+    }
+    Err(format!(
+        "sing-box binary not found in {}",
+        archive_path.display()
+    ))
 }
 
 fn stamp_matches(stamp_path: &Path, version: &str, target: &str) -> bool {
@@ -338,7 +634,34 @@ fn write_stamp(
     Ok(())
 }
 
-fn artifact_for_target(target: &str) -> Option<(&'static str, &'static str)> {
+fn singbox_artifact_for_target(
+    target: &str,
+) -> Option<(&'static str, &'static str)> {
+    Some(match target {
+        "aarch64-apple-darwin" => ("darwin-arm64", "tar.gz"),
+        "x86_64-apple-darwin" => ("darwin-amd64", "tar.gz"),
+        "aarch64-unknown-linux-gnu" | "aarch64-unknown-linux-musl" => {
+            ("linux-arm64", "tar.gz")
+        }
+        "x86_64-unknown-linux-gnu" | "x86_64-unknown-linux-musl" => {
+            ("linux-amd64", "tar.gz")
+        }
+        "i686-unknown-linux-gnu" => ("linux-386", "tar.gz"),
+        "armv7-unknown-linux-gnueabihf" => ("linux-armv7", "tar.gz"),
+        "riscv64gc-unknown-linux-gnu" => ("linux-riscv64", "tar.gz"),
+        "loongarch64-unknown-linux-gnu" => ("linux-loong64", "tar.gz"),
+        "x86_64-pc-windows-msvc" | "x86_64-pc-windows-gnu" => {
+            ("windows-amd64", "zip")
+        }
+        "i686-pc-windows-msvc" => ("windows-386", "zip"),
+        "aarch64-pc-windows-msvc" => ("windows-arm64", "zip"),
+        _ => return None,
+    })
+}
+
+fn mihomo_artifact_for_target(
+    target: &str,
+) -> Option<(&'static str, &'static str)> {
     Some(match target {
         "aarch64-apple-darwin" => ("mihomo-darwin-arm64-go122", "gz"),
         "x86_64-apple-darwin" => ("mihomo-darwin-amd64-v2-go122", "gz"),
@@ -433,4 +756,137 @@ fn extract_zip(
         }
     }
     Err(format!("no .exe found in {}", archive_path.display()))
+}
+
+// --- WebUI static embed (webui/dist → OUT_DIR/webui_embed/) ---
+
+fn embed_webui(out_dir: &Path) {
+    println!("cargo:rerun-if-changed=webui/dist");
+    if let Err(e) = embed_webui_inner(out_dir) {
+        let profile = env::var("PROFILE").unwrap_or_default();
+        if profile == "release" {
+            panic!("failed to embed WebUI: {e}");
+        }
+        eprintln!("cargo:warning=zay: WebUI embed skipped: {e}");
+        emit_empty_webui_rs(out_dir).unwrap_or_else(|e2| {
+            panic!("failed to emit empty webui embed: {e2}");
+        });
+    }
+}
+
+fn embed_webui_inner(out_dir: &Path) -> Result<(), String> {
+    let dist = PathBuf::from("webui/dist");
+    let index = dist.join("index.html");
+    if !index.is_file() {
+        return Err(
+            "webui/dist/index.html missing — run: cd webui && pnpm install && pnpm build"
+                .into(),
+        );
+    }
+
+    let embed_dir = out_dir.join("webui_embed");
+    if embed_dir.exists() {
+        fs::remove_dir_all(&embed_dir).map_err(|e| e.to_string())?;
+    }
+    fs::create_dir_all(&embed_dir).map_err(|e| e.to_string())?;
+
+    let mut entries: Vec<(String, PathBuf)> = Vec::new();
+    collect_webui_dist(&dist, &dist, &embed_dir, &mut entries)?;
+
+    emit_webui_rs(out_dir, true, &entries)?;
+    eprintln!(
+        "cargo:warning=zay: embedded WebUI ({} file(s))",
+        entries.len()
+    );
+    Ok(())
+}
+
+fn collect_webui_dist(
+    root: &Path,
+    dir: &Path,
+    embed_dir: &Path,
+    out: &mut Vec<(String, PathBuf)>,
+) -> Result<(), String> {
+    for entry in fs::read_dir(dir).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_webui_dist(root, &path, embed_dir, out)?;
+            continue;
+        }
+        let rel = path
+            .strip_prefix(root)
+            .map_err(|e| e.to_string())?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let url_path = if rel == "index.html" {
+            "/index.html".to_string()
+        } else {
+            format!("/{rel}")
+        };
+        let dest = embed_dir.join(&rel);
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        fs::copy(&path, &dest).map_err(|e| e.to_string())?;
+        out.push((url_path, dest));
+    }
+    Ok(())
+}
+
+fn content_type_for_path(path: &str) -> &'static str {
+    let ext = path.rsplit('.').next().unwrap_or("");
+    match ext {
+        "html" => "text/html; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "js" => "text/javascript; charset=utf-8",
+        "json" => "application/json; charset=utf-8",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        "ico" => "image/x-icon",
+        "txt" => "text/plain; charset=utf-8",
+        _ => "application/octet-stream",
+    }
+}
+
+fn emit_webui_rs(
+    out_dir: &Path,
+    embedded: bool,
+    entries: &[(String, PathBuf)],
+) -> Result<(), String> {
+    let path = out_dir.join("webui_embed.rs");
+    let mut body = String::from("// Generated by build.rs — do not edit.\n\n");
+    body.push_str(&format!("pub const EMBEDDED_UI: bool = {embedded};\n\n"));
+    if !embedded || entries.is_empty() {
+        body.push_str("pub static FILES: &[EmbeddedFile] = &[];\n");
+        fs::write(&path, &body).map_err(|e| e.to_string())?;
+        println!("cargo:rustc-env=ZAY_WEBUI_EMBED_RS={}", path.display());
+        return Ok(());
+    }
+
+    body.push_str("pub static FILES: &[EmbeddedFile] = &[\n");
+    for (url_path, dest) in entries {
+        let ct = content_type_for_path(url_path);
+        let rel = dest
+            .strip_prefix(out_dir)
+            .map_err(|e| e.to_string())?
+            .to_string_lossy()
+            .replace('\\', "/");
+        body.push_str(&format!(
+            "    EmbeddedFile {{\n        path: \"{url_path}\",\n        content_type: \"{ct}\",\n        body: include_bytes!(concat!(env!(\"OUT_DIR\"), \"/{rel}\")),\n    }},\n"
+        ));
+    }
+    body.push_str("];\n");
+    fs::write(&path, &body).map_err(|e| e.to_string())?;
+    println!("cargo:rustc-env=ZAY_WEBUI_EMBED_RS={}", path.display());
+    Ok(())
+}
+
+fn emit_empty_webui_rs(out_dir: &Path) -> Result<(), String> {
+    emit_webui_rs(out_dir, false, &[])
 }

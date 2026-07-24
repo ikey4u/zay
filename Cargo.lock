@@ -339,6 +339,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "31b698c5f9a010f6573133b09e0de5408834d0c82f8d7475a89fc1867a71cd90"
 dependencies = [
  "axum-core",
+ "base64 0.22.1",
  "bytes",
  "form_urlencoded",
  "futures-util",
@@ -357,8 +358,10 @@ dependencies = [
  "serde_json",
  "serde_path_to_error",
  "serde_urlencoded",
+ "sha1 0.10.6",
  "sync_wrapper",
  "tokio",
+ "tokio-tungstenite 0.29.0",
  "tower",
  "tower-layer",
  "tower-service",
@@ -1546,7 +1549,7 @@ checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
 [[package]]
 name = "easytier"
 version = "2.6.4"
-source = "git+https://github.com/EasyTier/EasyTier?rev=8428a89d2dabc94c97d370ec607c6ca142473626#8428a89d2dabc94c97d370ec607c6ca142473626"
+source = "git+https://github.com/EasyTier/EasyTier?rev=00957e5f9d6f5b3e17a3a0127fee13771eeb5a9a#00957e5f9d6f5b3e17a3a0127fee13771eeb5a9a"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -1577,7 +1580,6 @@ dependencies = [
  "derivative",
  "derive_builder",
  "derive_more",
- "easytier-rpc-build",
  "encoding",
  "forwarded-header-value",
  "futures",
@@ -1615,6 +1617,7 @@ dependencies = [
  "pin-project-lite",
  "pnet",
  "prefix-trie",
+ "proc-macro2",
  "prost",
  "prost-build",
  "prost-reflect",
@@ -1622,6 +1625,7 @@ dependencies = [
  "prost-wkt",
  "prost-wkt-build",
  "prost-wkt-types",
+ "quote",
  "rand 0.8.6",
  "rcgen",
  "regex",
@@ -1654,7 +1658,6 @@ dependencies = [
  "tokio-util",
  "tokio-websockets",
  "toml",
- "tonic-build",
  "tracing",
  "tracing-subscriber",
  "tun-easytier",
@@ -1672,15 +1675,6 @@ dependencies = [
  "x25519-dalek",
  "zerocopy 0.7.35",
  "zip 4.6.1",
-]
-
-[[package]]
-name = "easytier-rpc-build"
-version = "0.1.0"
-source = "git+https://github.com/EasyTier/EasyTier?rev=8428a89d2dabc94c97d370ec607c6ca142473626#8428a89d2dabc94c97d370ec607c6ca142473626"
-dependencies = [
- "heck 0.5.0",
- "prost-build",
 ]
 
 [[package]]
@@ -1941,6 +1935,16 @@ name = "fiat-crypto"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "64cd1e32ddd350061ae6edb1b082d7c54915b5c672c389143b9a63403a109f24"
+
+[[package]]
+name = "filetime"
+version = "0.2.29"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c287a33c7f0a620c38e641e7f60827713987b3c0f26e8ddc9462cc69cf75759"
+dependencies = [
+ "cfg-if",
+ "libc",
+]
 
 [[package]]
 name = "find-msvc-tools"
@@ -5539,17 +5543,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
-name = "sudo2"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c6ea68622345f3315c2cbd365edfc5bcbb22edddb1b8f2cf0b515605340bc6de"
-dependencies = [
- "libc",
- "tracing",
- "wildmatch",
-]
-
-[[package]]
 name = "syn"
 version = "1.0.109"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5670,6 +5663,17 @@ name = "tagptr"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7b2093cf4c8eb1e67749a6762251bc9cd836b6fc171623bd0a9d324d37af2417"
+
+[[package]]
+name = "tar"
+version = "0.4.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840"
+dependencies = [
+ "filetime",
+ "libc",
+ "xattr",
+]
 
 [[package]]
 name = "tempfile"
@@ -5883,8 +5887,20 @@ dependencies = [
  "rustls-pki-types",
  "tokio",
  "tokio-rustls",
- "tungstenite",
+ "tungstenite 0.28.0",
  "webpki-roots 0.26.11",
+]
+
+[[package]]
+name = "tokio-tungstenite"
+version = "0.29.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f72a05e828585856dacd553fba484c242c46e391fb0e58917c942ee9202915c"
+dependencies = [
+ "futures-util",
+ "log",
+ "tokio",
+ "tungstenite 0.29.0",
 ]
 
 [[package]]
@@ -6000,20 +6016,6 @@ name = "toml_writer"
 version = "1.1.1+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "756daf9b1013ebe47a8776667b466417e2d4c5679d441c26230efd9ef78692db"
-
-[[package]]
-name = "tonic-build"
-version = "0.12.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9557ce109ea773b399c9b9e5dca39294110b74f1f342cb347a80d1fce8c26a11"
-dependencies = [
- "prettyplease",
- "proc-macro2",
- "prost-build",
- "prost-types",
- "quote",
- "syn 2.0.117",
-]
 
 [[package]]
 name = "tower"
@@ -6216,6 +6218,22 @@ dependencies = [
  "sha1 0.10.6",
  "thiserror 2.0.18",
  "utf-8",
+]
+
+[[package]]
+name = "tungstenite"
+version = "0.29.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c01152af293afb9c7c2a57e4b559c5620b421f6d133261c60dd2d0cdb38e6b8"
+dependencies = [
+ "bytes",
+ "data-encoding",
+ "http",
+ "httparse",
+ "log",
+ "rand 0.9.4",
+ "sha1 0.10.6",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -7211,6 +7229,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "xattr"
+version = "1.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
+dependencies = [
+ "libc",
+ "rustix 1.1.4",
+]
+
+[[package]]
 name = "xml-rs"
 version = "0.8.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7259,11 +7287,13 @@ dependencies = [
 
 [[package]]
 name = "zay"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "axum",
  "axum-server",
+ "base64 0.22.1",
+ "chrono",
  "clap",
  "ctrlc",
  "dirs 6.0.0",
@@ -7283,9 +7313,10 @@ dependencies = [
  "serde_yaml",
  "sha2 0.10.9",
  "ssh2-config",
- "sudo2",
+ "tar",
  "tokio",
- "tokio-tungstenite",
+ "tokio-stream",
+ "tokio-tungstenite 0.28.0",
  "toml",
  "toml_edit 0.25.12+spec-1.1.0",
  "tower-http",

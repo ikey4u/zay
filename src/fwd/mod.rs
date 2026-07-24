@@ -12,7 +12,7 @@ use url::Url;
 
 static RUSTLS_PROVIDER: Once = Once::new();
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, serde::Deserialize)]
 #[command(
     about = "Forward TCP streams directly or over WebSocket (TCP/WS relay)",
     long_about = concat!(
@@ -34,19 +34,19 @@ static RUSTLS_PROVIDER: Once = Once::new();
 pub struct FwdCli {
     /// Where clients connect (local listener)
     #[arg(long, value_name = "ENDPOINT")]
-    to: String,
+    pub to: String,
 
     /// Upstream endpoint dialed for each accepted connection
     #[arg(long, value_name = "ENDPOINT")]
-    from: String,
+    pub from: String,
 
     /// Bearer token for WebSocket authorization
     #[arg(long, value_name = "TOKEN")]
-    token: Option<String>,
+    pub token: Option<String>,
 
     /// Increase diagnostic logging (-v for debug, -vv for trace)
     #[arg(short, long, action = ArgAction::Count)]
-    verbose: u8,
+    pub verbose: u8,
 }
 
 #[derive(Debug)]
@@ -82,6 +82,11 @@ pub async fn run_cli(cli: FwdCli) -> Result<()> {
     init_rustls_provider();
     init_tracing(cli.verbose);
     run(parse(cli)?).await
+}
+
+/// Parse CLI for WebUI / serve job API.
+pub fn parse_fwd_cli(cli: FwdCli) -> Result<FwdArgs> {
+    parse(cli)
 }
 
 fn init_rustls_provider() {

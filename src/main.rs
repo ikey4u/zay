@@ -5,9 +5,12 @@ mod config;
 mod fwd;
 mod http;
 mod mihomo;
+mod serve;
 mod settings;
+mod singbox;
 mod ssh;
 mod stack;
+mod webui;
 mod yaml;
 
 #[cfg(unix)]
@@ -19,9 +22,8 @@ use clap::{Parser, Subcommand};
 const LONG_ABOUT: &str = r#"Zay – network stack and connection tools.
 
 Network stack:
-  zay stack --mesh --gateway
-  zay stack --gateway
-  zay stack --proxy "https://..." --gateway
+  sudo zay stack -s "https://..."
+  zay stack --mesh relay --mesh-auth 'net:secret' --mesh-ip 10.126.126.1/24
   zay stack --help
 
 Configuration:
@@ -37,9 +39,8 @@ Static HTTP server:
   zay http --root dist --spa
   zay http --root dist --listen 127.0.0.1:8443 --cert cert.pem --key key.pem
 
-HTTP API (stack mode):
-  GET  /api/health
-  GET  /api/config
+Web control plane:
+  zay serve
 "#;
 
 const AFTER_HELP: &str = include_str!("../docs/USAGE_EXAMPLE.md");
@@ -62,7 +63,7 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
-    /// Run the network stack: proxy, mesh, gateway, and TUN
+    /// Run the network stack: sing-box proxy/TUN and optional EasyTier mesh
     Stack(stack::StackCli),
     /// Inspect and edit zay.toml
     Config(config::ConfigCli),
@@ -72,6 +73,8 @@ pub enum Command {
     Fwd(fwd::FwdCli),
     /// Stable SSH port forwarding with auto-reconnect
     Ssh(ssh::SshCli),
+    /// Web control plane (embedded UI + REST API)
+    Serve(serve::ServeCli),
 }
 
 /// Options for `zay stack`.
@@ -114,15 +117,15 @@ pub struct ProxyOpts {
     #[clap(long, value_name = "LEVEL")]
     pub log_level: Option<String>,
 
-    /// Capture system traffic through a TUN interface
-    #[clap(long, default_value_t = false, action = clap::ArgAction::SetTrue)]
-    pub tun: bool,
+    /// Disable sing-box system TUN (default: TUN on for `zay stack`)
+    #[clap(long = "no-tun", action = clap::ArgAction::SetTrue)]
+    pub no_tun: bool,
 
-    /// CIDR excluded from Mihomo TUN auto-route (repeatable)
+    /// Extra CIDR excluded from sing-box TUN auto-route (repeatable; mesh/SSH excludes are automatic)
     #[clap(long = "tun-exclude", value_name = "CIDR", action = clap::ArgAction::Append)]
     pub tun_exclude_routes: Vec<String>,
 
-    /// Bootstrap proxy YAML used to fetch remote subscriptions
+    /// Clash proxy YAML used only to fetch remote subscriptions when DIRECT cannot reach them
     #[clap(long, value_name = "FILE")]
     pub bootstrap_proxy: Option<std::path::PathBuf>,
 }
@@ -135,7 +138,14 @@ fn main() -> Result<()> {
         Command::Http(http) => run_http(http),
         Command::Fwd(fwd) => run_fwd(fwd),
         Command::Ssh(ssh) => run_ssh(ssh),
+        Command::Serve(serve) => run_serve(serve),
     }
+}
+
+fn run_serve(cli: serve::ServeCli) -> Result<()> {
+    tokio::runtime::Runtime::new()
+        .context("creating tokio runtime")?
+        .block_on(serve::run(cli))
 }
 
 fn run_http(cli: http::HttpCli) -> Result<()> {
