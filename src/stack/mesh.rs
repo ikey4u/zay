@@ -66,7 +66,7 @@ pub fn parse_mesh_auth_node(raw: &str) -> Result<MeshAuth> {
     let raw = raw.trim();
     let (credentials, endpoint) = raw.split_once('@').with_context(|| {
         format!(
-            "--mesh-auth must be user:password@tcp://host:port (example: my.home:secret@tcp://1.2.3.4:11010), got {raw:?}"
+            "--mesh-auth must be user:password@tcp://host:port (example: mesh.example:secret@tcp://1.2.3.4:11010), got {raw:?}"
         )
     })?;
     let (network_name, network_secret) =
@@ -386,11 +386,11 @@ mod tests {
     fn parse_mesh_auth_relay_ignores_endpoint_suffix() {
         use crate::settings::MeshRole;
         let auth = parse_mesh_auth(
-            "my.home:secret@tcp://ignored:9999",
+            "mesh.example:secret@tcp://ignored:9999",
             MeshRole::Relay,
         )
         .unwrap();
-        assert_eq!(auth.network_name, "my.home");
+        assert_eq!(auth.network_name, "mesh.example");
         assert_eq!(auth.network_secret, "secret");
         assert!(auth.endpoint.is_empty());
         assert_eq!(
@@ -405,14 +405,16 @@ mod tests {
     #[test]
     fn parse_mesh_auth_relay_user_password_only() {
         use crate::settings::MeshRole;
-        let auth = parse_mesh_auth("my.home:secret", MeshRole::Relay).unwrap();
-        assert_eq!(auth.network_name, "my.home");
+        let auth =
+            parse_mesh_auth("mesh.example:secret", MeshRole::Relay).unwrap();
+        assert_eq!(auth.network_name, "mesh.example");
         assert_eq!(auth.network_secret, "secret");
     }
 
     #[test]
     fn listener_ports_parsed() {
         let mesh = MeshConfig {
+            enabled: true,
             role: MeshRole::Relay,
             instance_name: None,
             network_name: "n".into(),
@@ -429,7 +431,6 @@ mod tests {
             wireguard_listen: None,
             wireguard_client_cidr: None,
             wireguard_client_address: None,
-            wireguard_endpoint: None,
         };
         assert_eq!(listener_ports(&mesh), vec![("tcp", 11010), ("udp", 11010)]);
     }
@@ -437,6 +438,7 @@ mod tests {
     #[test]
     fn portal_client_host_from_mesh_ipv4() {
         let mesh = MeshConfig {
+            enabled: true,
             role: MeshRole::Node,
             instance_name: None,
             network_name: "n".into(),
@@ -450,7 +452,6 @@ mod tests {
             wireguard_listen: None,
             wireguard_client_cidr: None,
             wireguard_client_address: None,
-            wireguard_endpoint: None,
         };
         assert_eq!(
             portal_client_host_cidr(&mesh).as_deref(),

@@ -1,15 +1,14 @@
-//! `zay stack` — sing-box TUN + optional EasyTier mesh (WireGuard portal).
+//! `zay run proxy` — sing-box TUN + optional EasyTier mesh (WireGuard portal).
 
 pub mod controller;
 pub mod easytier;
+pub mod log_buf;
 pub mod mesh;
-pub mod mihomo;
 
 use std::{
     fs,
     net::Ipv4Addr,
     path::PathBuf,
-    process::Child,
     sync::{Arc, RwLock},
     thread,
     time::Duration,
@@ -17,17 +16,17 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use toml_edit::{Array, DocumentMut, Item, Table, Value};
 
 use crate::{
-    ProxyOpts, api, assets,
+    ProxyOpts, api,
     bootstrap::singbox as bootstrap,
     settings::{
         self as zay_settings, MeshConfig, MeshRole, Settings, StackFlags,
         default_zay_toml,
     },
-    singbox::{self, mixin, rules},
+    singbox::{self, assets, mixin, rules},
 };
 
 /// CLI value for `--mesh <relay|node>`.
@@ -58,6 +57,10 @@ With --mesh relay, this host is a rendezvous (TUN off; optional --mesh-ip hub)."
 #[derive(Args, Debug)]
 #[command(long_about = LONG_ABOUT)]
 pub struct StackCli {
+    /// Print an equivalent persistent-service TOML configuration and exit
+    #[arg(long)]
+    pub dump_config: bool,
+
     #[command(flatten, next_help_heading = "Runtime options")]
     pub common: ProxyOpts,
 
@@ -84,10 +87,6 @@ pub struct StackCli {
     /// This node's virtual mesh IPv4 CIDR (required for `--mesh node`; recommended for hub `relay`)
     #[arg(long = "mesh-ip", value_name = "IP/MASK", help_heading = "Mesh")]
     pub mesh_ip: Option<String>,
-
-    /// Skip clash rule-sets (embedded/download); use simple fallback routes
-    #[arg(long = "no-rules", help_heading = "Stack options")]
-    pub no_rules: bool,
 }
 
 pub fn run(cli: StackCli) -> Result<()> {
@@ -95,16 +94,21 @@ pub fn run(cli: StackCli) -> Result<()> {
         mesh: cli.mesh.map(MeshRole::from),
         gateway: cli.gateway,
         tun: !cli.common.no_tun,
-        no_rules: cli.no_rules,
+        no_rules: false,
     };
-    ensure_stack_config_exists(&cli.common)?;
-    validate_mesh_cli(&cli, flags)?;
-    ensure_mesh_config_from_stack(&cli, flags)?;
-
-    let prepared = bootstrap::prepare_stack(&cli.common, flags)?;
+    let mesh = flags
+        .mesh
+        .map(|role| build_mesh_config_from_cli(&cli, role))
+        .transpose()?;
+    if cli.dump_config {
+        print!("{}", dump_config(&cli, mesh)?);
+        return Ok(());
+    }
+    let prepared =
+        bootstrap::prepare_transient_stack(&cli.common, flags, mesh)?;
     log_mesh_effective_config(&prepared.settings);
 
-    eprintln!("config dir → {}", prepared.settings.data_dir.display());
+    eprintln!("runtime dir → {}", prepared.settings.data_dir.display());
     eprintln!(
         "sing-box dir → {}",
         prepared.settings.singbox_dir().display()
@@ -166,7 +170,7 @@ pub fn run(cli: StackCli) -> Result<()> {
         if cfg.is_node() {
             eprintln!(
                 "mesh tip: reach a peer service with `curl http://<mesh-ip>:<port>/` from another node; \
-                 the server must run `zay stack --mesh node` and listen on 0.0.0.0 or 127.0.0.1"
+                 the server must run `zay run proxy --mesh node` and listen on 0.0.0.0 or 127.0.0.1"
             );
         }
         if std::env::var("ZAY_EASYTIER_DEBUG").is_err() {
@@ -222,8 +226,6 @@ pub fn run(cli: StackCli) -> Result<()> {
     };
 
     let state = Arc::new(api::AppState::from(prepared));
-    let api_listen = format!("127.0.0.1:{}", cli.common.api_port);
-    let _api = api::spawn(state.clone(), &api_listen);
 
     let engine = singbox::resolve_binary()?;
     let listen_host = if flags.gateway {
@@ -278,10 +280,10 @@ pub fn run(cli: StackCli) -> Result<()> {
         }
     };
 
-    if let Some(stdout) = child.stdout.take() {
+    if let Some(stdout) = child.take_stdout() {
         assets::pipe_logs(stdout);
     }
-    if let Some(stderr) = child.stderr.take() {
+    if let Some(stderr) = child.take_stderr() {
         assets::pipe_logs(stderr);
     }
 
@@ -323,13 +325,50 @@ pub fn run(cli: StackCli) -> Result<()> {
     Ok(())
 }
 
+fn dump_config(cli: &StackCli, mesh: Option<MeshConfig>) -> Result<String> {
+    #[derive(Serialize)]
+    struct Config {
+        proxy: zay_settings::PersistentProxyFile,
+    }
+
+    toml::to_string_pretty(&Config {
+        proxy: zay_settings::PersistentProxyFile {
+            enabled: true,
+            subscriptions: cli.common.subscriptions.clone(),
+            gateway: cli.gateway,
+            mixed_port: Some(cli.common.mixed_port.unwrap_or(7890)),
+            update_interval: Some(cli.common.update_interval.unwrap_or(3600)),
+            health_check_url: Some(
+                cli.common.health_check_url.clone().unwrap_or_else(|| {
+                    "http://cp.cloudflare.com/generate_204".into()
+                }),
+            ),
+            log_level: Some(
+                cli.common
+                    .log_level
+                    .clone()
+                    .unwrap_or_else(|| "info".into()),
+            ),
+            tun: zay_settings::PersistentTunFile {
+                enabled: !cli.common.no_tun,
+                exclude_routes: cli.common.tun_exclude_routes.clone(),
+            },
+            bootstrap: None,
+            mesh,
+            mixin: None,
+            domain_rule: Vec::new(),
+        },
+    })
+    .context("serializing proxy service configuration")
+}
+
 pub(crate) fn spawn_singbox(
     engine: &std::path::Path,
     settings: &Settings,
     config_path: &std::path::Path,
     tun_enabled: bool,
     sudo_password: Option<&str>,
-) -> Result<Child> {
+) -> Result<crate::singbox::assets::ManagedChild> {
     singbox::spawn(
         engine,
         &settings.singbox_dir(),
@@ -361,7 +400,11 @@ fn zay_toml_has_mesh(toml_path: &PathBuf) -> Result<bool> {
         .with_context(|| format!("reading {}", toml_path.display()))?;
     let parsed: toml::Value = toml::from_str(&raw)
         .with_context(|| format!("parsing {}", toml_path.display()))?;
-    Ok(parsed.get("mesh").is_some())
+    Ok(parsed
+        .get("proxy")
+        .and_then(toml::Value::as_table)
+        .and_then(|proxy| proxy.get("mesh"))
+        .is_some())
 }
 
 fn load_mesh_from_toml(toml_path: &PathBuf) -> Result<MeshConfig> {
@@ -369,12 +412,16 @@ fn load_mesh_from_toml(toml_path: &PathBuf) -> Result<MeshConfig> {
         .with_context(|| format!("reading {}", toml_path.display()))?;
     #[derive(Deserialize)]
     struct Root {
+        proxy: Proxy,
+    }
+    #[derive(Deserialize)]
+    struct Proxy {
         mesh: MeshConfig,
     }
     let root: Root = toml::from_str(&raw).with_context(|| {
-        format!("parsing [mesh] in {}", toml_path.display())
+        format!("parsing [proxy.mesh] in {}", toml_path.display())
     })?;
-    Ok(root.mesh)
+    Ok(root.proxy.mesh)
 }
 
 /// Apply `--mesh-auth` / `--mesh-ip` onto an existing `[mesh]` (CLI wins over file).
@@ -522,7 +569,10 @@ fn write_mesh_section(toml_path: &PathBuf, mesh: &MeshConfig) -> Result<()> {
         raw.parse::<DocumentMut>()
             .with_context(|| format!("parsing {}", toml_path.display()))?
     };
-    doc["mesh"] = Item::Table(mesh_config_to_edit_table(mesh));
+    if !doc["proxy"].is_table() {
+        doc["proxy"] = Item::Table(Table::new());
+    }
+    doc["proxy"]["mesh"] = Item::Table(mesh_config_to_edit_table(mesh));
     fs::write(toml_path, doc.to_string())
         .with_context(|| format!("writing {}", toml_path.display()))?;
     #[cfg(unix)]
@@ -546,7 +596,7 @@ fn build_mesh_config_from_cli(
             MeshRole::Relay => "relay",
             MeshRole::Node => "node",
         };
-        format!("--mesh-auth is required when creating [mesh] (see `zay stack --mesh {label}`)")
+        format!("--mesh-auth is required when creating [proxy.mesh] (see `zay run proxy --mesh {label}`)")
     })?;
     let auth = mesh::parse_mesh_auth(auth_raw, role)?;
     match role {
@@ -557,6 +607,7 @@ fn build_mesh_config_from_cli(
                 .map(str::trim)
                 .filter(|s| !s.is_empty());
             Ok(MeshConfig {
+                enabled: true,
                 role,
                 instance_name: Some("relay".into()),
                 network_name: auth.network_name,
@@ -570,14 +621,14 @@ fn build_mesh_config_from_cli(
                 wireguard_listen: ipv4.map(|_| "127.0.0.1:51820".into()),
                 wireguard_client_cidr: None,
                 wireguard_client_address: None,
-                wireguard_endpoint: None,
             })
         }
         MeshRole::Node => {
             let ipv4 = cli.mesh_ip.as_deref().with_context(
-                || "`zay stack --mesh node` requires --mesh-ip IP/MASK",
+                || "`zay run proxy --mesh node` requires --mesh-ip IP/MASK",
             )?;
             Ok(MeshConfig {
+                enabled: true,
                 role,
                 instance_name: Some("zay".into()),
                 network_name: auth.network_name,
@@ -591,7 +642,6 @@ fn build_mesh_config_from_cli(
                 wireguard_listen: Some("127.0.0.1:51820".into()),
                 wireguard_client_cidr: None,
                 wireguard_client_address: None,
-                wireguard_endpoint: None,
             })
         }
     }
@@ -602,7 +652,7 @@ pub(crate) fn log_mesh_effective_config(settings: &Settings) {
         return;
     };
     eprintln!(
-        "mesh config (from zay.toml): role={:?}, network_name={:?}, ipv4={}, peers={:?}, mesh_routes={:?}",
+        "mesh config: role={:?}, network_name={:?}, ipv4={}, peers={:?}, mesh_routes={:?}",
         mesh.role,
         mesh.network_name,
         mesh.ipv4.as_deref().unwrap_or("(none)"),
@@ -635,10 +685,6 @@ pub(crate) fn validate_mesh_cli(
         }
         return Ok(());
     }
-    let mode_label = match cli_role {
-        MeshRole::Relay => "relay",
-        MeshRole::Node => "node",
-    };
     let auth_raw = cli.mesh_auth.as_deref().with_context(|| {
         let hint = match cli_role {
             MeshRole::Relay => {
@@ -649,7 +695,7 @@ pub(crate) fn validate_mesh_cli(
             }
         };
         format!(
-            "`zay stack --mesh {mode_label}` requires {hint} when [mesh] is missing in {}",
+            "persistent [proxy.mesh] configuration requires {hint} when it is missing in {}",
             toml_path.display()
         )
     })?;
@@ -659,7 +705,7 @@ pub(crate) fn validate_mesh_cli(
         MeshRole::Node => {
             if cli.mesh_ip.is_none() {
                 bail!(
-                    "`zay stack --mesh node` requires --mesh-ip IP/MASK when auto-creating [mesh]"
+                    "persistent node mesh configuration requires --mesh-ip IP/MASK when creating [proxy.mesh]"
                 );
             }
         }
@@ -743,7 +789,7 @@ pub fn validate(settings: &Settings) -> Result<()> {
 
     if mesh.role != cli_role {
         bail!(
-            "[mesh].role = {:?} does not match `zay stack --mesh {}`",
+            "[proxy.mesh].role = {:?} does not match `zay run proxy --mesh {}`",
             mesh.role,
             match cli_role {
                 MeshRole::Relay => "relay",
@@ -794,7 +840,7 @@ pub fn validate(settings: &Settings) -> Result<()> {
             }
             if !flags.tun {
                 bail!(
-                    "`zay stack --mesh node` requires sing-box TUN (omit --no-tun); \
+                    "`zay run proxy --mesh node` requires sing-box TUN (omit --no-tun); \
                      use role = \"relay\" on the VPS only"
                 );
             }

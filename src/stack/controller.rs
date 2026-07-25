@@ -1,4 +1,4 @@
-//! Programmatic stack lifecycle for `zay serve` (background thread + stop).
+//! Programmatic proxy lifecycle for the persistent runtime.
 
 use std::{
     sync::{
@@ -10,14 +10,14 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
+use super::log_buf::{LogBuffer, SingboxLogWriter, pipe_singbox_to_buffer};
 use crate::{
-    ProxyOpts, api, assets,
+    api,
     bootstrap::singbox as bootstrap,
-    serve::log_buf::{LogBuffer, pipe_to_buffer},
-    settings::{self, Settings, StackFlags},
-    singbox::{self, rules},
+    settings::{Settings, StackFlags},
+    singbox::{self, assets, rules},
     stack::{
         StackCli, easytier, ensure_mesh_config_from_stack,
         ensure_stack_config_exists, log_mesh_effective_config, spawn_singbox,
@@ -60,28 +60,6 @@ impl Default for StackStatus {
     }
 }
 
-/// JSON body for `POST /api/v1/stack/start` (maps to `StackCli`).
-#[derive(Deserialize, Default)]
-pub struct StackStartRequest {
-    pub subscriptions: Option<Vec<String>>,
-    pub mixed_port: Option<u16>,
-    pub api_port: Option<u16>,
-    pub update_interval: Option<u64>,
-    pub health_check_url: Option<String>,
-    pub log_level: Option<String>,
-    pub no_tun: Option<bool>,
-    pub tun_exclude_routes: Option<Vec<String>>,
-    pub bootstrap_proxy: Option<String>,
-    pub mesh: Option<String>,
-    pub gateway: Option<bool>,
-    pub no_rules: Option<bool>,
-    pub mesh_auth: Option<String>,
-    pub mesh_ip: Option<String>,
-    /// Admin password for `sudo -S` when starting sing-box with TUN (WebUI only).
-    #[serde(default)]
-    pub sudo_password: Option<String>,
-}
-
 pub struct StackController {
     status: Arc<Mutex<StackStatus>>,
     pid: Arc<AtomicU32>,
@@ -113,17 +91,15 @@ impl StackController {
         self.running.load(Ordering::SeqCst)
     }
 
-    pub fn start(
+    /// Start a stack from an already-resolved persistent configuration.
+    pub fn start_cli(
         &self,
-        req: StackStartRequest,
-        paths: &crate::serve::ServePaths,
+        cli: StackCli,
+        sudo_password: Option<String>,
     ) -> Result<()> {
         if self.running.load(Ordering::SeqCst) {
             bail!("stack is already running");
         }
-        let mut req = req;
-        let sudo_password = req.sudo_password.take();
-        let cli = stack_cli_from_request(req, paths)?;
         {
             let mut st = self.status.lock().expect("stack status");
             *st = StackStatus {
@@ -137,6 +113,7 @@ impl StackController {
         let pid_atom = self.pid.clone();
         let running = self.running.clone();
         let logs = self.logs.clone();
+        let failure_logs = logs.clone();
 
         let handle = thread::spawn(move || {
             let result = run_stack_managed(
@@ -155,8 +132,11 @@ impl StackController {
                     st.pid = None;
                 }
                 Err(e) => {
+                    let error = format!("{e:#}");
+                    crate::logging::emit_error("proxy", "failed", &error);
+                    failure_logs.push(format!("proxy stack failed: {error}"));
                     st.state = StackRunState::Failed;
-                    st.error = Some(format!("{e:#}"));
+                    st.error = Some(error);
                     st.pid = None;
                 }
             }
@@ -190,44 +170,6 @@ impl StackController {
     }
 }
 
-fn stack_cli_from_request(
-    req: StackStartRequest,
-    paths: &crate::serve::ServePaths,
-) -> Result<StackCli> {
-    let mesh = req.mesh.as_deref().map(parse_mesh_cli).transpose()?;
-    Ok(StackCli {
-        common: ProxyOpts {
-            subscriptions: req.subscriptions.unwrap_or_default(),
-            data_dir: Some(paths.data_dir.clone()),
-            config: Some(paths.toml_path.clone()),
-            api_port: req.api_port.unwrap_or(8787),
-            mixed_port: req.mixed_port,
-            update_interval: req.update_interval,
-            health_check_url: req.health_check_url,
-            log_level: req.log_level,
-            no_tun: req.no_tun.unwrap_or(false),
-            tun_exclude_routes: req.tun_exclude_routes.unwrap_or_default(),
-            bootstrap_proxy: req
-                .bootstrap_proxy
-                .as_deref()
-                .map(std::path::PathBuf::from),
-        },
-        mesh,
-        gateway: req.gateway.unwrap_or(false),
-        mesh_auth: req.mesh_auth,
-        mesh_ip: req.mesh_ip,
-        no_rules: req.no_rules.unwrap_or(false),
-    })
-}
-
-fn parse_mesh_cli(s: &str) -> Result<crate::stack::MeshCliMode> {
-    match s.to_ascii_lowercase().as_str() {
-        "relay" => Ok(crate::stack::MeshCliMode::Relay),
-        "node" => Ok(crate::stack::MeshCliMode::Node),
-        other => bail!("invalid mesh role {other:?}, expected relay or node"),
-    }
-}
-
 fn run_stack_managed(
     cli: StackCli,
     logs: LogBuffer,
@@ -239,13 +181,14 @@ fn run_stack_managed(
         mesh: cli.mesh.map(crate::stack::MeshCliMode::into),
         gateway: cli.gateway,
         tun: !cli.common.no_tun,
-        no_rules: cli.no_rules,
+        no_rules: false,
     };
     ensure_stack_config_exists(&cli.common)?;
     validate_mesh_cli(&cli, flags)?;
     ensure_mesh_config_from_stack(&cli, flags)?;
 
     let prepared = bootstrap::prepare_stack(&cli.common, flags)?;
+    crate::logging::init(&prepared.settings.data_dir.join("logs"));
     log_mesh_effective_config(&prepared.settings);
 
     logs.push(format!(
@@ -291,12 +234,14 @@ fn run_stack_managed(
         st.pid = Some(pid);
     }
     logs.push(format!("sing-box started pid={pid}"));
+    let singbox_logs =
+        SingboxLogWriter::new(state.settings.data_dir.join("logs"));
 
-    if let Some(stdout) = child.stdout.take() {
-        pipe_to_buffer(stdout, logs.clone());
+    if let Some(stdout) = child.take_stdout() {
+        pipe_singbox_to_buffer(stdout, logs.clone(), singbox_logs.clone());
     }
-    if let Some(stderr) = child.stderr.take() {
-        pipe_to_buffer(stderr, logs.clone());
+    if let Some(stderr) = child.take_stderr() {
+        pipe_singbox_to_buffer(stderr, logs.clone(), singbox_logs);
     }
 
     if state.tun_enabled {

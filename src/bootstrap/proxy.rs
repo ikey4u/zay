@@ -45,7 +45,7 @@ fn proxy_value_to_bootstrap(proxy: Value) -> Result<BootstrapProxy> {
     Ok(BootstrapProxy { name, proxy })
 }
 
-/// Load from an inline `[bootstrap_proxy]` table in `zay.toml`.
+/// Load from an inline `[proxy.bootstrap]` table in `zay.toml`.
 pub fn load_from_toml_table(
     table: &toml::map::Map<String, TomlValue>,
 ) -> Result<BootstrapProxy> {

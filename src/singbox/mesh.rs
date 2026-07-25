@@ -202,13 +202,6 @@ fn mesh_allowed_ips(
 }
 
 fn resolve_wg_peer(mesh: &MeshConfig) -> Result<(String, u16)> {
-    if mesh.wireguard_endpoint.is_some() {
-        bail!(
-            "[mesh].wireguard_endpoint is not supported: mesh is managed by local EasyTier. \
-Remove wireguard_endpoint and run `zay stack --mesh node` with listeners/peers in [mesh]. \
-Sing-box connects to [mesh].wireguard_listen (default 127.0.0.1:51820)."
-        );
-    }
     let listen = mesh
         .wireguard_listen
         .as_deref()

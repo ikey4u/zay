@@ -1,4 +1,6 @@
-use anyhow::{Context, Result};
+use std::collections::HashSet;
+
+use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
 use super::{mesh, rules, subscription, tun_route};
@@ -41,12 +43,6 @@ pub fn build_value(settings: &Settings, has_rules: bool) -> Result<Value> {
         "direct".to_string()
     } else {
         outbounds.push(json!({
-            "type": "selector",
-            "tag": "Proxy",
-            "outbounds": member_tags.clone(),
-            "default": member_tags.first()
-        }));
-        outbounds.push(json!({
             "type": "urltest",
             "tag": "Auto",
             "outbounds": member_tags.clone(),
@@ -54,8 +50,19 @@ pub fn build_value(settings: &Settings, has_rules: bool) -> Result<Value> {
             "interval": "300s",
             "tolerance": 100
         }));
+        let mut proxy_members = vec!["Auto".to_string()];
+        proxy_members.extend(member_tags.clone());
+        outbounds.push(json!({
+            "type": "selector",
+            "tag": "Proxy",
+            "outbounds": proxy_members,
+            "default": "Auto"
+        }));
         "Proxy".to_string()
     };
+    let (domain_outbounds, domain_routes) =
+        build_domain_rule_groups(settings, &member_tags)?;
+    outbounds.extend(domain_outbounds);
 
     let mut endpoints = Vec::new();
     if let Some(wg) = mesh::wireguard_endpoint(settings)? {
@@ -81,6 +88,7 @@ pub fn build_value(settings: &Settings, has_rules: bool) -> Result<Value> {
     route_rules.push(json!({ "protocol": "dns", "action": "hijack-dns" }));
     // Sniff after hijack-dns (TLS SNI / HTTP Host for connections that already have a destination).
     route_rules.extend(sniff_route_rules(settings, tun_enabled));
+    route_rules.extend(domain_routes);
 
     if has_rules {
         route_rules.extend(rules::proxy_fetch_rules(&proxy_final));
@@ -184,11 +192,6 @@ pub fn build_value(settings: &Settings, has_rules: bool) -> Result<Value> {
         "outbounds": outbounds,
         "route": route,
         "experimental": {
-            "clash_api": {
-                "external_controller": settings.external_controller,
-                "secret": settings.api_secret,
-                "default_mode": "rule"
-            },
             "cache_file": cache_file
         }
     });
@@ -198,6 +201,64 @@ pub fn build_value(settings: &Settings, has_rules: bool) -> Result<Value> {
     }
 
     Ok(root)
+}
+
+fn build_domain_rule_groups(
+    settings: &Settings,
+    member_tags: &[String],
+) -> Result<(Vec<Value>, Vec<Value>)> {
+    let available: HashSet<&str> =
+        member_tags.iter().map(String::as_str).collect();
+    let mut names = HashSet::new();
+    let mut outbounds = Vec::new();
+    let mut routes = Vec::new();
+
+    for policy in &settings.domain_rule {
+        let name = policy.name.trim();
+        if name.is_empty() {
+            bail!("proxy.domain_rule.name must not be empty");
+        }
+        if !names.insert(name) {
+            bail!("duplicate proxy.domain_rule name {name:?}");
+        }
+        if policy.by_suffix.is_empty() {
+            bail!(
+                "proxy.domain_rule {name:?} requires at least one domain_suffix"
+            );
+        }
+        if policy.outbounds.is_empty() {
+            bail!("proxy.domain_rule {name:?} requires at least one outbound");
+        }
+        let missing: Vec<&str> = policy
+            .outbounds
+            .iter()
+            .map(String::as_str)
+            .filter(|tag| !available.contains(tag))
+            .collect();
+        if !missing.is_empty() {
+            bail!(
+                "proxy.domain_rule {name:?} references unavailable subscription node(s): {}; run `zay service proxy list` to inspect current tags",
+                missing.join(", ")
+            );
+        }
+
+        let tag = format!("domain-proxy:{name}");
+        outbounds.push(json!({
+            "type": "urltest",
+            "tag": tag,
+            "outbounds": policy.outbounds,
+            "url": policy.health_check_url.as_deref().unwrap_or(&settings.health_check_url),
+            "interval": format!("{}s", policy.interval.unwrap_or(300)),
+            "tolerance": policy.tolerance.unwrap_or(100)
+        }));
+        routes.push(json!({
+            "action": "route",
+            "domain_suffix": policy.by_suffix,
+            "outbound": format!("domain-proxy:{name}")
+        }));
+    }
+
+    Ok((outbounds, routes))
 }
 
 fn mixed_inbounds(settings: &Settings) -> Vec<Value> {
@@ -299,7 +360,81 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::settings::{MeshConfig, MeshRole, Settings, StackFlags};
+    use crate::settings::{
+        DomainRuleFile, MeshConfig, MeshRole, Settings, StackFlags,
+    };
+
+    #[test]
+    fn domain_rule_generates_restricted_urltest_and_route() {
+        let settings = Settings {
+            subscriptions: Vec::new(),
+            data_dir: PathBuf::from("/tmp/zay-singbox-test"),
+            mixed_port: 17890,
+            allow_lan: false,
+            tun: false,
+            log_level: "info".into(),
+            health_check_url: "https://health.example/204".into(),
+            update_interval: 3600,
+            tun_exclude_routes: Vec::new(),
+            proxy_mixin: None,
+            bootstrap_proxy: None,
+            domain_rule: vec![DomainRuleFile {
+                name: "cursor".into(),
+                by_suffix: vec!["cursor.com".into(), "cursor.sh".into()],
+                outbounds: vec!["sg-1".into(), "sg-2".into()],
+                health_check_url: None,
+                interval: Some(60),
+                tolerance: Some(50),
+            }],
+            mesh: None,
+            stack: StackFlags::default(),
+        };
+
+        let (outbounds, routes) = build_domain_rule_groups(
+            &settings,
+            &["sg-1".into(), "sg-2".into()],
+        )
+        .unwrap();
+        assert_eq!(outbounds[0]["tag"], "domain-proxy:cursor");
+        assert_eq!(outbounds[0]["outbounds"], json!(["sg-1", "sg-2"]));
+        assert_eq!(outbounds[0]["interval"], "60s");
+        assert_eq!(routes[0]["outbound"], "domain-proxy:cursor");
+        assert_eq!(
+            routes[0]["domain_suffix"],
+            json!(["cursor.com", "cursor.sh"])
+        );
+    }
+
+    #[test]
+    fn domain_rule_rejects_unavailable_node() {
+        let settings = Settings {
+            subscriptions: Vec::new(),
+            data_dir: PathBuf::from("/tmp/zay-singbox-test"),
+            mixed_port: 17890,
+            allow_lan: false,
+            tun: false,
+            log_level: "info".into(),
+            health_check_url: "https://health.example/204".into(),
+            update_interval: 3600,
+            tun_exclude_routes: Vec::new(),
+            proxy_mixin: None,
+            bootstrap_proxy: None,
+            domain_rule: vec![DomainRuleFile {
+                name: "cursor".into(),
+                by_suffix: vec!["cursor.com".into()],
+                outbounds: vec!["missing".into()],
+                health_check_url: None,
+                interval: None,
+                tolerance: None,
+            }],
+            mesh: None,
+            stack: StackFlags::default(),
+        };
+
+        let error =
+            build_domain_rule_groups(&settings, &["sg-1".into()]).unwrap_err();
+        assert!(error.to_string().contains("unavailable subscription node"));
+    }
 
     #[test]
     fn mesh_enables_wireguard_endpoint_and_tun() {
@@ -313,12 +448,11 @@ mod tests {
             health_check_url: "https://www.gstatic.com/generate_204".into(),
             update_interval: 3600,
             tun_exclude_routes: Vec::new(),
-            external_controller: "127.0.0.1:19090".into(),
-            api_secret: "secret".into(),
-            mihomo_mixin: None,
-            singbox_mixin: None,
+            proxy_mixin: None,
             bootstrap_proxy: None,
+            domain_rule: Vec::new(),
             mesh: Some(MeshConfig {
+                enabled: true,
                 role: MeshRole::Node,
                 instance_name: Some("zay".into()),
                 network_name: "my-network".into(),
@@ -332,7 +466,6 @@ mod tests {
                 wireguard_listen: Some("127.0.0.1:51820".into()),
                 wireguard_client_cidr: None,
                 wireguard_client_address: None,
-                wireguard_endpoint: None,
             }),
             stack: StackFlags {
                 mesh: Some(MeshRole::Node),
@@ -373,12 +506,11 @@ mod tests {
             health_check_url: "https://www.gstatic.com/generate_204".into(),
             update_interval: 3600,
             tun_exclude_routes: Vec::new(),
-            external_controller: "127.0.0.1:19090".into(),
-            api_secret: "secret".into(),
-            mihomo_mixin: None,
-            singbox_mixin: None,
+            proxy_mixin: None,
             bootstrap_proxy: None,
+            domain_rule: Vec::new(),
             mesh: Some(MeshConfig {
+                enabled: true,
                 role: MeshRole::Relay,
                 instance_name: Some("relay".into()),
                 network_name: "my-network".into(),
@@ -395,7 +527,6 @@ mod tests {
                 wireguard_listen: None,
                 wireguard_client_cidr: None,
                 wireguard_client_address: None,
-                wireguard_endpoint: None,
             }),
             stack: StackFlags {
                 mesh: Some(MeshRole::Relay),
@@ -415,51 +546,6 @@ mod tests {
     }
 
     #[test]
-    fn wireguard_endpoint_rejected() {
-        let settings = Settings {
-            subscriptions: Vec::new(),
-            data_dir: PathBuf::from("/tmp/zay-singbox-test"),
-            mixed_port: 17890,
-            allow_lan: false,
-            tun: true,
-            log_level: "info".into(),
-            health_check_url: "https://www.gstatic.com/generate_204".into(),
-            update_interval: 3600,
-            tun_exclude_routes: Vec::new(),
-            external_controller: "127.0.0.1:19090".into(),
-            api_secret: "secret".into(),
-            mihomo_mixin: None,
-            singbox_mixin: None,
-            bootstrap_proxy: None,
-            mesh: Some(MeshConfig {
-                role: MeshRole::Node,
-                instance_name: Some("zay".into()),
-                network_name: "my-network".into(),
-                network_secret: "change-me".into(),
-                dhcp: None,
-                ipv4: Some("10.126.126.10/24".into()),
-                listeners: None,
-                peers: None,
-                proxy_networks: None,
-                mesh_routes: Some(vec!["10.126.126.0/24".into()]),
-                wireguard_listen: None,
-                wireguard_client_cidr: None,
-                wireguard_client_address: None,
-                wireguard_endpoint: Some("nas.example.com:51820".into()),
-            }),
-            stack: StackFlags {
-                mesh: Some(MeshRole::Node),
-                gateway: false,
-                tun: true,
-                no_rules: false,
-            },
-        };
-
-        let err = build_config(&settings, false).unwrap_err();
-        assert!(err.to_string().contains("wireguard_endpoint"));
-    }
-
-    #[test]
     fn clash_rules_use_direct_final_blacklist() {
         let settings = Settings {
             subscriptions: vec!["https://example.com/sub".into()],
@@ -471,11 +557,9 @@ mod tests {
             health_check_url: "https://example.com".into(),
             update_interval: 3600,
             tun_exclude_routes: Vec::new(),
-            external_controller: "127.0.0.1:19090".into(),
-            api_secret: "secret".into(),
-            mihomo_mixin: None,
-            singbox_mixin: None,
+            proxy_mixin: None,
             bootstrap_proxy: None,
+            domain_rule: Vec::new(),
             mesh: None,
             stack: StackFlags {
                 mesh: None,

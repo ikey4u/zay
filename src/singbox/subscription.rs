@@ -1,4 +1,9 @@
-use std::{fs, path::Path, time::Duration};
+use std::{
+    fs,
+    path::Path,
+    thread,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result, bail};
 use reqwest::blocking::Client;
@@ -90,11 +95,59 @@ pub fn client_via_bootstrap(bp: &BootstrapProxy) -> Result<Client> {
         .context("building bootstrap HTTP client")
 }
 
+pub fn client_via_mixed_proxy(mixed_port: u16) -> Result<Client> {
+    let proxy_url = format!("http://127.0.0.1:{mixed_port}");
+    let proxy = reqwest::Proxy::all(&proxy_url)
+        .with_context(|| format!("invalid mixed proxy URL {proxy_url}"))?;
+    Client::builder()
+        .user_agent(SUBSCRIPTION_UA)
+        .proxy(proxy)
+        .timeout(Duration::from_secs(120))
+        .connect_timeout(Duration::from_secs(30))
+        .build()
+        .context("building mixed proxy HTTP client")
+}
+
+pub fn clients_via_mixed_proxy(mixed_port: u16) -> Result<Vec<Client>> {
+    let http = client_via_mixed_proxy(mixed_port)?;
+    let socks_url = format!("socks5://127.0.0.1:{mixed_port}");
+    let socks = reqwest::Proxy::all(&socks_url)
+        .with_context(|| format!("invalid mixed proxy URL {socks_url}"))?;
+    let socks = Client::builder()
+        .user_agent(SUBSCRIPTION_UA)
+        .proxy(socks)
+        .timeout(Duration::from_secs(120))
+        .connect_timeout(Duration::from_secs(30))
+        .build()
+        .context("building SOCKS proxy HTTP client")?;
+    Ok(vec![http, socks])
+}
+
 pub fn wait_for_mixed_proxy(
     settings: &Settings,
     timeout: Duration,
 ) -> Result<()> {
-    crate::mihomo::geo::wait_for_proxy(settings.mixed_port, timeout)
+    let clients = clients_via_mixed_proxy(settings.mixed_port)?;
+    let deadline = Instant::now() + timeout;
+    eprintln!(
+        "waiting for sing-box mixed proxy on 127.0.0.1:{}…",
+        settings.mixed_port
+    );
+    loop {
+        if clients.iter().any(|client| {
+            client
+                .get("https://www.cloudflare.com/cdn-cgi/trace")
+                .send()
+                .map(|response| response.status().is_success())
+                .unwrap_or(false)
+        }) {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            bail!("proxy not ready after {}s", timeout.as_secs());
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
 }
 
 fn is_invalid_body(raw: &str) -> bool {

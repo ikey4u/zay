@@ -5,7 +5,7 @@ use crate::settings::Settings;
 
 /// Merge `[singbox].mixin` JSON fragment into the generated config.
 pub fn merge_config(base_json: &str, settings: &Settings) -> Result<String> {
-    let Some(raw) = settings.singbox_mixin.as_deref() else {
+    let Some(raw) = settings.proxy_mixin.as_deref() else {
         return Ok(base_json.to_string());
     };
     let trimmed = raw.trim();
@@ -136,14 +136,13 @@ mod tests {
             health_check_url: "https://example.com".into(),
             update_interval: 3600,
             tun_exclude_routes: Vec::new(),
-            external_controller: "127.0.0.1:19090".into(),
-            api_secret: "".into(),
-            mihomo_mixin: None,
-            singbox_mixin: Some(
+            proxy_mixin: Some(
                 r#"{"route":{"rules":[{"ip_is_private":true,"outbound":"direct"}]}}"#.into(),
             ),
             bootstrap_proxy: None,
+            domain_rule: Vec::new(),
             mesh: Some(MeshConfig {
+                enabled: true,
                 role: MeshRole::Node,
                 instance_name: None,
                 network_name: "n".into(),
@@ -157,7 +156,6 @@ mod tests {
                 wireguard_listen: None,
                 wireguard_client_cidr: None,
                 wireguard_client_address: None,
-                wireguard_endpoint: None,
             }),
             stack: StackFlags {
                 mesh: Some(MeshRole::Node),

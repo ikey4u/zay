@@ -3,8 +3,27 @@
 use std::{fmt::Write as _, path::Path};
 
 use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
 
 use crate::settings::{MeshConfig, MeshRole};
+
+/// A route-bearing mesh node reported by the local EasyTier instance.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MeshPeerStatus {
+    pub peer_id: String,
+    pub hostname: Option<String>,
+    pub virtual_ipv4: Option<String>,
+}
+
+/// Local EasyTier view of the currently connected mesh topology.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MeshInstanceStatus {
+    pub instance_id: String,
+    pub virtual_ipv4: Option<String>,
+    pub connected_peers: usize,
+    pub routes: usize,
+    pub peers: Vec<MeshPeerStatus>,
+}
 
 /// Serialize `[mesh]` to EasyTier TOML for `TomlConfigLoader`.
 pub fn to_easytier_toml(mesh: &MeshConfig) -> Result<String> {
@@ -226,6 +245,13 @@ mod imp {
     use easytier::{
         common::config::{ConfigFileControl, TomlConfigLoader},
         instance_manager::NetworkInstanceManager,
+        proto::{
+            api::instance::{
+                ListPeerRequest, ListRouteRequest, ShowNodeInfoRequest,
+                list_peer_route_pair,
+            },
+            rpc_types::controller::BaseController,
+        },
     };
     use once_cell::sync::Lazy;
     use uuid::Uuid;
@@ -404,6 +430,70 @@ mod imp {
         Ok(infos.values().map(|i| i.peers.len()).sum())
     }
 
+    /// Query EasyTier's peer-management API, the same source used by
+    /// `easytier-cli peer` and `easytier-cli route`.
+    pub async fn status() -> Result<Vec<super::MeshInstanceStatus>> {
+        let ids = INSTANCE_MANAGER.list_network_instance_ids();
+        let mut instances = Vec::with_capacity(ids.len());
+        for id in ids {
+            let service = INSTANCE_MANAGER
+                .get_instance_service(&id)
+                .with_context(|| {
+                    format!("getting EasyTier RPC service for instance {id}")
+                })?;
+            let peer_api = service.get_peer_manage_service();
+            let node = peer_api
+                .show_node_info(
+                    BaseController::default(),
+                    ShowNodeInfoRequest::default(),
+                )
+                .await
+                .context("calling EasyTier PeerManageRpc.ShowNodeInfo")?
+                .node_info
+                .context(
+                    "EasyTier PeerManageRpc returned no local node information",
+                )?;
+            let connected_peers = peer_api
+                .list_peer(
+                    BaseController::default(),
+                    ListPeerRequest::default(),
+                )
+                .await
+                .context("calling EasyTier PeerManageRpc.ListPeer")?
+                .peer_infos;
+            let routes = peer_api
+                .list_route(
+                    BaseController::default(),
+                    ListRouteRequest::default(),
+                )
+                .await
+                .context("calling EasyTier PeerManageRpc.ListRoute")?
+                .routes;
+            let route_count = routes.len();
+            let peers = list_peer_route_pair(connected_peers.clone(), routes)
+                .into_iter()
+                .filter_map(|pair| {
+                    let route = pair.route?;
+                    Some(super::MeshPeerStatus {
+                        peer_id: route.peer_id.to_string(),
+                        hostname: (!route.hostname.is_empty())
+                            .then_some(route.hostname),
+                        virtual_ipv4: route.ipv4_addr.map(|ip| ip.to_string()),
+                    })
+                })
+                .collect();
+            instances.push(super::MeshInstanceStatus {
+                instance_id: id.to_string(),
+                virtual_ipv4: (!node.ipv4_addr.is_empty())
+                    .then_some(node.ipv4_addr),
+                connected_peers: connected_peers.len(),
+                routes: route_count,
+                peers,
+            });
+        }
+        Ok(instances)
+    }
+
     fn log_mesh_status_now() {
         let Ok(infos) = INSTANCE_MANAGER.collect_network_infos_sync() else {
             eprintln!("warn: could not query EasyTier mesh status");
@@ -468,7 +558,9 @@ mod imp {
     }
 }
 
-pub use imp::{spawn_mesh_peer_watch, start, stop_all, wait_for_mesh_peers};
+pub use imp::{
+    spawn_mesh_peer_watch, start, status, stop_all, wait_for_mesh_peers,
+};
 
 pub fn start_for_singbox(
     mesh: &MeshConfig,
@@ -484,6 +576,7 @@ mod tests {
 
     fn mesh(role: MeshRole) -> MeshConfig {
         MeshConfig {
+            enabled: true,
             role,
             instance_name: Some("zay".into()),
             network_name: "test-net".into(),
@@ -497,7 +590,6 @@ mod tests {
             wireguard_listen: None,
             wireguard_client_cidr: None,
             wireguard_client_address: None,
-            wireguard_endpoint: None,
         }
     }
 

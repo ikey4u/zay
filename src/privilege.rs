@@ -1,5 +1,5 @@
 use std::{
-    io::Write,
+    io::{self, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
@@ -10,7 +10,7 @@ const NO_ELEVATION_TOOL_MSG: &str = "\
 TUN mode requires administrator privileges, but no elevation tool was found.
 
 Install sudo (apt install sudo) or doas (apk add doas), or run as root:
-  sudo zay stack …";
+  zay run proxy …";
 
 fn command_in_path(program: &str) -> bool {
     std::env::var_os("PATH")
@@ -45,6 +45,103 @@ pub fn resolve_privilege_wrapper() -> Result<PathBuf> {
         return Ok(PathBuf::from("doas"));
     }
     bail!(NO_ELEVATION_TOOL_MSG);
+}
+
+/// Authenticate before daemonizing so the detached supervisor never needs a
+/// terminal. The subsequently spawned sing-box TUN worker reuses sudo's
+/// per-user credential timestamp and is the only process started as root.
+pub fn preflight_tun_worker() -> Result<()> {
+    if is_root() {
+        return Ok(());
+    }
+
+    let wrapper = resolve_privilege_wrapper()?;
+    let mut command = Command::new(&wrapper);
+    if wrapper_is_sudo(&wrapper) {
+        command.arg("-v");
+    } else {
+        // doas has no portable equivalent of `sudo -v`; verify that its
+        // configured authorization can run a harmless command noninteractively.
+        command.args(["-n", "true"]);
+    }
+    let status = command.status().with_context(|| {
+        format!("requesting TUN elevation through {}", wrapper.display())
+    })?;
+    if !status.success() {
+        bail!(
+            "TUN elevation was not authorized; authenticate with `{}` and retry",
+            wrapper.display()
+        );
+    }
+    Ok(())
+}
+
+/// Prompt and validate a sudo password before daemonizing. The caller passes
+/// the returned value through a private runtime channel to the TUN worker.
+#[cfg(unix)]
+pub fn daemon_tun_password() -> Result<Option<String>> {
+    if is_root() {
+        return Ok(None);
+    }
+    let wrapper = resolve_privilege_wrapper()?;
+    if !wrapper_is_sudo(&wrapper) {
+        preflight_tun_worker()?;
+        return Ok(None);
+    }
+
+    let password = read_password("sudo password required: ")?;
+    let mut command = Command::new(&wrapper);
+    command.args(["-S", "-p", "", "-v"]).stdin(Stdio::piped());
+    let mut child = command.spawn().with_context(|| {
+        format!("requesting TUN elevation through {}", wrapper.display())
+    })?;
+    write_password_stdin(&mut child, &password)?;
+    if !child
+        .wait()
+        .context("waiting for sudo authentication")?
+        .success()
+    {
+        bail!("TUN elevation was not authorized");
+    }
+    Ok(Some(password))
+}
+
+#[cfg(unix)]
+fn read_password(prompt: &str) -> Result<String> {
+    use std::os::fd::AsRawFd;
+
+    print!("{prompt}");
+    io::stdout().flush().context("flushing password prompt")?;
+    let stdin = io::stdin();
+    let fd = stdin.as_raw_fd();
+    let mut original = unsafe { std::mem::zeroed::<libc::termios>() };
+    if unsafe { libc::tcgetattr(fd, &mut original) } != 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("reading terminal settings");
+    }
+    let mut hidden = original;
+    hidden.c_lflag &= !libc::ECHO;
+    if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &hidden) } != 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("hiding password input");
+    }
+
+    let mut password = String::new();
+    let result = stdin
+        .read_line(&mut password)
+        .context("reading sudo password");
+    let restore = unsafe { libc::tcsetattr(fd, libc::TCSANOW, &original) };
+    println!();
+    if restore != 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("restoring terminal settings");
+    }
+    result?;
+    let password = password.trim_end_matches(['\r', '\n']).to_string();
+    if password.is_empty() {
+        bail!("sudo password cannot be empty");
+    }
+    Ok(password)
 }
 
 fn wrapper_is_sudo(wrapper: &Path) -> bool {

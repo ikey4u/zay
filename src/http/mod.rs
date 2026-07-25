@@ -13,6 +13,10 @@ use tower_http::{
 
 #[derive(Args, Debug, serde::Deserialize)]
 pub struct HttpCli {
+    /// Print an equivalent persistent-service TOML configuration and exit
+    #[arg(long)]
+    pub dump_config: bool,
+
     /// Directory to serve
     #[arg(long, value_name = "DIR", default_value = ".")]
     pub root: PathBuf,
@@ -39,6 +43,10 @@ pub struct HttpCli {
 }
 
 pub async fn run(cli: HttpCli) -> Result<()> {
+    if cli.dump_config {
+        print!("{}", dump_config(&cli)?);
+        return Ok(());
+    }
     let root = validate_root(cli.root)?;
     validate_tls_files(cli.cert.as_ref(), cli.key.as_ref())?;
 
@@ -82,6 +90,27 @@ pub async fn run(cli: HttpCli) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn dump_config(cli: &HttpCli) -> Result<String> {
+    #[derive(serde::Serialize)]
+    struct Config {
+        http: Vec<crate::settings::PersistentHttpFile>,
+    }
+
+    toml::to_string_pretty(&Config {
+        http: vec![crate::settings::PersistentHttpFile {
+            name: None,
+            enabled: true,
+            root: Some(cli.root.clone()),
+            listen: Some(cli.listen),
+            spa: cli.spa,
+            cors: cli.cors,
+            cert: cli.cert.clone(),
+            key: cli.key.clone(),
+        }],
+    })
+    .context("serializing HTTP service configuration")
 }
 
 fn validate_root(root: PathBuf) -> Result<PathBuf> {

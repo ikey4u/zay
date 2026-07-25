@@ -1,11 +1,11 @@
-# `zay http`
+# `zay run http`
 
-`zay http` serves static files over HTTP or HTTPS. It is a foreground command for local development and LAN sharing.
+`zay run http` serves static files over HTTP or HTTPS. It is a foreground command for local development and LAN sharing.
 
 ## Usage
 
 ```bash
-zay http [--root DIR] [--listen ADDR] [--spa] [--cors] \
+zay run http [--root DIR] [--listen ADDR] [--spa] [--cors] \
   [--cert cert.pem --key key.pem]
 ```
 
@@ -25,25 +25,25 @@ TLS requires both `--cert` and `--key`. Without them, Zay serves plain HTTP.
 Serve a directory:
 
 ```bash
-zay http --root dist
+zay run http --root dist
 ```
 
 Serve a single-page app:
 
 ```bash
-zay http --root dist --spa
+zay run http --root dist --spa
 ```
 
 Serve on the LAN with CORS:
 
 ```bash
-zay http --root public --listen 0.0.0.0:8080 --cors
+zay run http --root public --listen 0.0.0.0:8080 --cors
 ```
 
 Serve with a local certificate:
 
 ```bash
-zay http --root dist --listen 127.0.0.1:8443 \
+zay run http --root dist --listen 127.0.0.1:8443 \
   --cert localhost.pem --key localhost-key.pem
 ```
 

@@ -1,4 +1,4 @@
-//! Stable SSH port forwarding (`zay ssh`).
+//! Stable SSH port forwarding (`zay run ssh`).
 
 pub(crate) mod client;
 pub(crate) mod config;
@@ -21,11 +21,15 @@ use tracing_subscriber::EnvFilter;
         "  [bind_host:]bind_port:remote_host:remote_port\n",
         "\n",
         "EXAMPLES\n",
-        "  zay ssh -L 3307:10.0.0.5:3306 myserver\n",
-        "  zay ssh -J bastion -L 3307:mysql.internal:3306 app-server"
+        "  zay run ssh -L 3307:10.0.0.5:3306 myserver\n",
+        "  zay run ssh -J bastion -L 3307:mysql.internal:3306 app-server"
     )
 )]
 pub struct SshCli {
+    /// Print an equivalent persistent-service TOML configuration and exit
+    #[arg(long)]
+    pub dump_config: bool,
+
     /// Local forward (repeatable). [bind_host:]bind_port:remote_host:remote_port
     #[arg(
         short = 'L',
@@ -33,7 +37,7 @@ pub struct SshCli {
         value_name = "SPEC",
         action = clap::ArgAction::Append
     )]
-    local_forwards: Vec<String>,
+    pub local_forwards: Vec<String>,
 
     /// Remote forward (repeatable). [bind_host:]bind_port:remote_host:remote_port
     #[arg(
@@ -42,10 +46,10 @@ pub struct SshCli {
         value_name = "SPEC",
         action = clap::ArgAction::Append
     )]
-    remote_forwards: Vec<String>,
+    pub remote_forwards: Vec<String>,
 
     /// SSH host or ~/.ssh/config host alias
-    ssh_host: String,
+    pub ssh_host: String,
 
     /// Jump host(s), comma-separated or repeat -J. Overrides ~/.ssh/config ProxyJump
     #[arg(
@@ -54,7 +58,7 @@ pub struct SshCli {
         value_name = "HOST",
         action = clap::ArgAction::Append
     )]
-    proxy_jump: Vec<String>,
+    pub proxy_jump: Vec<String>,
 
     /// SSH username (overrides ~/.ssh/config)
     #[arg(short, long)]
@@ -74,7 +78,7 @@ pub struct SshCli {
 
     /// Reject unknown host keys instead of adding them to ~/.ssh/known_hosts
     #[arg(long)]
-    strict_host_keys: bool,
+    pub strict_host_keys: bool,
 }
 
 #[derive(Debug)]
@@ -90,13 +94,36 @@ pub struct SshArgs {
 }
 
 pub async fn run_cli(cli: SshCli) -> Result<()> {
+    if cli.dump_config {
+        print!("{}", dump_config(&cli)?);
+        return Ok(());
+    }
     init_tracing();
     tunnel::run(parse(cli)?).await
 }
 
-/// Parse CLI for WebUI / serve job API.
-pub fn parse_ssh_cli(cli: SshCli) -> Result<SshArgs> {
-    parse(cli)
+fn dump_config(cli: &SshCli) -> Result<String> {
+    #[derive(serde::Serialize)]
+    struct Config {
+        ssh: Vec<crate::settings::PersistentSshFile>,
+    }
+
+    toml::to_string_pretty(&Config {
+        ssh: vec![crate::settings::PersistentSshFile {
+            name: None,
+            enabled: true,
+            ssh_host: cli.ssh_host.clone(),
+            local_forwards: cli.local_forwards.clone(),
+            remote_forwards: cli.remote_forwards.clone(),
+            proxy_jump: cli.proxy_jump.clone(),
+            user: cli.user.clone(),
+            password: cli.password.clone(),
+            identity: cli.identity.clone(),
+            port: cli.port,
+            strict_host_keys: cli.strict_host_keys,
+        }],
+    })
+    .map_err(Into::into)
 }
 
 fn init_tracing() {

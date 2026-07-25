@@ -1,4 +1,4 @@
-//! TCP / WebSocket forwarding (`zay fwd`).
+//! TCP / WebSocket forwarding (`zay run fwd`).
 
 mod server;
 
@@ -16,7 +16,7 @@ static RUSTLS_PROVIDER: Once = Once::new();
 #[command(
     about = "Forward TCP streams directly or over WebSocket (TCP/WS relay)",
     long_about = concat!(
-        "zay fwd forwards TCP streams directly, TCP streams to WebSocket streams, or WebSocket streams to TCP.\n",
+        "zay run fwd forwards TCP streams directly, TCP streams to WebSocket streams, or WebSocket streams to TCP.\n",
         "\n",
         "  --to    where clients connect (local listener)\n",
         "  --from  upstream zay dials for each accepted connection\n",
@@ -27,11 +27,15 @@ static RUSTLS_PROVIDER: Once = Once::new();
         "  --token optional bearer token for WebSocket authorization\n",
         "\n",
         "EXAMPLES:\n",
-        "  zay fwd --to tcp://0.0.0.0:8080 --from tcp://127.0.0.1:80\n",
-        "  zay fwd --to tcp://127.0.0.1:3306 --from wss://public.com:443/wss"
+        "  zay run fwd --to tcp://0.0.0.0:8080 --from tcp://127.0.0.1:80\n",
+        "  zay run fwd --to tcp://127.0.0.1:3306 --from wss://public.com:443/wss"
     )
 )]
 pub struct FwdCli {
+    /// Print an equivalent persistent-service TOML configuration and exit
+    #[arg(long)]
+    pub dump_config: bool,
+
     /// Where clients connect (local listener)
     #[arg(long, value_name = "ENDPOINT")]
     pub to: String,
@@ -79,14 +83,32 @@ pub struct WebSocketEndpoint {
 }
 
 pub async fn run_cli(cli: FwdCli) -> Result<()> {
+    if cli.dump_config {
+        print!("{}", dump_config(&cli)?);
+        return Ok(());
+    }
     init_rustls_provider();
     init_tracing(cli.verbose);
     run(parse(cli)?).await
 }
 
-/// Parse CLI for WebUI / serve job API.
-pub fn parse_fwd_cli(cli: FwdCli) -> Result<FwdArgs> {
-    parse(cli)
+fn dump_config(cli: &FwdCli) -> Result<String> {
+    #[derive(serde::Serialize)]
+    struct Config {
+        fwd: Vec<crate::settings::PersistentFwdFile>,
+    }
+
+    toml::to_string_pretty(&Config {
+        fwd: vec![crate::settings::PersistentFwdFile {
+            name: None,
+            enabled: true,
+            to: cli.to.clone(),
+            from: cli.from.clone(),
+            token: cli.token.clone(),
+            verbose: cli.verbose,
+        }],
+    })
+    .context("serializing forwarding service configuration")
 }
 
 fn init_rustls_provider() {

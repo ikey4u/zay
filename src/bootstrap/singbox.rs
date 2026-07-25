@@ -23,17 +23,19 @@ pub fn prepare_stack(cli: &ProxyOpts, flags: StackFlags) -> Result<Prepared> {
     prepare_inner(settings, flags)
 }
 
+/// Prepare a one-off proxy invocation without loading zay.toml.
+pub fn prepare_transient_stack(
+    cli: &ProxyOpts,
+    flags: StackFlags,
+    mesh: Option<zay_settings::MeshConfig>,
+) -> Result<Prepared> {
+    let settings = zay_settings::resolve_transient_stack(cli, flags, mesh);
+    stack::validate(&settings)?;
+    prepare_inner(settings, flags)
+}
+
 fn prepare_inner(settings: Settings, flags: StackFlags) -> Result<Prepared> {
     eprintln!("sing-box {}", singbox::VERSION);
-    if flags.no_rules {
-        eprintln!("external-controller {}", settings.external_controller);
-    } else {
-        eprintln!(
-            "external-controller {} (reload after rules update)",
-            settings.external_controller
-        );
-    }
-
     std::fs::create_dir_all(&settings.data_dir).with_context(|| {
         format!("creating data dir {}", settings.data_dir.display())
     })?;

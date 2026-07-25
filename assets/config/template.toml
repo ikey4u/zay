@@ -1,0 +1,101 @@
+# Complete documentation: https://github.com/ikey4u/zay/tree/main/docs
+
+# [proxy]
+# enabled = true
+# subscriptions = ["https://subscription.example/clash"]
+# gateway = true
+# mixed_port = 7890
+# update_interval = 3600
+# health_check_url = "https://www.gstatic.com/generate_204"
+# log_level = "info"
+# mixin = '''
+# {
+#   "log": { "level": "info" }
+# }
+# '''
+#
+# [[proxy.domain_rule]]
+# name = "cursor"
+# by_suffix = ["cursor.com", "cursor.sh"]
+# outbounds = [
+#   "proxy-01",
+#   "proxy-02",
+# ]
+# health_check_url = "https://www.gstatic.com/generate_204"
+# interval = 300
+# tolerance = 100
+
+# [proxy.tun]
+# enabled = true
+# exclude_routes = ["192.0.2.0/24"]
+
+# [proxy.bootstrap]
+# name = "Bootstrap"
+# type = "ss"
+# server = "1.2.3.4"
+# port = 8388
+# cipher = "aes-256-gcm"
+# password = "secret"
+
+# [proxy.mesh] # srv: relay / hub
+# enabled = true
+# role = "relay"
+# instance_name = "relay"
+# network_name = "mesh.example"
+# network_secret = "CHANGE_ME"
+# ipv4 = "10.126.126.1/24"
+# listeners = ["tcp://0.0.0.0:11010", "udp://0.0.0.0:11010"]
+# wireguard_listen = "127.0.0.1:51820"
+#
+# [proxy.mesh] # client A: node with proxy subscription
+# enabled = true
+# role = "node"
+# instance_name = "client-a"
+# network_name = "mesh.example"
+# network_secret = "CHANGE_ME"
+# ipv4 = "10.126.126.2/24"
+# peers = ["tcp://203.0.113.10:11010"]
+# mesh_routes = ["10.126.126.0/24"]
+# wireguard_listen = "127.0.0.1:51820"
+#
+# [proxy.mesh] # client B: node with proxy subscription
+# enabled = true
+# role = "node"
+# instance_name = "client-b"
+# network_name = "mesh.example"
+# network_secret = "CHANGE_ME"
+# ipv4 = "10.126.126.3/24"
+# peers = ["tcp://203.0.113.10:11010"]
+# mesh_routes = ["10.126.126.0/24"]
+# wireguard_listen = "127.0.0.1:51820"
+
+# [[http]]
+# name = "web"
+# enabled = true
+# root = "./dist"
+# listen = "127.0.0.1:8080"
+# spa = true
+# cors = false
+# cert = "./cert.pem"
+# key = "./key.pem"
+#
+# [[fwd]]
+# name = "database"
+# enabled = true
+# from = "tcp://127.0.0.1:3307"
+# to = "tcp://db.internal:3306"
+# token = "optional-shared-token"
+# verbose = 0
+#
+# [[ssh]]
+# name = "database"
+# enabled = true
+# ssh_host = "bastion"
+# local_forwards = ["3308:db.internal:3306"]
+# remote_forwards = ["8080:127.0.0.1:8080"]
+# proxy_jump = ["jump-host"]
+# user = "alice"
+# password = "avoid-plaintext-when-possible"
+# identity = "~/.ssh/id_ed25519"
+# port = 22
+# strict_host_keys = true

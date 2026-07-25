@@ -5,18 +5,6 @@
     "clientKind": "git",
     "useIgnoreFile": true
   },
-  "files": {
-    "ignoreUnknown": true,
-    "includes": [
-      "webui/**/*.ts",
-      "webui/**/*.js",
-      "webui/**/*.vue",
-      "webui/**/*.css",
-      "webui/**/*.html",
-      "!webui/node_modules",
-      "!webui/dist"
-    ]
-  },
   "formatter": {
     "enabled": true,
     "indentStyle": "space",

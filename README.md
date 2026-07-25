@@ -2,6 +2,28 @@
 
 See `zay --help` for usage.
 
+## Persistent runtime
+
+`zay service start` starts components enabled in `zay.toml` after detaching
+from the terminal. It writes logs to
+`<data-dir>/logs/zay.log` and provides `zay service status`, `zay service logs --follow`, and
+`zay service stop`.
+
+The supervisor always runs as the invoking user. On macOS/Linux, if
+`[proxy].tun` is enabled, `zay service start` requests administrator authorization
+before detaching, then elevates only its sing-box TUN worker. User
+configuration and service control files therefore stay editable without running
+the whole service through `sudo`. Use `zay service start`, not `sudo zay service start`.
+
+On Windows, the TUN worker opens the normal UAC prompt and is tracked through
+its launcher process. It does not inherit the supervisor's stdout/stderr.
+
+`zay run proxy`, `zay run ssh`, `zay run fwd`, and `zay run http` remain foreground,
+one-off commands. They do not read or create `zay.toml`; `zay run proxy` stores
+its generated runtime files in the system temporary directory. Configure
+`[proxy]`, `[proxy.mesh]`, `[[ssh]]`, `[[fwd]]`, or `[[http]]` when an
+equivalent component should persist.
+
 # PREBUILT FILES NOTICE
 
 Windows packages include runtime files extracted from the following official prebuilt archives. `build.rs` verifies each archive with the pinned SHA-256 hash before using it.

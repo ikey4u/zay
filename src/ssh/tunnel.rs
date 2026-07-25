@@ -115,7 +115,10 @@ pub async fn run(args: SshArgs) -> Result<()> {
 
         let was_connected = session_tx.borrow().is_some();
 
-        if let Some(session) = session_tx.borrow().clone() {
+        // Drop watch::Ref before awaiting: persistent component execution uses
+        // tokio::spawn, whose future must be Send.
+        let active_session = { session_tx.borrow().clone() };
+        if let Some(session) = active_session {
             cancel_remote_forwards(&session.handle, &remote_entries).await;
         }
         let _ = session_tx.send(None);

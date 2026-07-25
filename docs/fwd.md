@@ -1,11 +1,11 @@
-# `zay fwd`
+# `zay run fwd`
 
-`zay fwd` forwards TCP streams directly or through WebSocket. It is the Zay version of the old `weconn bridge` command.
+`zay run fwd` forwards TCP streams directly or through WebSocket. It is the Zay version of the old `weconn bridge` command.
 
 ## Usage
 
 ```bash
-zay fwd --to ENDPOINT --from ENDPOINT [--token TOKEN] [-v]
+zay run fwd --to ENDPOINT --from ENDPOINT [--token TOKEN] [-v]
 ```
 
 | Option | Meaning |
@@ -46,34 +46,34 @@ TLS server support for `--to wss://...` / `--to https://...` is not implemented.
 Direct TCP relay:
 
 ```bash
-zay fwd --to tcp://0.0.0.0:8080 --from tcp://127.0.0.1:80
+zay run fwd --to tcp://0.0.0.0:8080 --from tcp://127.0.0.1:80
 ```
 
 Local TCP to remote WebSocket:
 
 ```bash
-zay fwd --to tcp://127.0.0.1:3306 --from wss://public.example.com/mysql
+zay run fwd --to tcp://127.0.0.1:3306 --from wss://public.example.com/mysql
 ```
 
 WebSocket listener to local TCP:
 
 ```bash
-zay fwd --to http://0.0.0.0:8080/ws --from tcp://127.0.0.1:3306
+zay run fwd --to http://0.0.0.0:8080/ws --from tcp://127.0.0.1:3306
 ```
 
 Local MySQL TCP to a gateway WebSocket route:
 
 ```bash
-zay fwd --to tcp://127.0.0.1:8899 --from http://public.example.com/db
+zay run fwd --to tcp://127.0.0.1:8899 --from http://public.example.com/db
 mysql -h 127.0.0.1 -P 8899 -u USER -p
 ```
 
-`http://public.example.com/db` is treated as a WebSocket upgrade endpoint (`ws://public.example.com/db`), not plain HTTP forwarding. If the gateway redirects `/db` to `/db/`, `zay fwd` follows the WebSocket redirect and keeps the original public origin when the redirect points at a same-host internal gateway port.
+`http://public.example.com/db` is treated as a WebSocket upgrade endpoint (`ws://public.example.com/db`), not plain HTTP forwarding. If the gateway redirects `/db` to `/db/`, `zay run fwd` follows the WebSocket redirect and keeps the original public origin when the redirect points at a same-host internal gateway port.
 
 With token auth:
 
 ```bash
-zay fwd --to http://0.0.0.0:8080/ws --from tcp://127.0.0.1:3306 --token secret
+zay run fwd --to http://0.0.0.0:8080/ws --from tcp://127.0.0.1:3306 --token secret
 ```
 
 For WebSocket listeners, the token is accepted through either:

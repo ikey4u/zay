@@ -21,6 +21,8 @@ pub struct ConfigCli {
 pub enum ConfigCommand {
     /// Print the current zay.toml
     Dump(ConfigPathOpts),
+    /// Print a complete default zay.toml template without creating any files
+    Template,
     /// Set a TOML key to a TOML literal value
     Set(ConfigSet),
     /// Remove a TOML key
@@ -45,7 +47,7 @@ pub struct ConfigSet {
     #[command(flatten)]
     pub path: ConfigPathOpts,
 
-    /// Dot-separated TOML key path, e.g. mihomo.mixin
+    /// Dot-separated TOML key path, e.g. proxy.mixin
     pub key: String,
 
     /// TOML literal value, e.g. 7891, true, '"debug"', or '["cidr"]'
@@ -57,7 +59,7 @@ pub struct ConfigUnset {
     #[command(flatten)]
     pub path: ConfigPathOpts,
 
-    /// Dot-separated TOML key path, e.g. mihomo.mixin
+    /// Dot-separated TOML key path, e.g. proxy.mixin
     pub key: String,
 }
 
@@ -90,6 +92,10 @@ pub fn validate_file(opts: &ConfigPathOpts) -> Result<()> {
 pub fn run(cli: ConfigCli) -> Result<()> {
     match cli.command {
         ConfigCommand::Dump(opts) => dump(&opts),
+        ConfigCommand::Template => {
+            print!("{}", settings::default_zay_toml());
+            Ok(())
+        }
         ConfigCommand::Set(cmd) => set(&cmd),
         ConfigCommand::Unset(cmd) => unset(&cmd),
         ConfigCommand::Edit(opts) => edit(&opts),
@@ -107,11 +113,6 @@ fn ensure_config(opts: &ConfigPathOpts) -> Result<PathBuf> {
     let (data_dir, toml_path) = config_path(opts);
     settings::ensure_zay_toml(&data_dir, &toml_path)?;
     Ok(toml_path)
-}
-
-/// Public alias for serve API handlers.
-pub fn ensure_config_path(opts: &ConfigPathOpts) -> Result<PathBuf> {
-    ensure_config(opts)
 }
 
 fn dump(opts: &ConfigPathOpts) -> Result<()> {
@@ -239,9 +240,9 @@ mod tests {
     #[test]
     fn set_key_creates_nested_tables() {
         let mut doc = "".parse::<DocumentMut>().unwrap();
-        set_key(&mut doc, "mihomo.mixin", "'''rules: []\n'''").unwrap();
+        set_key(&mut doc, "proxy.mixin", "'''{\"route\": {}}\n'''").unwrap();
 
-        assert!(doc.to_string().contains("[mihomo]"));
+        assert!(doc.to_string().contains("[proxy]"));
         assert!(doc.to_string().contains("mixin = '''"));
     }
 
@@ -268,5 +269,13 @@ mod tests {
     fn parse_value_accepts_typed_toml_literals() {
         let item = parse_value("[\"10.0.0.0/8\"]").unwrap();
         assert!(item.is_value());
+    }
+
+    #[test]
+    fn default_template_includes_persistent_components() {
+        let template = settings::default_zay_toml();
+        assert!(template.contains("[proxy]"));
+        assert!(template.contains("[proxy.mesh]"));
+        assert!(template.contains("[[ssh]]"));
     }
 }

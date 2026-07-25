@@ -512,19 +512,9 @@ pub fn spawn_background_download(
                     return;
                 }
                 *config_json.write().expect("config lock") = json;
-                if settings.mesh_is_node() {
-                    eprintln!(
-                        "clash-rules updated on disk; restart `zay stack --mesh …` to apply \
-                         (hot reload disabled with --mesh)"
-                    );
-                    return;
-                }
-                if let Err(e) = crate::singbox::reload::reload_config(&settings)
-                {
-                    eprintln!("sing-box reload after rules update: {e:#}");
-                } else {
-                    eprintln!("clash-rules updated via proxy");
-                }
+                eprintln!(
+                    "clash-rules updated on disk; restart `zay run proxy` to apply"
+                );
             }
             Err(e) => eprintln!("rebuild config after rules update: {e:#}"),
         }
@@ -636,14 +626,16 @@ fn rule_download_clients(settings: &Settings) -> Result<Vec<Client>> {
     }
 
     if mixed_proxy_reachable(settings.mixed_port) {
-        return crate::mihomo::geo::http_clients_via_proxy(settings.mixed_port);
+        return crate::singbox::subscription::clients_via_mixed_proxy(
+            settings.mixed_port,
+        );
     }
 
     crate::singbox::subscription::wait_for_mixed_proxy(
         settings,
         Duration::from_secs(120),
     )?;
-    crate::mihomo::geo::http_clients_via_proxy(settings.mixed_port)
+    crate::singbox::subscription::clients_via_mixed_proxy(settings.mixed_port)
 }
 
 fn mixed_proxy_reachable(mixed_port: u16) -> bool {
@@ -732,11 +724,9 @@ mod tests {
             health_check_url: "https://example.com".into(),
             update_interval: 3600,
             tun_exclude_routes: Vec::new(),
-            external_controller: "127.0.0.1:19090".into(),
-            api_secret: "".into(),
-            mihomo_mixin: None,
-            singbox_mixin: None,
+            proxy_mixin: None,
             bootstrap_proxy: None,
+            domain_rule: Vec::new(),
             mesh: None,
             stack: crate::settings::StackFlags {
                 mesh: None,
@@ -792,11 +782,9 @@ mod tests {
             health_check_url: "https://example.com".into(),
             update_interval: 3600,
             tun_exclude_routes: Vec::new(),
-            external_controller: "127.0.0.1:19090".into(),
-            api_secret: "".into(),
-            mihomo_mixin: None,
-            singbox_mixin: None,
+            proxy_mixin: None,
             bootstrap_proxy: None,
+            domain_rule: Vec::new(),
             mesh: None,
             stack: crate::settings::StackFlags {
                 mesh: None,
@@ -854,12 +842,14 @@ pub mod subscription {
         let deadline = Instant::now() + timeout;
         eprintln!("waiting for sing-box mixed proxy before rules download…");
         loop {
-            if crate::mihomo::geo::http_client_via_proxy(settings.mixed_port)
-                .ok()
-                .and_then(|c| {
-                    c.get("http://cp.cloudflare.com/generate_204").send().ok()
-                })
-                .is_some()
+            if crate::singbox::subscription::client_via_mixed_proxy(
+                settings.mixed_port,
+            )
+            .ok()
+            .and_then(|c| {
+                c.get("http://cp.cloudflare.com/generate_204").send().ok()
+            })
+            .is_some()
             {
                 return Ok(());
             }
