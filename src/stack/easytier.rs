@@ -2,7 +2,7 @@
 
 use std::{fmt::Write as _, path::Path};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::settings::{MeshConfig, MeshRole};

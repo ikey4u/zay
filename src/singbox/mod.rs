@@ -13,6 +13,5 @@ pub mod tun_route;
 
 pub use assets::{resolve_binary, spawn};
 pub use builder::{build_config, config_has_tun};
-pub use mixin::merge_config;
 
 pub const VERSION: &str = env!("SINGBOX_VERSION");

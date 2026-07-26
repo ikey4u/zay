@@ -6,12 +6,7 @@ pub mod log_buf;
 pub mod mesh;
 
 use std::{
-    fs,
-    net::Ipv4Addr,
-    path::PathBuf,
-    sync::{Arc, RwLock},
-    thread,
-    time::Duration,
+    fs, net::Ipv4Addr, path::PathBuf, sync::Arc, thread, time::Duration,
 };
 
 use anyhow::{Context, Result, bail};
@@ -26,7 +21,7 @@ use crate::{
         self as zay_settings, MeshConfig, MeshRole, Settings, StackFlags,
         default_zay_toml,
     },
-    singbox::{self, assets, mixin, rules},
+    singbox::{self, assets, rules},
 };
 
 /// CLI value for `--mesh <relay|node>`.

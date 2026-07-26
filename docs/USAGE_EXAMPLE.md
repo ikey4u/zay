@@ -8,9 +8,11 @@ Examples:
    # background; logs: <data-dir>/logs/zay.log
    zay service start            # prompts for elevation only when configured stack needs TUN
    zay service status              # includes EasyTier peers and advertised mesh IPs
-   zay service logs --follow
    zay service stop
    ```
+
+   Inspect `<data-dir>/logs/zay.log`, `<data-dir>/logs/events.jsonl`, and
+   `<data-dir>/logs/singbox.raw.log` directly.
 
    `[[http]]`, `[[fwd]]`, and `[[ssh]]` define persistent services. Their
    `zay run` counterparts remain one-off foreground tools.

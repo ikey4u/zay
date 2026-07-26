@@ -2,22 +2,37 @@
 
 use std::{
     collections::BTreeMap,
-    fs::{self, OpenOptions},
+    fs::{self, File, OpenOptions},
     io::Write,
     path::Path,
-    sync::Mutex,
+    sync::{
+        Mutex,
+        mpsc::{SyncSender, TrySendError, sync_channel},
+    },
+    thread,
 };
 
 use chrono::Utc;
 use once_cell::sync::Lazy;
 use serde::Serialize;
 
+const LOG_QUEUE_CAPACITY: usize = 16_384;
+
 static WRITER: Lazy<Mutex<Option<Writer>>> = Lazy::new(|| Mutex::new(None));
 
 #[derive(Clone)]
 struct Writer {
-    log: std::path::PathBuf,
-    events: std::path::PathBuf,
+    sender: SyncSender<LogRecord>,
+}
+
+enum LogRecord {
+    Event {
+        event: String,
+        human: String,
+    },
+    SingboxRaw(String),
+    #[cfg(test)]
+    Flush(std::sync::mpsc::Sender<()>),
 }
 
 #[derive(Serialize)]
@@ -38,10 +53,14 @@ pub fn init(log_dir: &Path) {
     if fs::create_dir_all(log_dir).is_err() {
         return;
     }
-    let writer = Writer {
-        log: log_dir.join("zay.log"),
-        events: log_dir.join("events.jsonl"),
-    };
+    let (sender, receiver) = sync_channel(LOG_QUEUE_CAPACITY);
+    let paths = (
+        log_dir.join("zay.log"),
+        log_dir.join("events.jsonl"),
+        log_dir.join("singbox.raw.log"),
+    );
+    thread::spawn(move || write_records(receiver, paths));
+    let writer = Writer { sender };
     *WRITER.lock().expect("logging lock") = Some(writer);
 }
 
@@ -108,11 +127,9 @@ pub fn emit_with_source(
         eprintln!("{human}");
         return;
     };
-    append(
-        &writer.events,
-        &serde_json::to_string(&record).unwrap_or_else(|_| "{}".to_string()),
-    );
-    append(&writer.log, &human);
+    let event =
+        serde_json::to_string(&record).unwrap_or_else(|_| "{}".to_string());
+    enqueue(&writer, LogRecord::Event { event, human });
 }
 
 pub fn emit_external(component: &str, level: &str, message: &str) {
@@ -121,10 +138,69 @@ pub fn emit_external(component: &str, level: &str, message: &str) {
     emit_with(level, component, "external", message, None, fields);
 }
 
-fn append(path: &Path, text: &str) {
-    if let Ok(mut file) =
-        OpenOptions::new().create(true).append(true).open(path)
-    {
-        let _ = writeln!(file, "{text}");
+pub fn emit_singbox_raw(line: &str) {
+    let Some(writer) = WRITER.lock().expect("logging lock").clone() else {
+        return;
+    };
+    enqueue(&writer, LogRecord::SingboxRaw(line.to_string()));
+}
+
+#[cfg(test)]
+pub fn flush() {
+    let Some(writer) = WRITER.lock().expect("logging lock").clone() else {
+        return;
+    };
+    let (sender, receiver) = std::sync::mpsc::channel();
+    if writer.sender.send(LogRecord::Flush(sender)).is_ok() {
+        let _ = receiver.recv();
     }
+}
+
+fn enqueue(writer: &Writer, record: LogRecord) {
+    match writer.sender.try_send(record) {
+        Ok(())
+        | Err(TrySendError::Full(_))
+        | Err(TrySendError::Disconnected(_)) => {}
+    }
+}
+
+fn write_records(
+    receiver: std::sync::mpsc::Receiver<LogRecord>,
+    (log_path, event_path, raw_path): (
+        std::path::PathBuf,
+        std::path::PathBuf,
+        std::path::PathBuf,
+    ),
+) {
+    let Ok(mut log) = append_file(&log_path) else {
+        return;
+    };
+    let Ok(mut events) = append_file(&event_path) else {
+        return;
+    };
+    let Ok(mut raw) = append_file(&raw_path) else {
+        return;
+    };
+    while let Ok(record) = receiver.recv() {
+        match record {
+            LogRecord::Event { event, human } => {
+                let _ = writeln!(events, "{event}");
+                let _ = writeln!(log, "{human}");
+            }
+            LogRecord::SingboxRaw(line) => {
+                let _ = writeln!(raw, "{line}");
+            }
+            #[cfg(test)]
+            LogRecord::Flush(done) => {
+                let _ = log.flush();
+                let _ = events.flush();
+                let _ = raw.flush();
+                let _ = done.send(());
+            }
+        }
+    }
+}
+
+fn append_file(path: &Path) -> std::io::Result<File> {
+    OpenOptions::new().create(true).append(true).open(path)
 }

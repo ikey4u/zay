@@ -6,8 +6,8 @@ See `zay --help` for usage.
 
 `zay service start` starts components enabled in `zay.toml` after detaching
 from the terminal. It writes logs to
-`<data-dir>/logs/zay.log` and provides `zay service status`, `zay service logs --follow`, and
-`zay service stop`.
+`<data-dir>/logs/zay.log` and provides `zay service status` and `zay service stop`.
+Inspect `zay.log`, `events.jsonl`, or `singbox.raw.log` directly.
 
 The supervisor always runs as the invoking user. On macOS/Linux, if
 `[proxy].tun` is enabled, `zay service start` requests administrator authorization

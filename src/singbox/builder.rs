@@ -299,10 +299,12 @@ fn sniff_inbound_tags(settings: &Settings, tun_enabled: bool) -> Vec<String> {
     tags
 }
 
-fn sniff_route_rules(settings: &Settings, tun_enabled: bool) -> Vec<Value> {
+fn sniff_route_rules(_settings: &Settings, tun_enabled: bool) -> Vec<Value> {
     if !tun_enabled {
         return Vec::new();
     }
+    // sing-box 1.13 removed sniff_override_destination from route sniff actions.
+    // Domain association for logs relies on DNS IP→domain correlation instead.
     vec![json!({
         "action": "sniff",
         "sniffer": ["http", "tls", "quic"],

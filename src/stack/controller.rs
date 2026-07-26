@@ -175,7 +175,7 @@ fn run_stack_managed(
     logs: LogBuffer,
     pid_atom: Arc<AtomicU32>,
     status: Arc<Mutex<StackStatus>>,
-    mut sudo_password: Option<String>,
+    sudo_password: Option<String>,
 ) -> Result<()> {
     let flags = StackFlags {
         mesh: cli.mesh.map(crate::stack::MeshCliMode::into),

@@ -8,7 +8,7 @@ use crate::settings::Settings;
 
 pub fn convert_subscription(
     raw: &str,
-    settings: &Settings,
+    _settings: &Settings,
     sub_index: usize,
 ) -> Result<Vec<Value>> {
     let doc = parse_clash_yaml(raw)?;

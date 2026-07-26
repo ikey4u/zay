@@ -134,7 +134,7 @@ fn prepare_inner(settings: Settings, flags: StackFlags) -> Result<Prepared> {
     })?;
     eprintln!("config → {}", config_path.display());
 
-    let mut tun_enabled = singbox::tun_route::singbox_tun_enabled(&settings);
+    let tun_enabled = singbox::tun_route::singbox_tun_enabled(&settings);
     if tun_enabled
         && !settings.tun
         && !settings.stack.tun

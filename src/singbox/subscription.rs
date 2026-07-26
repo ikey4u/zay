@@ -1,7 +1,5 @@
 use std::{
-    fs,
-    path::Path,
-    thread,
+    fs, thread,
     time::{Duration, Instant},
 };
 
@@ -57,7 +55,7 @@ pub fn load_cached_nodes(settings: &Settings) -> Result<Vec<Value>> {
 
 fn fetch_subscription(
     url: &str,
-    settings: &Settings,
+    _settings: &Settings,
     bootstrap: Option<&BootstrapProxy>,
 ) -> Result<String> {
     let client = if let Some(bp) = bootstrap {

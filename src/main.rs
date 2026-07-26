@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 mod api;
 mod bootstrap;
 mod config;
@@ -140,8 +142,6 @@ pub enum ServiceCommand {
     Status,
     /// Request graceful shutdown of persistent services
     Stop,
-    /// Print persistent service logs
-    Logs(LogsCli),
     /// Inspect proxies available to persistent services
     Proxy(ServiceProxyCli),
 }
@@ -157,32 +157,18 @@ pub struct ServiceOpts {
     config: Option<std::path::PathBuf>,
 }
 
-#[derive(Args, Debug)]
-pub struct LogsCli {
-    /// Keep streaming new lines
-    #[arg(short, long)]
+// Internal filter shape retained for unit-tested event matching. It is no
+// longer exposed as a service subcommand; users inspect log files directly.
+#[derive(Debug)]
+struct LogsCli {
     follow: bool,
-    /// Match a domain or destination with a regular expression
-    #[arg(long)]
     domain: Option<String>,
-    /// Match an application with a regular expression
-    #[arg(long)]
     app: Option<String>,
-    /// Match an IP address with a regular expression
-    #[arg(long)]
     ip: Option<String>,
-    /// Match a proxy node with a regular expression
-    #[arg(long)]
     node: Option<String>,
-    /// Match the event level (trace, debug, info, warn, error)
-    #[arg(long)]
     level: Option<String>,
-    /// Match the complete structured log line with a regular expression
-    #[arg(long)]
     regex: Option<String>,
-    /// Read unparsed sing-box logs instead
-    #[arg(long)]
-    raw: bool,
+    text: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -312,9 +298,6 @@ fn run_service(service: ServiceCli) -> Result<()> {
         }
         ServiceCommand::Status => run_status(opts.data_dir, opts.config),
         ServiceCommand::Stop => run_stop(opts.data_dir, opts.config),
-        ServiceCommand::Logs(logs) => {
-            run_logs(opts.data_dir, opts.config, logs)
-        }
         ServiceCommand::Proxy(proxy) => match proxy.command {
             ServiceProxyCommand::List => run_service_proxy_list(&opts),
         },
@@ -394,19 +377,24 @@ fn print_mesh_status(response: &str) -> Result<()> {
         return Ok(());
     }
     for instance in instances {
+        println!("mesh:");
+        println!("  instance: {}", instance.instance_id);
         println!(
-            "instance {}: local mesh IP {}, {} connected peer(s), {} route(s)",
-            instance.instance_id,
-            instance.virtual_ipv4.as_deref().unwrap_or("(relay/no IP)"),
-            instance.connected_peers,
-            instance.routes
+            "  address: {}",
+            instance
+                .virtual_ipv4
+                .as_deref()
+                .unwrap_or("(relay; no mesh IP)")
         );
+        println!("  connected peers: {}", instance.connected_peers);
+        println!("  advertised routes: {}", instance.routes);
         if instance.peers.is_empty() {
-            println!("  no route-bearing peer nodes reported");
+            println!("  peers: none with advertised routes");
         } else {
+            println!("  peers:");
             for peer in instance.peers {
                 println!(
-                    "  {}  mesh IP {}  peer {}",
+                    "    - {} ({}) [transport peer ID: {}]",
                     peer.hostname.as_deref().unwrap_or("(unnamed)"),
                     peer.virtual_ipv4.as_deref().unwrap_or("?"),
                     peer.peer_id
@@ -470,17 +458,8 @@ fn run_logs(
     use std::{io::Read, thread, time::Duration};
 
     let paths = daemon::paths(data_dir.as_deref(), config.as_deref());
-    let path = if logs.raw {
-        paths.log_dir.join("singbox.raw.log")
-    } else {
-        paths.log_dir.join("events.jsonl")
-    };
+    let path = paths.log_dir.join("events.jsonl");
     let filters = LogFilters::from_cli(&logs)?;
-    if logs.raw && filters.has_fields() {
-        anyhow::bail!(
-            "--raw only supports --regex; structured field filters require events.jsonl"
-        );
-    }
     let mut offset = 0_u64;
     loop {
         let mut file = match std::fs::File::open(&path) {
@@ -511,8 +490,8 @@ fn run_logs(
         file.read_to_string(&mut text)?;
         if !text.is_empty() {
             for line in text.lines() {
-                if filters.matches(line, logs.raw) {
-                    println!("{}", render_log_line(line, logs.raw));
+                if filters.matches(line) {
+                    println!("{}", render_log_line(line));
                 }
             }
             offset += text.len() as u64;
@@ -532,62 +511,72 @@ struct LogFilters {
     node: Option<regex::Regex>,
     level: Option<regex::Regex>,
     regex: Option<regex::Regex>,
+    text: Option<String>,
 }
 
 impl LogFilters {
     fn from_cli(cli: &LogsCli) -> Result<Self> {
-        let compile =
-            |pattern: &Option<String>| -> Result<Option<regex::Regex>> {
-                pattern
-                    .as_deref()
-                    .map(regex::Regex::new)
-                    .transpose()
-                    .context("compiling log filter")
-            };
+        let compile = |pattern: &Option<String>,
+                       case_insensitive: bool|
+         -> Result<Option<regex::Regex>> {
+            pattern
+                .as_deref()
+                .map(|pattern| {
+                    let mut builder = regex::RegexBuilder::new(pattern);
+                    builder.case_insensitive(case_insensitive);
+                    builder.build()
+                })
+                .transpose()
+                .context("compiling log filter")
+        };
         Ok(Self {
-            domain: compile(&cli.domain)?,
-            app: compile(&cli.app)?,
-            ip: compile(&cli.ip)?,
-            node: compile(&cli.node)?,
-            level: compile(&cli.level)?,
-            regex: compile(&cli.regex)?,
+            domain: compile(&cli.domain, true)?,
+            app: compile(&cli.app, false)?,
+            ip: compile(&cli.ip, false)?,
+            node: compile(&cli.node, false)?,
+            level: compile(&cli.level, true)?,
+            regex: compile(&cli.regex, false)?,
+            text: cli.text.clone(),
         })
     }
 
-    fn has_fields(&self) -> bool {
-        self.domain.is_some()
-            || self.app.is_some()
-            || self.ip.is_some()
-            || self.node.is_some()
-            || self.level.is_some()
-    }
-
-    fn matches(&self, line: &str, raw: bool) -> bool {
-        if raw {
-            return self
-                .regex
-                .as_ref()
-                .is_none_or(|filter| filter.is_match(line));
-        }
+    fn matches(&self, line: &str) -> bool {
         let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
             return false;
         };
-        let field = |key: &str| event["fields"][key].as_str().unwrap_or("");
+        let field = |key: &str| -> &str {
+            event["fields"][key]
+                .as_str()
+                .or_else(|| event[key].as_str())
+                .unwrap_or("")
+        };
         let destination = field("destination");
-        let domain = field("domain");
-        let is_ip_destination = destination
-            .split(':')
-            .next()
-            .is_some_and(|host| host.parse::<std::net::IpAddr>().is_ok());
-        self.domain.as_ref().is_none_or(|filter| {
-            filter.is_match(domain)
-                || (!is_ip_destination && filter.is_match(destination))
-        }) && self
-            .app
+        let host = destination_host(destination);
+        let is_ip_destination =
+            host.is_some_and(|host| host.parse::<std::net::IpAddr>().is_ok());
+        let event_name = event["event"]
+            .as_str()
+            .or_else(|| event["kind"].as_str())
+            .unwrap_or("");
+        let domain_source = field("domain_source");
+        let direct_domain = match domain_source {
+            "dns" | "destination" => field("domain"),
+            // Historical records do not have provenance. DNS records are
+            // safe; connection records are not, because old fields could
+            // have been populated from IP correlation.
+            "" if event_name == "dns" => field("domain"),
+            _ => "",
+        };
+        self.domain
             .as_ref()
-            .is_none_or(|filter| filter.is_match(field("app")))
+            .is_none_or(|filter| filter.is_match(direct_domain))
+            && self
+                .app
+                .as_ref()
+                .is_none_or(|filter| filter.is_match(field("app")))
             && self.ip.as_ref().is_none_or(|filter| {
-                is_ip_destination && filter.is_match(destination)
+                is_ip_destination
+                    && host.is_some_and(|host| filter.is_match(host))
             })
             && self
                 .node
@@ -600,13 +589,33 @@ impl LogFilters {
                 .regex
                 .as_ref()
                 .is_none_or(|filter| filter.is_match(line))
+            && self.text.as_ref().is_none_or(|text| {
+                event["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains(text.as_str()))
+            })
     }
 }
 
-fn render_log_line(line: &str, raw: bool) -> String {
-    if raw {
-        return line.to_string();
+fn destination_host(destination: &str) -> Option<&str> {
+    let destination = destination.trim();
+    if destination.is_empty() {
+        return None;
     }
+    if let Some(rest) = destination.strip_prefix('[') {
+        return rest.split(']').next();
+    }
+    if destination.matches(':').count() == 1 {
+        return Some(
+            destination
+                .rsplit_once(':')
+                .map_or(destination, |(host, _)| host),
+        );
+    }
+    Some(destination)
+}
+
+fn render_log_line(line: &str) -> String {
     let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
         return line.to_string();
     };
@@ -633,14 +642,19 @@ fn render_log_line(line: &str, raw: bool) -> String {
                 rendered.push_str(&format!(" {key}={value:?}"));
             }
         }
-    }
-    if let Some(error) = event["error"].as_str() {
-        rendered.push_str(&format!(" error={error:?}"));
-    }
-    if event["component"].is_null() {
+    } else {
+        // Legacy top-level fields.
+        for key in ["app", "destination", "domain", "node"] {
+            if let Some(value) = event[key].as_str() {
+                rendered.push_str(&format!(" {key}={value:?}"));
+            }
+        }
         if let Some(message) = event["message"].as_str() {
             rendered.push_str(&format!(" message={message:?}"));
         }
+    }
+    if let Some(error) = event["error"].as_str() {
+        rendered.push_str(&format!(" error={error:?}"));
     }
     rendered
 }
@@ -678,5 +692,62 @@ mod tests {
         });
 
         assert_eq!(subscription_proxy_tags(&config).unwrap(), ["sg-1", "sg-2"]);
+    }
+
+    #[test]
+    fn domain_filter_requires_direct_domain_evidence() {
+        let filters = LogFilters::from_cli(&LogsCli {
+            follow: false,
+            domain: Some(r"^api2\.cursor\.sh$".into()),
+            app: None,
+            ip: None,
+            node: None,
+            level: None,
+            regex: None,
+            text: None,
+        })
+        .unwrap();
+        let with_port = r#"{"source":"singbox","level":"info","component":"proxy","event":"connection","message":"x","fields":{"destination":"api2.cursor.sh:443","domain":"api2.cursor.sh","domain_source":"destination"}}"#;
+        let with_alias = r#"{"source":"singbox","level":"info","component":"proxy","event":"connection","message":"x","fields":{"destination":"54.1.2.3:443","domain":"api2direct.cursor.sh","domains":"api2.cursor.sh,api2direct.cursor.sh","domain_source":"dns"}}"#;
+        let unrelated = r#"{"source":"singbox","level":"info","component":"proxy","event":"connection","message":"x","fields":{"destination":"example.com:443","domain":"example.com"}}"#;
+        assert!(filters.matches(with_port));
+        assert!(!filters.matches(with_alias));
+        assert!(!filters.matches(unrelated));
+    }
+
+    #[test]
+    fn ip_filter_supports_ipv6_hosts() {
+        let filters = LogFilters::from_cli(&LogsCli {
+            follow: false,
+            domain: None,
+            app: None,
+            ip: Some(r"^240e:".into()),
+            node: None,
+            level: None,
+            regex: None,
+            text: None,
+        })
+        .unwrap();
+        let line = r#"{"source":"singbox","level":"info","component":"proxy","event":"connection","message":"x","fields":{"destination":"[240e:3b5::1]:443"}}"#;
+        assert!(filters.matches(line));
+    }
+
+    #[test]
+    fn filters_accept_legacy_dns_but_not_connection_domain() {
+        let filters = LogFilters::from_cli(&LogsCli {
+            follow: false,
+            domain: Some("cursor".into()),
+            app: Some("cursor-agent".into()),
+            ip: None,
+            node: None,
+            level: None,
+            regex: None,
+            text: None,
+        })
+        .unwrap();
+        let legacy_connection = r#"{"source":"singbox","level":"info","kind":"connection","message":"x","app":"/Users/m9/.local/share/cursor-agent/versions/x/node","destination":"api2.cursor.sh:443","domain":"api2.cursor.sh","node":"sg-1"}"#;
+        let legacy_dns = r#"{"source":"singbox","level":"info","kind":"dns","message":"x","app":"/usr/sbin/mDNSResponder","destination":"114.114.114.114:53","domain":"api2.cursor.sh"}"#;
+        assert!(!filters.matches(legacy_connection));
+        assert!(filters.matches(legacy_dns));
     }
 }
