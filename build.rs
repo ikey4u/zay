@@ -3,6 +3,7 @@ use std::{
     fs::{self, File},
     io::{Read, Write, copy},
     path::{Path, PathBuf},
+    process::Command,
 };
 
 use sha2::{Digest, Sha256};
@@ -28,6 +29,23 @@ const WINDIVERT_URL: &str = "https://github.com/basil00/Divert/releases/download
 const WINDIVERT_SHA256: &str =
     "63cb41763bb4b20f600b6de04e991a9c2be73279e317d4d82f237b150c5f3f15";
 
+fn git_output(args: &[&str]) -> Option<String> {
+    let output = Command::new("git").args(args).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if text.is_empty() { None } else { Some(text) }
+}
+
+fn git_dirty() -> bool {
+    Command::new("git")
+        .args(["status", "--porcelain"])
+        .output()
+        .map(|output| output.status.success() && !output.stdout.is_empty())
+        .unwrap_or(false)
+}
+
 /// Strip zig/cargo glibc suffix (e.g. `.2.17`) from a target triple.
 fn normalize_target(target: &str) -> &str {
     target
@@ -38,7 +56,23 @@ fn normalize_target(target: &str) -> &str {
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=.git/HEAD");
+    println!("cargo:rerun-if-changed=.git/index");
+    println!("cargo:rerun-if-changed=src");
+    println!("cargo:rerun-if-changed=Cargo.toml");
+    println!("cargo:rerun-if-changed=Cargo.lock");
     println!("cargo:rerun-if-env-changed=TARGET");
+
+    let pkg_version =
+        env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".into());
+    let mut version = pkg_version.clone();
+    if let Some(commit) = git_output(&["rev-parse", "--short", "HEAD"]) {
+        version = format!("{pkg_version}-{commit}");
+        if git_dirty() {
+            version.push_str("+dirty");
+        }
+    }
+    println!("cargo:rustc-env=ZAY_VERSION={version}");
 
     let target_raw = env::var("TARGET").expect("TARGET not set by cargo");
     let target = normalize_target(&target_raw);

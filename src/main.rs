@@ -48,11 +48,13 @@ Persistent services:
 "#;
 
 const AFTER_HELP: &str = include_str!("../docs/USAGE_EXAMPLE.md");
+const ZAY_VERSION: &str = env!("ZAY_VERSION");
 
 /// Zay – simple network tool.
 #[derive(Parser, Debug)]
 #[clap(
     name = "zay",
+    version = ZAY_VERSION,
     author,
     about = "A simple network tool",
     long_about = LONG_ABOUT,
