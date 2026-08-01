@@ -27,6 +27,16 @@ Examples:
 
 2. Network stack — recommended: srv (relay hub) + clients (node + subscription)
 
+   Mesh CIDRs (e.g. `10.126.126.0/24`) are carried by EasyTier's own kernel TUN.
+   sing-box TUN (when `-s` is set) excludes those CIDRs and only handles proxy traffic.
+   Mesh **node** needs root for that TUN: use `sudo zay run …`, or `zay service start`
+   (prompts once for sudo, then elevates the daemon with cached credentials).
+   Nodes also listen on `tcp/udp :11010` by default so same-LAN peers can form a
+   direct tunnel; otherwise bulk transfers stay on the public relay (~1 MB/s).
+   Runtime files under the data dir are re-owned to `$SUDO_USER` so
+   `zay service stop` / `status` / log reads still work without sudo.
+   If stop fails after an older elevated run, use `sudo zay service stop`.
+
    # srv
    zay run proxy --mesh relay --mesh-auth "${NET}:${SECRET}" --mesh-ip 10.126.126.1/24
 

@@ -48,8 +48,8 @@ pub fn resolve_privilege_wrapper() -> Result<PathBuf> {
 }
 
 /// Authenticate before daemonizing so the detached supervisor never needs a
-/// terminal. The subsequently spawned sing-box TUN worker reuses sudo's
-/// per-user credential timestamp and is the only process started as root.
+/// terminal. For mesh **node**, the daemon itself is elevated (EasyTier TUN).
+/// Otherwise only the subsequently spawned sing-box TUN worker runs as root.
 pub fn preflight_tun_worker() -> Result<()> {
     if is_root() {
         return Ok(());
@@ -151,6 +151,18 @@ fn wrapper_is_sudo(wrapper: &Path) -> bool {
         .is_some_and(|name| name == "sudo" || name.ends_with("sudo"))
 }
 
+/// Build `sudo -S program …` for elevating a daemon with a piped password.
+///
+/// Do **not** `setsid` before this sudo: macOS `tty_tickets` makes `sudo -n`
+/// fail in a new session, and a detached `-S` child often cannot finish auth.
+/// Call [`crate::daemon::become_session_leader`] inside `--run-daemon` instead.
+pub fn command_for_elevated_daemon(
+    program: &Path,
+    password: Option<&str>,
+) -> Result<(Command, bool)> {
+    command_for_program_with_password(program, true, password)
+}
+
 /// Build `sudo program …` when TUN needs root; otherwise `program …`.
 pub fn command_for_program(
     program: &Path,
@@ -186,7 +198,10 @@ pub fn command_for_program_with_password(
             );
         }
         let mut cmd = Command::new(wrapper);
-        cmd.arg("-S").arg(&program).stdin(Stdio::piped());
+        // -p "" suppresses the Password: prompt on the redirected stderr log.
+        cmd.args(["-S", "-p", ""])
+            .arg(&program)
+            .stdin(Stdio::piped());
         return Ok((cmd, true));
     }
 
@@ -194,6 +209,33 @@ pub fn command_for_program_with_password(
     cmd.arg(program);
     Ok((cmd, false))
 }
+
+/// When the daemon runs as root via `sudo`, return the invoking user's uid/gid.
+#[cfg(unix)]
+pub fn sudo_invoker_ids() -> Option<(u32, u32)> {
+    if !is_root() {
+        return None;
+    }
+    let uid = std::env::var("SUDO_UID").ok()?.parse().ok()?;
+    let gid = std::env::var("SUDO_GID").ok()?.parse().ok()?;
+    if uid == 0 {
+        return None;
+    }
+    Some((uid, gid))
+}
+
+/// Re-own a path created under an elevated daemon so the invoking user can
+/// still `service stop` / read logs / read `config.json` without sudo.
+#[cfg(unix)]
+pub fn restore_invoker_ownership(path: &Path) {
+    let Some((uid, gid)) = sudo_invoker_ids() else {
+        return;
+    };
+    let _ = std::os::unix::fs::chown(path, Some(uid), Some(gid));
+}
+
+#[cfg(not(unix))]
+pub fn restore_invoker_ownership(_path: &Path) {}
 
 /// Write `password` (+ newline) to a piped sudo stdin after spawn.
 pub fn write_password_stdin(

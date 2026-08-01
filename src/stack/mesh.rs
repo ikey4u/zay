@@ -10,6 +10,14 @@ use crate::settings::{MeshConfig, MeshRole, Settings};
 pub const DEFAULT_RELAY_LISTENERS: &[&str] =
     &["tcp://0.0.0.0:11010", "udp://0.0.0.0:11010"];
 
+/// Default **node** listeners so LAN peers can form a direct tunnel.
+///
+/// Without these, nodes only dial the public relay and mesh bulk traffic
+/// (e.g. `scp` to `10.126.x`) stays on the VPS path (~1 MB/s) even when both
+/// machines are on the same LAN.
+pub const DEFAULT_NODE_LISTENERS: &[&str] =
+    &["tcp://0.0.0.0:11010", "udp://0.0.0.0:11010"];
+
 /// Parsed `--mesh-auth` (shape depends on relay vs node).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MeshAuth {
@@ -23,6 +31,13 @@ pub struct MeshAuth {
 
 pub fn default_relay_listeners() -> Vec<String> {
     DEFAULT_RELAY_LISTENERS
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect()
+}
+
+pub fn default_node_listeners() -> Vec<String> {
+    DEFAULT_NODE_LISTENERS
         .iter()
         .map(|s| (*s).to_string())
         .collect()
@@ -267,16 +282,14 @@ pub fn warn_mesh_role(mesh: &MeshConfig) {
     if mesh.role == MeshRole::Relay && has_peers {
         eprintln!("warn: [mesh].peers should be empty when role = \"relay\"");
     }
-    if mesh.role == MeshRole::Node && has_listeners && has_peers {
-        eprintln!(
-            "warn: [mesh] has both listeners and peers — unusual for role = \"node\"; \
-             typical: relay has listeners, nodes have peers"
-        );
-    }
+    // Nodes commonly have both: listeners for LAN P2P + peers pointing at the relay.
     if mesh.is_relay() && has_listeners {
         eprintln!("mesh relay: listening on :11010 (no mesh virtual IP)");
     } else if mesh.is_node() && has_peers {
-        eprintln!("mesh node: virtual IP {ipv4}; dial relay via [mesh].peers");
+        eprintln!(
+            "mesh node: virtual IP {ipv4}; dial relay via [mesh].peers; \
+             listen on :11010 for LAN P2P"
+        );
         if ipv4.contains("10.126.126.2") {
             eprintln!(
                 "warn: hub is usually 10.126.126.1/24 — .2 is typically the weapon/client; \

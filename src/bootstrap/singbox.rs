@@ -132,6 +132,8 @@ fn prepare_inner(settings: Settings, flags: StackFlags) -> Result<Prepared> {
     std::fs::write(&config_path, &config_json).with_context(|| {
         format!("writing config to {}", config_path.display())
     })?;
+    crate::privilege::restore_invoker_ownership(&config_path);
+    crate::privilege::restore_invoker_ownership(&settings.singbox_dir());
     eprintln!("config → {}", config_path.display());
 
     let tun_enabled = singbox::tun_route::singbox_tun_enabled(&settings);
@@ -187,5 +189,6 @@ pub fn refresh_config(
     fs::write(settings.config_path(), &config_json).with_context(|| {
         format!("writing config to {}", settings.config_path().display())
     })?;
+    crate::privilege::restore_invoker_ownership(&settings.config_path());
     Ok(config_json)
 }

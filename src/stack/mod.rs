@@ -5,9 +5,7 @@ pub mod easytier;
 pub mod log_buf;
 pub mod mesh;
 
-use std::{
-    fs, net::Ipv4Addr, path::PathBuf, sync::Arc, thread, time::Duration,
-};
+use std::{fs, path::PathBuf, sync::Arc, thread, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
@@ -29,7 +27,7 @@ use crate::{
 pub enum MeshCliMode {
     /// Public rendezvous / optional hub; sing-box TUN is forced off.
     Relay,
-    /// Join the virtual network (requires `--mesh-ip` + TUN + local WG portal).
+    /// Join the virtual network (requires `--mesh-ip`; EasyTier creates a kernel TUN)
     Node,
 }
 
@@ -46,7 +44,7 @@ const LONG_ABOUT: &str = "\
 Run the network stack: sing-box (mixed proxy + optional system TUN) and optional EasyTier mesh.
 
 With -s/--proxy, Loyalsoldier rules send GFW domains to Proxy and CN/private to direct. \
-With --mesh node, mesh CIDRs go via a local WireGuard portal (easytier-wg). \
+With --mesh node, EasyTier owns a kernel TUN for mesh CIDRs (sing-box excludes them). \
 With --mesh relay, this host is a rendezvous (TUN off; optional --mesh-ip hub).";
 
 #[derive(Args, Debug)]
@@ -123,14 +121,14 @@ pub fn run(cli: StackCli) -> Result<()> {
             let mesh_proxy = !prepared.settings.subscriptions.is_empty();
             if mesh_proxy {
                 eprintln!(
-                    "mesh client + proxy: full TUN for gfw/Proxy (10.x → easytier-wg); \
-                     EasyTier control plane stays on physical NIC (zay process + relay/STUN bypass)"
+                    "mesh client + proxy: full TUN for gfw/Proxy; EasyTier TUN owns mesh_routes \
+                     (sing-box excludes them); control plane stays on physical NIC"
                 );
-            } else if crate::singbox::tun_route::tun_selective_mesh_routes(
+            } else if crate::singbox::tun_route::mesh_only_no_proxy(
                 &prepared.settings,
             ) {
                 eprintln!(
-                    "mesh client: TUN captures only [mesh].mesh_routes (relay SSH + public traffic stay on physical NIC)"
+                    "mesh client: EasyTier TUN owns mesh_routes; sing-box TUN disabled (no proxy)"
                 );
                 if let Some(routes) = prepared
                     .settings
@@ -139,21 +137,8 @@ pub fn run(cli: StackCli) -> Result<()> {
                     .and_then(|m| m.mesh_routes.as_ref())
                 {
                     eprintln!(
-                        "mesh client: route_address → {}",
+                        "mesh client: EasyTier routes → {}",
                         routes.join(", ")
-                    );
-                }
-                if let Some(portal) =
-                    prepared.settings.mesh.as_ref().and_then(|m| {
-                        crate::stack::mesh::portal_client_host_cidr(m)
-                    })
-                {
-                    let tun = prepared.settings.mesh.as_ref().and_then(|m| {
-                        crate::stack::mesh::portal_tun_prefix_cidr(m)
-                    });
-                    eprintln!(
-                        "mesh client: WG portal host {portal}, TUN prefix {} (TCP replies route back via mesh; portal /32 must be unique per node)",
-                        tun.as_deref().unwrap_or("?")
                     );
                 }
             } else if prepared.settings.stack.gateway {
@@ -188,19 +173,10 @@ pub fn run(cli: StackCli) -> Result<()> {
                     .to_string()
             })?;
         } else if cfg.is_node() {
-            let wg_listen =
-                cfg.wireguard_listen.as_deref().unwrap_or("127.0.0.1:51820");
-            match crate::singbox::tun_route::wait_for_wireguard_port(
-                wg_listen,
-                std::time::Duration::from_secs(10),
-            ) {
-                Ok(()) => {}
-                Err(e) => {
-                    eprintln!(
-                        "warn: {e:#} — continuing; mesh 10.x via easytier-wg may be down until portal is up"
-                    );
-                }
-            }
+            // Match relay listener wait; native TUN address can take a few seconds.
+            easytier::wait_for_virtual_ip(std::time::Duration::from_secs(30))
+                .context("EasyTier mesh TUN not ready")?;
+            eprintln!("mesh node: EasyTier virtual IP ready");
         }
         if std::env::var("ZAY_MESH_REQUIRE_PEERS").ok().as_deref() == Some("1")
         {
@@ -634,7 +610,8 @@ fn build_mesh_config_from_cli(
                 peers: Some(vec![auth.endpoint]),
                 proxy_networks: None,
                 mesh_routes: Some(vec![ipv4_network_cidr(ipv4)?]),
-                wireguard_listen: Some("127.0.0.1:51820".into()),
+                // Node uses EasyTier kernel TUN; WG portal is relay-hub only.
+                wireguard_listen: None,
                 wireguard_client_cidr: None,
                 wireguard_client_address: None,
             })
@@ -654,13 +631,11 @@ pub(crate) fn log_mesh_effective_config(settings: &Settings) {
         mesh.peers.as_deref().unwrap_or(&[]),
         mesh.mesh_routes.as_deref().unwrap_or(&[]),
     );
-    if mesh.is_node()
-        || mesh.is_relay()
-            && mesh.ipv4.as_deref().is_some_and(|s| !s.trim().is_empty())
-    {
-        if let Some(portal) = mesh::portal_client_host_cidr(mesh) {
+    if mesh.is_node() {
+        if let Some(routes) = mesh.mesh_routes.as_ref() {
             eprintln!(
-                "mesh config: WG portal client {portal} (unique per node ipv4 last octet)"
+                "mesh config: EasyTier TUN owns routes → {}",
+                routes.join(", ")
             );
         }
     }
@@ -751,25 +726,9 @@ fn stack_config_paths(common: &ProxyOpts) -> (PathBuf, PathBuf) {
 }
 
 fn ipv4_network_cidr(cidr: &str) -> Result<String> {
-    let (addr, prefix) = cidr.split_once('/').with_context(|| {
+    zay_settings::ipv4_network_cidr(cidr).with_context(|| {
         format!("--mesh-ip must be CIDR notation, got {cidr:?}")
-    })?;
-    let addr: Ipv4Addr = addr
-        .parse()
-        .with_context(|| format!("invalid IPv4 address in {cidr:?}"))?;
-    let prefix: u32 = prefix
-        .parse()
-        .with_context(|| format!("invalid IPv4 prefix in {cidr:?}"))?;
-    if prefix > 32 {
-        bail!("invalid IPv4 prefix in {cidr:?}: must be <= 32");
-    }
-    let ip = u32::from(addr);
-    let mask = if prefix == 0 {
-        0
-    } else {
-        u32::MAX << (32 - prefix)
-    };
-    Ok(format!("{}/{}", Ipv4Addr::from(ip & mask), prefix))
+    })
 }
 
 pub fn validate(settings: &Settings) -> Result<()> {
@@ -818,7 +777,8 @@ pub fn validate(settings: &Settings) -> Result<()> {
             let routes = mesh.mesh_routes.as_deref().unwrap_or(&[]);
             if routes.is_empty() {
                 bail!(
-                    "[mesh].mesh_routes is required for role = \"node\" (e.g. [\"10.126.126.0/24\"])"
+                    "[mesh].mesh_routes is required for role = \"node\" \
+                     (set [mesh].ipv4 so routes can be derived, or set mesh_routes explicitly)"
                 );
             }
             if mesh.ipv4.as_deref().unwrap_or("").trim().is_empty() {
@@ -833,10 +793,14 @@ pub fn validate(settings: &Settings) -> Result<()> {
                     "[mesh].peers or [mesh].listeners required for role = \"node\""
                 );
             }
-            if !flags.tun {
+            // Mesh-only: EasyTier owns the TUN; sing-box TUN is optional/off.
+            // Mesh + subscription (or --gateway): sing-box TUN is required for proxy.
+            if !flags.tun
+                && !crate::singbox::tun_route::mesh_only_no_proxy(settings)
+            {
                 bail!(
-                    "`zay run proxy --mesh node` requires sing-box TUN (omit --no-tun); \
-                     use role = \"relay\" on the VPS only"
+                    "`zay run proxy --mesh node` with a subscription (or --gateway) \
+                     requires sing-box TUN (omit --no-tun); mesh-only may use --no-tun"
                 );
             }
             mesh::warn_mesh_role(mesh);

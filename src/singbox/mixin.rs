@@ -167,26 +167,24 @@ mod tests {
     }
 
     #[test]
-    fn mixin_does_not_shadow_mesh_routes() {
+    fn mixin_keeps_mesh_exclude_and_private_direct() {
         let settings = mesh_settings();
         let base =
             crate::singbox::builder::build_config(&settings, false).unwrap();
         let merged = merge_config(&base, &settings).unwrap();
         let doc: Value = serde_json::from_str(&merged).unwrap();
-        let rules = doc["route"]["rules"].as_array().unwrap();
+        // Mesh-only (no subscription): sing-box TUN is off — EasyTier owns mesh.
         assert!(
-            crate::singbox::mesh::is_peer_bypass_route_rule(
-                &rules[0], &settings
-            ) || crate::singbox::mesh::is_mesh_route_rule(&rules[0])
+            doc["inbounds"]
+                .as_array()
+                .map(|a| !a
+                    .iter()
+                    .any(|i| i.get("type").and_then(|t| t.as_str())
+                        == Some("tun")))
+                .unwrap_or(true)
         );
-        let mesh_idx = rules
-            .iter()
-            .position(|rule| crate::singbox::mesh::is_mesh_route_rule(rule))
-            .unwrap();
-        assert_eq!(
-            rules[mesh_idx]["outbound"].as_str(),
-            Some(crate::singbox::mesh::MESH_ENDPOINT_TAG)
-        );
+        assert!(!merged.contains("easytier-wg"));
+        let rules = doc["route"]["rules"].as_array().unwrap();
         assert!(rules.iter().any(|rule| {
             rule.get("outbound").and_then(|v| v.as_str()) == Some("direct")
                 && rule.get("ip_is_private").and_then(|v| v.as_bool())

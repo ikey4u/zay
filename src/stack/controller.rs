@@ -303,12 +303,8 @@ fn start_mesh_if_needed(
             std::time::Duration::from_secs(30),
         )?;
     } else if cfg.is_node() {
-        let wg_listen =
-            cfg.wireguard_listen.as_deref().unwrap_or("127.0.0.1:51820");
-        let _ = crate::singbox::tun_route::wait_for_wireguard_port(
-            wg_listen,
-            std::time::Duration::from_secs(10),
-        );
+        easytier::wait_for_virtual_ip(std::time::Duration::from_secs(30))?;
+        logs.push("EasyTier virtual IP ready".to_string());
     }
     easytier::spawn_mesh_peer_watch(cfg.clone());
     Ok(true)

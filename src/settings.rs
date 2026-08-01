@@ -34,9 +34,9 @@ pub struct MeshConfig {
     pub listeners: Option<Vec<String>>,
     pub peers: Option<Vec<String>>,
     pub proxy_networks: Option<Vec<String>>,
-    /// Zay-only: mesh CIDRs routed to EasyTier WireGuard endpoint in the proxy.
+    /// Zay-only: mesh CIDRs owned by EasyTier kernel TUN (excluded from sing-box).
     pub mesh_routes: Option<Vec<String>>,
-    /// Local WireGuard portal listen (`host:port`). Default `127.0.0.1:51820` when mesh runs with proxy.
+    /// Local WireGuard portal listen (`host:port`). Used by hub-style relay only.
     pub wireguard_listen: Option<String>,
     /// Portal client CIDR (EasyTier `vpn_portal_config.client_cidr`).
     pub wireguard_client_cidr: Option<String>,
@@ -60,29 +60,63 @@ fn derive_node_mesh_routes(mesh: &mut Option<MeshConfig>) -> Result<()> {
     let Some(cidr) = mesh.ipv4.as_deref() else {
         return Ok(());
     };
+    mesh.mesh_routes = Some(vec![ipv4_network_cidr(cidr)?]);
+    Ok(())
+}
+
+/// Network prefix for a host CIDR (`10.1.2.3/16` → `10.1.0.0/16`).
+pub fn ipv4_network_cidr(cidr: &str) -> Result<String> {
     let (address, prefix) = cidr.split_once('/').with_context(|| {
-        format!("proxy.mesh.ipv4 must use CIDR notation, got {cidr:?}")
+        format!("mesh ipv4 must use CIDR notation, got {cidr:?}")
     })?;
     let address: Ipv4Addr = address
         .parse()
-        .with_context(|| format!("invalid proxy.mesh.ipv4 address {cidr:?}"))?;
+        .with_context(|| format!("invalid mesh ipv4 address {cidr:?}"))?;
     let prefix: u32 = prefix
         .parse()
-        .with_context(|| format!("invalid proxy.mesh.ipv4 prefix {cidr:?}"))?;
+        .with_context(|| format!("invalid mesh ipv4 prefix {cidr:?}"))?;
     if prefix > 32 {
-        bail!("invalid proxy.mesh.ipv4 prefix {prefix}: must be <= 32");
+        bail!("invalid mesh ipv4 prefix {prefix}: must be <= 32");
     }
     let mask = if prefix == 0 {
         0
     } else {
         u32::MAX << (32 - prefix)
     };
-    mesh.mesh_routes = Some(vec![format!(
+    Ok(format!(
         "{}/{}",
         Ipv4Addr::from(u32::from(address) & mask),
         prefix
-    )]);
-    Ok(())
+    ))
+}
+
+/// CIDRs that sing-box TUN must exclude so EasyTier owns mesh traffic.
+///
+/// Prefer explicit `[mesh].mesh_routes`; otherwise derive the network from `[mesh].ipv4`.
+/// Never assumes a fixed `10.126.126.0/24`.
+pub fn mesh_tun_exclude_cidrs(mesh: &MeshConfig) -> Result<Vec<String>> {
+    if !mesh.enabled || mesh.role != MeshRole::Node {
+        return Ok(Vec::new());
+    }
+    if let Some(routes) = mesh.mesh_routes.as_ref() {
+        let routes: Vec<String> = routes
+            .iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !routes.is_empty() {
+            return Ok(routes);
+        }
+    }
+    if let Some(ipv4) = mesh
+        .ipv4
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return Ok(vec![ipv4_network_cidr(ipv4)?]);
+    }
+    Ok(Vec::new())
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -238,9 +272,9 @@ pub struct BootstrapProxy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MeshRole {
-    /// Public rendezvous only: no virtual mesh IP, no WG portal.
+    /// Public rendezvous only: no virtual mesh IP (optional hub ipv4 + portal).
     Relay,
-    /// Full mesh member: virtual IP, WG portal, proxy routes `mesh_routes`.
+    /// Full mesh member: virtual IP on EasyTier TUN; sing-box excludes `mesh_routes`.
     Node,
 }
 
@@ -373,31 +407,52 @@ pub fn sudo_invoker_home() -> Option<PathBuf> {
     None
 }
 
-fn xdg_config_home(home: &Path) -> PathBuf {
-    std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".config"))
+fn with_invoker_home_for_dirs<T>(f: impl FnOnce() -> T) -> T {
+    let Some(home) = sudo_invoker_home() else {
+        return f();
+    };
+    let saved_home = std::env::var_os("HOME");
+    let saved_xdg_config = std::env::var_os("XDG_CONFIG_HOME");
+    let saved_xdg_cache = std::env::var_os("XDG_CACHE_HOME");
+    // dirs_next reads HOME / XDG_*. Under sudo those often point at root; point
+    // them at the invoking user for this lookup only (startup / path resolve).
+    unsafe {
+        std::env::set_var("HOME", &home);
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_CACHE_HOME");
+    }
+    let out = f();
+    unsafe {
+        restore_env("HOME", saved_home);
+        restore_env("XDG_CONFIG_HOME", saved_xdg_config);
+        restore_env("XDG_CACHE_HOME", saved_xdg_cache);
+    }
+    out
+}
+
+unsafe fn restore_env(key: &str, value: Option<std::ffi::OsString>) {
+    unsafe {
+        match value {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+    }
 }
 
 pub fn default_data_dir() -> PathBuf {
-    if let Some(home) = sudo_invoker_home() {
-        return xdg_config_home(&home).join("zay");
-    }
-    dirs_next::config_dir()
-        .map(|p| p.join("zay"))
-        .unwrap_or_else(|| std::env::temp_dir().join("zay"))
+    with_invoker_home_for_dirs(|| {
+        dirs_next::config_dir()
+            .map(|p| p.join("zay"))
+            .unwrap_or_else(|| std::env::temp_dir().join("zay"))
+    })
 }
 
 pub fn default_cache_dir() -> PathBuf {
-    if let Some(home) = sudo_invoker_home() {
-        let cache = std::env::var_os("XDG_CACHE_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".cache"));
-        return cache.join("zay");
-    }
-    dirs_next::cache_dir()
-        .unwrap_or_else(std::env::temp_dir)
-        .join("zay")
+    with_invoker_home_for_dirs(|| {
+        dirs_next::cache_dir()
+            .unwrap_or_else(std::env::temp_dir)
+            .join("zay")
+    })
 }
 
 fn load_zay_toml(path: &Path) -> Result<ZayFile> {
@@ -773,6 +828,57 @@ local_forwards = ["3308:db.internal:3306"]
     }
 
     #[test]
+    fn mesh_tun_exclude_derives_any_prefix_from_ipv4() {
+        let mesh = MeshConfig {
+            enabled: true,
+            role: MeshRole::Node,
+            instance_name: None,
+            network_name: "test".into(),
+            network_secret: "secret".into(),
+            dhcp: None,
+            ipv4: Some("10.99.1.5/16".into()),
+            listeners: None,
+            peers: None,
+            proxy_networks: None,
+            mesh_routes: None,
+            wireguard_listen: None,
+            wireguard_client_cidr: None,
+            wireguard_client_address: None,
+        };
+        assert_eq!(
+            mesh_tun_exclude_cidrs(&mesh).unwrap(),
+            vec!["10.99.0.0/16".to_string()]
+        );
+    }
+
+    #[test]
+    fn mesh_tun_exclude_prefers_explicit_mesh_routes() {
+        let mesh = MeshConfig {
+            enabled: true,
+            role: MeshRole::Node,
+            instance_name: None,
+            network_name: "test".into(),
+            network_secret: "secret".into(),
+            dhcp: None,
+            ipv4: Some("10.99.1.5/16".into()),
+            listeners: None,
+            peers: None,
+            proxy_networks: None,
+            mesh_routes: Some(vec![
+                "172.31.0.0/20".into(),
+                "10.8.0.0/24".into(),
+            ]),
+            wireguard_listen: None,
+            wireguard_client_cidr: None,
+            wireguard_client_address: None,
+        };
+        assert_eq!(
+            mesh_tun_exclude_cidrs(&mesh).unwrap(),
+            vec!["172.31.0.0/20".to_string(), "10.8.0.0/24".to_string()]
+        );
+    }
+
+    #[test]
     fn cleanup_removes_orphan_provider_caches() {
         let dir = std::env::temp_dir()
             .join(format!("zay-test-{}", std::process::id()));
@@ -785,5 +891,17 @@ local_forwards = ["3308:db.internal:3306"]
         assert!(providers.join("sub0.yaml").is_file());
         assert!(!providers.join("sub2.yaml").exists());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn default_data_dir_uses_dirs_next_config_dir() {
+        // Non-root: must be exactly dirs_next::config_dir()/zay (no hand-rolled paths).
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let expected = dirs_next::config_dir()
+            .map(|p| p.join("zay"))
+            .expect("dirs_next::config_dir");
+        assert_eq!(default_data_dir(), expected);
     }
 }

@@ -7,6 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use anyhow::{Result, bail};
 use serde_json::{Value, json};
 
 use crate::{settings::Settings, stack::mesh};
@@ -53,7 +54,7 @@ const DEFAULT_EXCLUDES: &[&str] = &[
     "255.255.255.255/32",
 ];
 
-pub fn tun_exclude_addresses(settings: &Settings) -> Vec<String> {
+pub fn tun_exclude_addresses(settings: &Settings) -> Result<Vec<String>> {
     let mut excludes: Vec<String> =
         DEFAULT_EXCLUDES.iter().map(|s| (*s).to_string()).collect();
     excludes.extend(settings.tun_exclude_routes.iter().cloned());
@@ -65,6 +66,25 @@ pub fn tun_exclude_addresses(settings: &Settings) -> Vec<String> {
         );
     }
     excludes.extend(peer_excludes);
+    // EasyTier owns mesh CIDRs on its edge TUN — derive from mesh_routes or ipv4.
+    // Fail hard when sing-box full TUN would otherwise capture the same CIDRs.
+    if let Some(mesh) = settings.mesh.as_ref() {
+        let routes = crate::settings::mesh_tun_exclude_cidrs(mesh)?;
+        if routes.is_empty() {
+            if singbox_tun_enabled(settings) && settings.mesh_is_node() {
+                bail!(
+                    "mesh node with sing-box TUN requires [mesh].mesh_routes or \
+                     [mesh].ipv4 so mesh CIDRs can be excluded from the proxy TUN"
+                );
+            }
+        } else {
+            eprintln!(
+                "tun exclude: EasyTier mesh routes (from config) → {}",
+                routes.join(", ")
+            );
+            excludes.extend(routes);
+        }
+    }
     if tun_full_capture_mesh_proxy(settings) {
         let stun = mesh::easytier_stun_exclude_cidrs();
         if !stun.is_empty() {
@@ -95,7 +115,7 @@ pub fn tun_exclude_addresses(settings: &Settings) -> Vec<String> {
     excludes.sort();
     excludes.dedup();
     filter_fakeip_route_excludes(settings, &mut excludes);
-    excludes
+    Ok(excludes)
 }
 
 /// FakeIP pool used with Loyalsoldier + sing-box TUN (must not appear in `route_exclude_address`).
@@ -164,7 +184,18 @@ pub fn singbox_tun_enabled(settings: &Settings) -> bool {
     if settings.mesh_is_relay() {
         return false;
     }
+    // Mesh-only (no proxy subscription): EasyTier owns the TUN; sing-box needs none.
+    if mesh_only_no_proxy(settings) {
+        return false;
+    }
     true
+}
+
+/// Mesh node without proxy subscriptions — no sing-box TUN required.
+pub fn mesh_only_no_proxy(settings: &Settings) -> bool {
+    settings.mesh_is_node()
+        && settings.subscriptions.is_empty()
+        && !settings.stack.gateway
 }
 
 pub fn tun_auto_route(_settings: &Settings) -> bool {
@@ -173,7 +204,7 @@ pub fn tun_auto_route(_settings: &Settings) -> bool {
 
 /// Full-capture TUN: `system` stack (Linux + macOS). `mixed` on macOS often breaks TCP (curl → :80 refused).
 pub fn tun_stack(settings: &Settings) -> &'static str {
-    if singbox_tun_enabled(settings) && !tun_selective_mesh_routes(settings) {
+    if singbox_tun_enabled(settings) && !mesh_only_no_proxy(settings) {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             return "system";
@@ -191,7 +222,7 @@ pub fn tun_auto_redirect(settings: &Settings) -> bool {
         }
         return singbox_tun_enabled(settings)
             && tun_auto_route(settings)
-            && !tun_selective_mesh_routes(settings);
+            && !mesh_only_no_proxy(settings);
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -217,21 +248,16 @@ fn next_address_host(cidr: &str) -> Option<String> {
     Some(Ipv4Addr::from(u32::from(addr).saturating_add(1)).to_string())
 }
 
-/// Mesh client: only `[mesh].mesh_routes` on TUN — not 0.0.0.0/0 (keeps SSH + relay on physical NIC).
+/// Mesh client without proxy: historically captured only `[mesh].mesh_routes` on sing-box TUN.
+/// With native EasyTier TUN, sing-box does not capture mesh CIDRs (`mesh_only_no_proxy`).
 ///
 /// With `--proxy` / `-s`, use full TUN for transparent proxy; EasyTier control plane is kept off TUN
-/// via `route_exclude_address` (relay/STUN) and a `process_name → direct` rule for the `zay` binary.
+/// via `route_exclude_address` (relay/STUN/mesh_routes) and a `process_name → direct` rule for `zay`.
 pub fn tun_selective_mesh_routes(settings: &Settings) -> bool {
-    if !settings.mesh_is_node() || settings.stack.gateway {
-        return false;
-    }
-    if !settings.subscriptions.is_empty() {
-        return false;
-    }
-    settings.mesh_is_node()
+    mesh_only_no_proxy(settings)
 }
 
-/// `--mesh node` with subscription: full TUN for gfw/Proxy, mesh CIDR via `easytier-wg` route rules.
+/// `--mesh node` with subscription: full TUN for gfw/Proxy; mesh CIDRs excluded for EasyTier TUN.
 pub fn tun_full_capture_mesh_proxy(settings: &Settings) -> bool {
     singbox_tun_enabled(settings)
         && settings.mesh_is_node()
@@ -239,19 +265,13 @@ pub fn tun_full_capture_mesh_proxy(settings: &Settings) -> bool {
         && !settings.stack.gateway
 }
 
-pub fn tun_route_address(settings: &Settings) -> Option<Vec<String>> {
-    if !tun_selective_mesh_routes(settings) {
-        return None;
-    }
-    let routes = settings.mesh.as_ref()?.mesh_routes.as_ref()?;
-    if routes.is_empty() {
-        return None;
-    }
-    Some(routes.clone())
+/// Mesh traffic no longer enters sing-box — EasyTier edge TUN owns `mesh_routes`.
+pub fn tun_route_address(_settings: &Settings) -> Option<Vec<String>> {
+    None
 }
 
-pub fn is_selective_mesh_tun(settings: &Settings) -> bool {
-    singbox_tun_enabled(settings) && tun_route_address(settings).is_some()
+pub fn is_selective_mesh_tun(_settings: &Settings) -> bool {
+    false
 }
 
 /// Log TUN routing knobs from the generated sing-box JSON (helps debug relay SSH drops).
@@ -1167,8 +1187,111 @@ en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST>
             },
         };
         assert!(!tun_strict_route(&settings));
-        let ex = tun_exclude_addresses(&settings);
+        let ex = tun_exclude_addresses(&settings).unwrap();
         assert!(ex.iter().any(|c| c == "192.168.0.0/16"));
+        assert!(ex.iter().any(|c| c == "10.126.126.0/24"));
+        assert!(!singbox_tun_enabled(&settings));
+        assert_eq!(tun_route_address(&settings), None);
+    }
+
+    #[test]
+    fn mesh_exclude_derives_from_ipv4_when_routes_unset() {
+        use std::path::PathBuf;
+
+        use crate::settings::{MeshConfig, MeshRole, Settings, StackFlags};
+
+        let settings = Settings {
+            subscriptions: vec!["https://example.com/sub".into()],
+            data_dir: PathBuf::from("/tmp"),
+            mixed_port: 7890,
+            allow_lan: false,
+            tun: true,
+            log_level: "info".into(),
+            health_check_url: "https://example.com".into(),
+            update_interval: 3600,
+            tun_exclude_routes: Vec::new(),
+            proxy_mixin: None,
+            bootstrap_proxy: None,
+            domain_rule: Vec::new(),
+            mesh: Some(MeshConfig {
+                enabled: true,
+                role: MeshRole::Node,
+                instance_name: None,
+                network_name: "n".into(),
+                network_secret: "s".into(),
+                dhcp: None,
+                ipv4: Some("10.55.1.9/16".into()),
+                listeners: None,
+                peers: None,
+                proxy_networks: None,
+                mesh_routes: None,
+                wireguard_listen: None,
+                wireguard_client_cidr: None,
+                wireguard_client_address: None,
+            }),
+            stack: StackFlags {
+                mesh: Some(MeshRole::Node),
+                gateway: false,
+                tun: true,
+                no_rules: false,
+            },
+        };
+        let ex = tun_exclude_addresses(&settings).unwrap();
+        assert!(
+            ex.iter().any(|c| c == "10.55.0.0/16"),
+            "expected derived mesh exclude in {ex:?}"
+        );
+    }
+
+    #[test]
+    fn mesh_proxy_without_routes_fails_exclude() {
+        use std::path::PathBuf;
+
+        use crate::settings::{MeshConfig, MeshRole, Settings, StackFlags};
+
+        let settings = Settings {
+            subscriptions: vec!["https://example.com/sub".into()],
+            data_dir: PathBuf::from("/tmp"),
+            mixed_port: 7890,
+            allow_lan: false,
+            tun: true,
+            log_level: "info".into(),
+            health_check_url: "https://example.com".into(),
+            update_interval: 3600,
+            tun_exclude_routes: Vec::new(),
+            proxy_mixin: None,
+            bootstrap_proxy: None,
+            domain_rule: Vec::new(),
+            mesh: Some(MeshConfig {
+                enabled: true,
+                role: MeshRole::Node,
+                instance_name: None,
+                network_name: "n".into(),
+                network_secret: "s".into(),
+                dhcp: None,
+                ipv4: None,
+                listeners: None,
+                peers: None,
+                proxy_networks: None,
+                mesh_routes: None,
+                wireguard_listen: None,
+                wireguard_client_cidr: None,
+                wireguard_client_address: None,
+            }),
+            stack: StackFlags {
+                mesh: Some(MeshRole::Node),
+                gateway: false,
+                tun: true,
+                no_rules: false,
+            },
+        };
+        assert!(singbox_tun_enabled(&settings));
+        let err = tun_exclude_addresses(&settings).unwrap_err();
+        assert!(
+            err.to_string().contains("mesh_routes")
+                || err.to_string().contains("ipv4"),
+            "unexpected error: {err:#}"
+        );
     }
 
     #[test]

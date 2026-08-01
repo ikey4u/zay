@@ -131,7 +131,7 @@ pub fn build_value(settings: &Settings, has_rules: bool) -> Result<Value> {
             "auto_route": auto_route,
             "strict_route": tun_route::tun_strict_route(settings),
             "stack": tun_route::tun_stack(settings),
-            "route_exclude_address": tun_route::tun_exclude_addresses(settings)
+            "route_exclude_address": tun_route::tun_exclude_addresses(settings)?
         });
         if let Some(addrs) = tun_route::tun_route_address(settings) {
             tun["route_address"] = json!(addrs);
@@ -439,9 +439,9 @@ mod tests {
     }
 
     #[test]
-    fn mesh_enables_wireguard_endpoint_and_tun() {
+    fn mesh_excludes_routes_from_singbox_tun() {
         let settings = Settings {
-            subscriptions: Vec::new(),
+            subscriptions: vec!["https://example.com/sub".into()],
             data_dir: PathBuf::from("/tmp/zay-singbox-test"),
             mixed_port: 17890,
             allow_lan: false,
@@ -478,22 +478,17 @@ mod tests {
         };
 
         let json = build_config(&settings, false).unwrap();
-        assert!(json.contains("\"easytier-wg\""));
-        assert!(json.contains("\"type\": \"wireguard\""));
+        assert!(!json.contains("\"easytier-wg\""));
+        assert!(!json.contains("\"type\": \"wireguard\""));
         assert!(json.contains("10.126.126.0/24"));
         assert!(json.contains("\"type\": \"tun\""));
         assert!(json.contains("\"auto_route\": true"));
-        assert!(json.contains("\"route_address\""));
+        assert!(json.contains("\"route_exclude_address\""));
+        // Mesh CIDR must be excluded so EasyTier edge TUN owns it.
         assert!(json.contains("10.126.126.0/24"));
-        assert!(json.contains("10.14.14.37/32"));
-        assert!(json.contains("10.14.14.37/30"));
         assert!(json.contains(&tun_route::tun_address(&settings)));
-        assert!(json.contains("\"port\": 53"));
-        assert!(json.contains("\"action\": \"route\""));
-        assert!(json.contains("\"network\": \"icmp\""));
-        assert!(json.contains("\"tcp\""));
-        assert!(json.contains("\"system\": false"));
-        assert!(json.contains("127.0.0.1"));
+        assert_eq!(tun_route::tun_route_address(&settings), None);
+        assert!(!json.contains("\"system\": false"));
     }
 
     #[test]

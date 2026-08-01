@@ -23,7 +23,7 @@ use tokio::{
 
 use crate::settings;
 
-const READY_WAIT: Duration = Duration::from_secs(10);
+const READY_WAIT: Duration = Duration::from_secs(45);
 
 #[derive(Clone, Debug)]
 pub struct Paths {
@@ -52,6 +52,9 @@ pub fn paths(data_dir: Option<&Path>, config: Option<&Path>) -> Paths {
 }
 
 /// Re-exec Zay in a new process/session and wait until it owns the runtime lock.
+///
+/// When `[proxy.mesh] role = "node"`, the daemon itself is elevated so in-process
+/// EasyTier can create a kernel TUN (sing-box then runs as the same root user).
 pub fn spawn(
     data_dir: Option<PathBuf>,
     config: Option<PathBuf>,
@@ -67,38 +70,88 @@ pub fn spawn(
 
     let exe =
         std::env::current_exe().context("locating current zay executable")?;
+    let elevate_daemon = {
+        #[cfg(unix)]
+        {
+            mesh_node_requires_daemon_elevation(
+                data_dir.as_deref(),
+                config.as_deref(),
+            )?
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    };
+    if elevate_daemon {
+        eprintln!(
+            "mesh node: elevating daemon so EasyTier can create its kernel TUN"
+        );
+    }
+
     let log = open_log(&paths.log)?;
     let log_err = log.try_clone().context("cloning daemon log handle")?;
-    let mut command = Command::new(exe);
+
+    // Resolve paths as the *invoking* user, then always pass them through so an
+    // elevated child does not re-derive defaults under a different HOME.
+    let (resolved_data_dir, resolved_config) =
+        settings::stack_config_paths(data_dir.as_deref(), config.as_deref());
+
+    // Mesh node: elevate with `sudo -S` + password pipe. Do NOT setsid first —
+    // macOS tty_tickets makes `sudo -n` fail in a new session.
+    // `--run-daemon` calls become_session_leader() after sudo has exec'd zay.
+    let (mut command, write_password) = if elevate_daemon {
+        crate::privilege::command_for_elevated_daemon(
+            &exe,
+            sudo_password.as_deref(),
+        )?
+    } else {
+        (Command::new(&exe), false)
+    };
     command
         .arg("--run-daemon")
+        .arg("--data-dir")
+        .arg(&resolved_data_dir)
+        .arg("--config")
+        .arg(&resolved_config)
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err));
-    // The daemon is detached, but a TUN worker may still need sudo during
-    // startup. Keep the invoking terminal's stdin only long enough for sudo
-    // to authenticate; after that the daemon and worker do not depend on it.
     #[cfg(unix)]
-    command.stdin(Stdio::inherit());
+    command.stdin(if write_password {
+        Stdio::piped()
+    } else if elevate_daemon {
+        Stdio::null()
+    } else {
+        Stdio::inherit()
+    });
     #[cfg(not(unix))]
     command.stdin(Stdio::null());
-    if let Some(dir) = data_dir {
-        command.arg("--data-dir").arg(dir);
-    }
-    if let Some(file) = config {
-        command.arg("--config").arg(file);
-    }
-    let password_file = if let Some(password) = sudo_password {
-        let path = paths
-            .run_dir
-            .join(format!(".sudo-password-{}", std::process::id()));
-        write_sudo_password(&path, &password)?;
-        command.env("ZAY_SUDO_PASSWORD_FILE", &path);
-        Some(path)
+    // Only pass a sudo password file when the daemon stays unprivileged and
+    // sing-box alone needs elevation.
+    let password_file = if !elevate_daemon {
+        if let Some(password) = sudo_password.as_ref() {
+            let path = paths
+                .run_dir
+                .join(format!(".sudo-password-{}", std::process::id()));
+            write_sudo_password(&path, password)?;
+            command.env("ZAY_SUDO_PASSWORD_FILE", &path);
+            Some(path)
+        } else {
+            None
+        }
     } else {
         None
     };
-    detach(&mut command)?;
+    if !elevate_daemon {
+        detach(&mut command)?;
+    }
     let mut child = command.spawn().context("starting daemon process")?;
+    if write_password {
+        let password = sudo_password
+            .as_deref()
+            .context("sudo password missing for elevated daemon")?;
+        crate::privilege::write_password_stdin(&mut child, password)?;
+    }
 
     let deadline = Instant::now() + READY_WAIT;
     loop {
@@ -114,6 +167,12 @@ pub fn spawn(
             child.try_wait().context("checking daemon startup")?
         {
             remove_sudo_password(password_file.as_deref());
+            if elevate_daemon {
+                bail!(
+                    "elevated daemon exited during startup ({status}); see {}",
+                    paths.log.display()
+                );
+            }
             bail!(
                 "daemon exited during startup ({status}); see {}",
                 paths.log.display()
@@ -128,6 +187,17 @@ pub fn spawn(
         }
         thread::sleep(Duration::from_millis(50));
     }
+}
+
+fn mesh_node_requires_daemon_elevation(
+    data_dir: Option<&Path>,
+    config: Option<&Path>,
+) -> Result<bool> {
+    let cfg = settings::load_persistent_config(data_dir, config)?;
+    Ok(cfg
+        .mesh
+        .as_ref()
+        .is_some_and(|mesh| mesh.enabled && mesh.is_node()))
 }
 
 /// Fail fast before collecting credentials or starting a detached process.
@@ -187,8 +257,11 @@ pub struct Guard {
 
 impl Guard {
     pub fn mark_ready(&self) -> Result<()> {
-        fs::write(&self.paths.ready, "ready\n")
-            .with_context(|| format!("writing {}", self.paths.ready.display()))
+        fs::write(&self.paths.ready, "ready\n").with_context(|| {
+            format!("writing {}", self.paths.ready.display())
+        })?;
+        crate::privilege::restore_invoker_ownership(&self.paths.ready);
+        Ok(())
     }
 }
 
@@ -215,6 +288,7 @@ pub async fn start_control(
     let addr = listener.local_addr().context("reading control address")?;
     fs::write(&paths.control, format!("{}\n", addr.port()))
         .with_context(|| format!("writing {}", paths.control.display()))?;
+    crate::privilege::restore_invoker_ownership(&paths.control);
 
     Ok(tokio::spawn(async move {
         let mut shutdown = Some(shutdown);
@@ -296,6 +370,7 @@ pub fn remove_control(paths: &Paths) {
 
 /// Claim the singleton runtime from the re-executed daemon process.
 pub fn enter(data_dir: Option<&Path>, config: Option<&Path>) -> Result<Guard> {
+    become_session_leader()?;
     let paths = paths(data_dir, config);
     fs::create_dir_all(&paths.run_dir)
         .with_context(|| format!("creating {}", paths.run_dir.display()))?;
@@ -308,9 +383,36 @@ pub fn enter(data_dir: Option<&Path>, config: Option<&Path>) -> Result<Guard> {
         .open(&paths.lock)
         .with_context(|| format!("creating {}", paths.lock.display()))?;
     writeln!(lock, "{}", std::process::id())?;
+    crate::privilege::restore_invoker_ownership(&paths.lock);
     fs::write(&paths.pid, format!("{}\n", std::process::id()))
         .with_context(|| format!("writing {}", paths.pid.display()))?;
+    crate::privilege::restore_invoker_ownership(&paths.pid);
+    crate::privilege::restore_invoker_ownership(&paths.run_dir);
+    crate::privilege::restore_invoker_ownership(&paths.log_dir);
     Ok(Guard { paths })
+}
+
+/// Detach from the controlling terminal after elevated `sudo` has already exec'd.
+///
+/// Parent skips `setsid` when spawning `sudo -S` (auth needs the pipe / TTY ticket);
+/// the daemon itself becomes a session leader here instead.
+#[cfg(unix)]
+pub fn become_session_leader() -> Result<()> {
+    let rc = unsafe { libc::setsid() };
+    if rc == -1 {
+        let err = std::io::Error::last_os_error();
+        // Already a session leader (parent detached us) — fine.
+        if err.raw_os_error() == Some(libc::EPERM) {
+            return Ok(());
+        }
+        return Err(err).context("setsid for daemon session");
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn become_session_leader() -> Result<()> {
+    Ok(())
 }
 
 pub fn status(

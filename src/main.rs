@@ -345,22 +345,27 @@ fn subscription_proxy_tags(config: &serde_json::Value) -> Result<Vec<String>> {
         .collect())
 }
 
-/// Keep the persistent supervisor unprivileged. When configured, only the
-/// proxy child that owns TUN/routing is elevated after service detachment.
+/// Keep the persistent supervisor unprivileged when only sing-box needs TUN.
+/// Mesh **node** elevates the whole daemon so in-process EasyTier can create its
+/// kernel TUN; sing-box then inherits root and skips a nested sudo.
 #[cfg(unix)]
 fn preflight_persistent_tun(opts: &ServiceOpts) -> Result<Option<String>> {
     let cfg = settings::load_persistent_config(
         opts.data_dir.as_deref(),
         opts.config.as_deref(),
     )?;
+    let mesh_node_needs_root = cfg
+        .mesh
+        .as_ref()
+        .is_some_and(|mesh| mesh.enabled && mesh.is_node());
     let relay_forces_tun_off = cfg
         .mesh
         .as_ref()
         .is_some_and(|mesh| mesh.role == settings::MeshRole::Relay);
-    if (cfg.stack.enabled || cfg.mesh.is_some())
+    let singbox_needs_root = (cfg.stack.enabled || cfg.mesh.is_some())
         && cfg.stack.tun.enabled
-        && !relay_forces_tun_off
-    {
+        && !relay_forces_tun_off;
+    if mesh_node_needs_root || singbox_needs_root {
         return privilege::daemon_tun_password();
     }
     Ok(None)
@@ -395,11 +400,20 @@ fn print_mesh_status(response: &str) -> Result<()> {
         } else {
             println!("  peers:");
             for peer in instance.peers {
+                let mut detail = format!("transport peer ID: {}", peer.peer_id);
+                if let Some(path) = peer.path.as_deref() {
+                    detail.push_str(&format!(", path: {path}"));
+                }
+                if let Some(ms) = peer.latency_ms {
+                    detail.push_str(&format!(", latency: {ms}ms"));
+                }
+                if let Some(tunnel) = peer.tunnel.as_deref() {
+                    detail.push_str(&format!(", tunnel: {tunnel}"));
+                }
                 println!(
-                    "    - {} ({}) [transport peer ID: {}]",
+                    "    - {} ({}) [{detail}]",
                     peer.hostname.as_deref().unwrap_or("(unnamed)"),
                     peer.virtual_ipv4.as_deref().unwrap_or("?"),
-                    peer.peer_id
                 );
             }
         }
