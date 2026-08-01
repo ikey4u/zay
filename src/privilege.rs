@@ -1,7 +1,9 @@
+#[cfg(unix)]
+use std::{io, process::Stdio};
 use std::{
-    io::{self, Write},
+    io::Write,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Command,
 };
 
 use anyhow::{Context, Result, bail};
@@ -20,11 +22,18 @@ fn command_in_path(program: &str) -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(unix)]
 pub fn is_root() -> bool {
     unsafe { libc::geteuid() == 0 }
 }
 
+#[cfg(not(unix))]
+pub fn is_root() -> bool {
+    false
+}
+
 /// Resolve `sudo` or `doas`, preferring well-known absolute paths (Linux PATH is often minimal).
+#[cfg(unix)]
 pub fn resolve_privilege_wrapper() -> Result<PathBuf> {
     for candidate in ["/usr/bin/sudo", "/bin/sudo", "/usr/local/bin/sudo"] {
         let path = PathBuf::from(candidate);
@@ -47,9 +56,15 @@ pub fn resolve_privilege_wrapper() -> Result<PathBuf> {
     bail!(NO_ELEVATION_TOOL_MSG);
 }
 
+#[cfg(not(unix))]
+pub fn resolve_privilege_wrapper() -> Result<PathBuf> {
+    bail!("privilege elevation wrappers are only supported on Unix");
+}
+
 /// Authenticate before daemonizing so the detached supervisor never needs a
 /// terminal. For mesh **node**, the daemon itself is elevated (EasyTier TUN).
 /// Otherwise only the subsequently spawned sing-box TUN worker runs as root.
+#[cfg(unix)]
 pub fn preflight_tun_worker() -> Result<()> {
     if is_root() {
         return Ok(());
@@ -73,6 +88,11 @@ pub fn preflight_tun_worker() -> Result<()> {
             wrapper.display()
         );
     }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn preflight_tun_worker() -> Result<()> {
     Ok(())
 }
 
@@ -104,6 +124,11 @@ pub fn daemon_tun_password() -> Result<Option<String>> {
         bail!("TUN elevation was not authorized");
     }
     Ok(Some(password))
+}
+
+#[cfg(not(unix))]
+pub fn daemon_tun_password() -> Result<Option<String>> {
+    Ok(None)
 }
 
 #[cfg(unix)]
@@ -188,26 +213,38 @@ pub fn command_for_program_with_password(
         return Ok((Command::new(program), false));
     }
 
-    let wrapper = resolve_privilege_wrapper()?;
-
-    if password.is_some() {
-        if !wrapper_is_sudo(&wrapper) {
-            bail!(
-                "non-interactive admin password requires sudo; found {}",
-                wrapper.display()
-            );
-        }
-        let mut cmd = Command::new(wrapper);
-        // -p "" suppresses the Password: prompt on the redirected stderr log.
-        cmd.args(["-S", "-p", ""])
-            .arg(&program)
-            .stdin(Stdio::piped());
-        return Ok((cmd, true));
+    #[cfg(not(unix))]
+    {
+        let _ = password;
+        bail!(
+            "elevating a child process via sudo/doas is only supported on Unix; \
+             on Windows use the elevated TUN worker path"
+        );
     }
 
-    let mut cmd = Command::new(wrapper);
-    cmd.arg(program);
-    Ok((cmd, false))
+    #[cfg(unix)]
+    {
+        let wrapper = resolve_privilege_wrapper()?;
+
+        if password.is_some() {
+            if !wrapper_is_sudo(&wrapper) {
+                bail!(
+                    "non-interactive admin password requires sudo; found {}",
+                    wrapper.display()
+                );
+            }
+            let mut cmd = Command::new(wrapper);
+            // -p "" suppresses the Password: prompt on the redirected stderr log.
+            cmd.args(["-S", "-p", ""])
+                .arg(&program)
+                .stdin(Stdio::piped());
+            return Ok((cmd, true));
+        }
+
+        let mut cmd = Command::new(wrapper);
+        cmd.arg(program);
+        Ok((cmd, false))
+    }
 }
 
 /// When the daemon runs as root via `sudo`, return the invoking user's uid/gid.

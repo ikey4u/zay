@@ -337,6 +337,7 @@ mod imp {
             MeshRole::Node => {
                 #[cfg(target_os = "linux")]
                 super::clear_stale_easytier_iface()?;
+                #[cfg(unix)]
                 if !crate::privilege::is_root() {
                     anyhow::bail!(
                         "mesh node uses EasyTier kernel TUN and requires root \

@@ -16,7 +16,6 @@ mod stack;
 mod windows_tun_worker;
 mod yaml;
 
-#[cfg(unix)]
 mod privilege;
 
 use anyhow::{Context, Result};

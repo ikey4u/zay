@@ -1,6 +1,6 @@
 [package]
 name = "zay"
-version = "0.9.0"
+version = "0.10.0"
 edition = "2024"
 description = "A simple network tool"
 repository = "https://github.com/ikey4u/zay"

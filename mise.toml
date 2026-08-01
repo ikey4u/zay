@@ -89,7 +89,7 @@ export RUSTFLAGS="$REMAP"
 cargo build --release
 """
 
-[tasks."macos:build-for:linux-x64"]
+[tasks."macos:build:linux-x64"]
 description = "Cross-build Linux x64 via cargo-zigbuild (glibc 2.17)"
 depends = ["setup:zig"]
 run = """
@@ -107,10 +107,10 @@ test -f "$BIN" || {
 }
 """
 
-[tasks."macos:build-for:windows-x64"]
+[tasks."macos:build:windows-x64"]
 description = "Cross-build Windows x64 via cargo-zigbuild + mingw"
 depends = ["setup:zig", "check:mingw"]
-alias = ["macos:build-for:window-x64"]
+alias = ["macos:build:window-x64"]
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
@@ -125,7 +125,7 @@ BIN="target/${TARGET_WINDOWS_X64}/release/zay.exe"
 test -f "$BIN"
 """
 
-[tasks."macos:build-for:macos-arm64"]
+[tasks."macos:build:macos-arm64"]
 description = "Release build for aarch64-apple-darwin"
 depends = ["setup"]
 run = """
@@ -140,71 +140,23 @@ BIN="target/${TARGET_MACOS_ARM64}/release/zay"
 test -f "$BIN"
 """
 
-[tasks.pkg]
-description = "Sequential cross-builds + zip artifacts under dist/"
-alias = ["cross-build"]
-# Sequential on purpose (avoid parallel cargo/zig races).
-# Requires on macOS: zig, cargo-zigbuild, mingw-w64.
+[tasks."macos:build:all"]
+description = "macOS host: release macOS/Linux/Windows without embedding $HOME paths"
+# Requires: zig, cargo-zigbuild, mingw-w64, ripgrep.
+# See scripts/cross_build_on_macos.sh (CARGO_HOME + remap-path-prefix + strip + verify).
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="${MISE_PROJECT_ROOT:-$PWD}"
-cd "$ROOT"
+exec bash "${ROOT}/scripts/cross_build_on_macos.sh"
+"""
 
-mise run check:zig
-mise run check:mingw
-mise run macos:build-for:macos-arm64
-mise run macos:build-for:linux-x64
-mise run macos:build-for:windows-x64
-
-VERSION="$(sed -n 's/^version = "\\(.*\\)"/\\1/p' Cargo.toml | head -1)"
-ZIP_MACOS_ARM64="zay-macos-arm64-v${VERSION}.zip"
-ZIP_LINUX_X64="zay-linux-x64-v${VERSION}.zip"
-ZIP_WINDOWS_X64="zay-windows-x64-v${VERSION}.zip"
-BIN_MACOS_ARM64="target/${TARGET_MACOS_ARM64}/release/zay"
-BIN_LINUX_X64="target/${TARGET_LINUX_X64}/release/zay"
-BIN_WINDOWS_X64="target/${TARGET_WINDOWS_X64}/release/zay.exe"
-
-mkdir -p "$DIST_DIR"
-
-zip_binary() {
-  local zip_name="$1" bin_path="$2"
-  test -f "$bin_path" || { echo "missing binary: $bin_path" >&2; exit 1; }
-  rm -f "${DIST_DIR}/${zip_name}"
-  (
-    cd "$(dirname "$bin_path")"
-    zip -j "${ROOT}/${DIST_DIR}/${zip_name}" "$(basename "$bin_path")"
-  )
-}
-
-zip_windows_binary() {
-  local zip_name="$1" bin_path="$2"
-  test -f "$bin_path" || { echo "missing binary: $bin_path" >&2; exit 1; }
-  rm -f "${DIST_DIR}/${zip_name}"
-  tmpdir="$(mktemp -d)"
-  trap 'rm -rf "$tmpdir"' RETURN
-  cp "$bin_path" "$tmpdir/"
-  packet_dll="$(
-    find "target/${TARGET_WINDOWS_X64}/release/build" -type f \\
-      -path '*/windows-runtime/Packet.dll' 2>/dev/null | head -1
-  )"
-  runtime_dir="${packet_dll%/Packet.dll}"
-  if [ -z "$packet_dll" ] || [ ! -f "$runtime_dir/wintun.dll" ] || [ ! -f "$runtime_dir/WinDivert64.sys" ]; then
-    echo "missing generated Windows runtime under target/${TARGET_WINDOWS_X64}/release/build/*/out/windows-runtime" >&2
-    exit 1
-  fi
-  for file in Packet.dll wintun.dll WinDivert64.sys; do
-    cp "$runtime_dir/$file" "$tmpdir/"
-  done
-  (
-    cd "$tmpdir"
-    zip -j "${ROOT}/${DIST_DIR}/${zip_name}" *
-  )
-}
-
-zip_binary "$ZIP_MACOS_ARM64" "$BIN_MACOS_ARM64"
-zip_binary "$ZIP_LINUX_X64" "$BIN_LINUX_X64"
-zip_windows_binary "$ZIP_WINDOWS_X64" "$BIN_WINDOWS_X64"
-
-echo "packaged (v${VERSION}): ${DIST_DIR}/${ZIP_MACOS_ARM64} ${DIST_DIR}/${ZIP_LINUX_X64} ${DIST_DIR}/${ZIP_WINDOWS_X64}"
+[tasks.pkg]
+description = "Alias of macos:build:all (cross-builds + zip under dist/)"
+alias = ["cross-build"]
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="${MISE_PROJECT_ROOT:-$PWD}"
+exec bash "${ROOT}/scripts/cross_build_on_macos.sh"
 """
