@@ -22,6 +22,54 @@ pub fn loyalsoldier_yaml_to_singbox_source(raw: &str) -> Result<String> {
             || "expected top-level `payload:` list in clash-rules file",
         )?;
 
+    let mut lines = Vec::new();
+    for item in payload {
+        if let Some(line) = item.as_str() {
+            lines.push(line.to_string());
+        }
+    }
+    lines_to_singbox_source(&lines)
+}
+
+/// Convert well-known rule list text into sing-box source rule-set JSON.
+///
+/// Supported:
+/// - sing-box source JSON (`{"version":4,"rules":[…]}`)
+/// - Loyalsoldier / Clash `payload:` YAML
+/// - Shadowrocket / Clash / QuantumultX rule lines (`DOMAIN-SUFFIX,…`)
+/// - Plain domain / `+.suffix` / CIDR lists (one per line)
+pub fn rule_text_to_singbox_source(raw: &str) -> Result<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        bail!("rule text is empty");
+    }
+    if trimmed.starts_with('<') {
+        bail!("rule body looks like HTML");
+    }
+
+    if trimmed.starts_with('{') {
+        if is_valid_singbox_ruleset_json(trimmed) {
+            return Ok(trimmed.to_string());
+        }
+        bail!("JSON is not a valid sing-box rule-set");
+    }
+
+    // Clash payload YAML
+    if trimmed.contains("payload:") {
+        if let Ok(json) = loyalsoldier_yaml_to_singbox_source(trimmed) {
+            return Ok(json);
+        }
+    }
+
+    let lines: Vec<String> = trimmed
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect();
+    lines_to_singbox_source(&lines)
+}
+
+fn lines_to_singbox_source(lines: &[String]) -> Result<String> {
     let mut domain_suffix = Vec::new();
     let mut domain = Vec::new();
     let mut domain_keyword = Vec::new();
@@ -29,8 +77,7 @@ pub fn loyalsoldier_yaml_to_singbox_source(raw: &str) -> Result<String> {
     let mut ip_cidr = Vec::new();
     let mut process_name = Vec::new();
 
-    for item in payload {
-        let Some(line) = item.as_str() else { continue };
+    for line in lines {
         classify_line(
             line.trim(),
             &mut domain_suffix,
@@ -51,7 +98,7 @@ pub fn loyalsoldier_yaml_to_singbox_source(raw: &str) -> Result<String> {
     push_chunks(&mut rules, "process_name", &process_name);
 
     if rules.is_empty() {
-        bail!("no rules extracted from payload");
+        bail!("no rules extracted");
     }
 
     let doc = json!({
@@ -129,19 +176,23 @@ fn classify_line(
     }
 
     if let Some(rest) = line.strip_prefix("DOMAIN-SUFFIX,") {
-        domain_suffix.push(normalize_suffix(rest.trim()));
+        let host = rest.split(',').next().unwrap_or(rest).trim();
+        domain_suffix.push(normalize_suffix(host));
         return;
     }
     if let Some(rest) = line.strip_prefix("DOMAIN,") {
-        domain.push(rest.trim().to_string());
+        let host = rest.split(',').next().unwrap_or(rest).trim();
+        domain.push(host.to_string());
         return;
     }
     if let Some(rest) = line.strip_prefix("DOMAIN-KEYWORD,") {
-        domain_keyword.push(rest.trim().to_string());
+        let kw = rest.split(',').next().unwrap_or(rest).trim();
+        domain_keyword.push(kw.to_string());
         return;
     }
     if let Some(rest) = line.strip_prefix("DOMAIN-REGEX,") {
-        domain_regex.push(rest.trim().to_string());
+        let re = rest.split(',').next().unwrap_or(rest).trim();
+        domain_regex.push(re.to_string());
         return;
     }
     if let Some(rest) = line.strip_prefix("IP-CIDR,") {
@@ -156,6 +207,22 @@ fn classify_line(
         if looks_like_cidr(cidr) {
             ip_cidr.push(cidr.to_string());
         }
+        return;
+    }
+
+    // Skip policy / UA / URL rules that are not domain/IP matchers.
+    let upper = line.to_ascii_uppercase();
+    if upper.starts_with("USER-AGENT,")
+        || upper.starts_with("URL-REGEX,")
+        || upper.starts_with("SCRIPT,")
+        || upper.starts_with("AND,")
+        || upper.starts_with("OR,")
+        || upper.starts_with("NOT,")
+        || upper.starts_with("GEOIP,")
+        || upper.starts_with("FINAL,")
+        || upper.starts_with("MATCH,")
+        || upper.starts_with("RULE-SET,")
+    {
         return;
     }
 

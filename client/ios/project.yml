@@ -1,0 +1,95 @@
+name: Zay
+options:
+  bundleIdPrefix: dev.zay
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+  xcodeVersion: "15.0"
+
+# Parent app ID. Every embedded binary MUST use this as a prefix:
+#   app:       dev.zay.ios
+#   extension: dev.zay.ios.tunnel
+#   ZayCore:   dev.zay.ios.ZayCore
+#   Libbox:    dev.zay.ios.Libbox
+#
+# Signing: put DEVELOPMENT_TEAM in gitignored project.local.yml
+# (see project.local.yml.example). Never set an empty team here — that
+# wipes the Team selected in Xcode on every xcodegen run.
+include:
+  - path: project.local.yml
+    optional: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    TARGETED_DEVICE_FAMILY: "1,2"
+    IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+    CLANG_ENABLE_MODULES: YES
+    ENABLE_BITCODE: NO
+    CODE_SIGN_STYLE: Automatic
+
+targets:
+  Zay:
+    type: application
+    platform: iOS
+    sources:
+      - path: ZayApp
+      - path: Shared
+        excludes:
+          - "zay_ios.h"
+          - "Zay-Bridging-Header.h"
+    dependencies:
+      - target: ZayTunnel
+        embed: true
+        codeSign: true
+      # Embed dynamic frameworks in the app; the extension loads them via @rpath.
+      - framework: Vendor/Libbox.xcframework
+        embed: true
+        codeSign: true
+      - framework: Vendor/ZayCore.framework
+        embed: true
+        codeSign: true
+      - sdk: NetworkExtension.framework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.zay.ios
+        INFOPLIST_FILE: ZayApp/Info.plist
+        CODE_SIGN_ENTITLEMENTS: ZayApp/ZayApp.entitlements
+        SWIFT_OBJC_BRIDGING_HEADER: Shared/Zay-Bridging-Header.h
+        HEADER_SEARCH_PATHS: "$(SRCROOT)/Shared"
+        FRAMEWORK_SEARCH_PATHS: "$(SRCROOT)/Vendor"
+        LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/Frameworks"
+        OTHER_LDFLAGS: "$(inherited) -framework ZayCore -framework SystemConfiguration -framework Network -framework UIKit -framework Security"
+        ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES: YES
+    scheme:
+      testTargets: []
+
+  ZayTunnel:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: ZayTunnel
+      - path: Shared
+        excludes:
+          - "zay_ios.h"
+          - "Zay-Bridging-Header.h"
+    dependencies:
+      - framework: Vendor/Libbox.xcframework
+        embed: false
+        link: true
+      - framework: Vendor/ZayCore.framework
+        embed: false
+        link: true
+      - sdk: NetworkExtension.framework
+    settings:
+      base:
+        # MUST remain prefixed with parent PRODUCT_BUNDLE_IDENTIFIER (dev.zay.ios).
+        PRODUCT_BUNDLE_IDENTIFIER: dev.zay.ios.tunnel
+        INFOPLIST_FILE: ZayTunnel/Info.plist
+        CODE_SIGN_ENTITLEMENTS: ZayTunnel/ZayTunnel.entitlements
+        SWIFT_OBJC_BRIDGING_HEADER: Shared/Zay-Bridging-Header.h
+        HEADER_SEARCH_PATHS: "$(SRCROOT)/Shared"
+        FRAMEWORK_SEARCH_PATHS: "$(SRCROOT)/Vendor"
+        OTHER_LDFLAGS: "$(inherited) -framework Libbox -framework ZayCore -lc++ -framework SystemConfiguration -framework Network -framework UIKit -framework Security"
+        LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/Frameworks @executable_path/../../Frameworks"

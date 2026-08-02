@@ -760,7 +760,7 @@ mod tests {
             text: None,
         })
         .unwrap();
-        let legacy_connection = r#"{"source":"singbox","level":"info","kind":"connection","message":"x","app":"/Users/m9/.local/share/cursor-agent/versions/x/node","destination":"api2.cursor.sh:443","domain":"api2.cursor.sh","node":"sg-1"}"#;
+        let legacy_connection = r#"{"source":"singbox","level":"info","kind":"connection","message":"x","app":"/home/user/.local/share/cursor-agent/versions/x/node","destination":"api2.cursor.sh:443","domain":"api2.cursor.sh","node":"sg-1"}"#;
         let legacy_dns = r#"{"source":"singbox","level":"info","kind":"dns","message":"x","app":"/usr/sbin/mDNSResponder","destination":"114.114.114.114:53","domain":"api2.cursor.sh"}"#;
         assert!(!filters.matches(legacy_connection));
         assert!(filters.matches(legacy_dns));

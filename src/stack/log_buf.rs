@@ -560,7 +560,7 @@ mod tests {
         let writer = SingboxLogWriter::new(dir.clone());
         let buffer = LogBuffer::with_default_capacity();
         writer.write("+0800 2026-07-26 00:01:56 INFO [12 0ms] inbound/tun[tun-in]: inbound connection to chatgpt.com:443", &buffer);
-        writer.write("+0800 2026-07-26 00:01:56 INFO [12 1ms] router: found process path: /Applications/Google Chrome.app/Chrome, user: m9", &buffer);
+        writer.write("+0800 2026-07-26 00:01:56 INFO [12 1ms] router: found process path: /Applications/Google Chrome.app/Chrome, user: user", &buffer);
         writer.write("+0800 2026-07-26 00:01:56 INFO [12 170ms] outbound/vless[sg-1]: outbound connection to chatgpt.com:443", &buffer);
         crate::logging::flush();
         let events = std::fs::read_to_string(dir.join("events.jsonl")).unwrap();
@@ -585,7 +585,7 @@ mod tests {
         let buffer = LogBuffer::with_default_capacity();
         writer.write("+0800 2026-07-26 00:01:56 INFO [1 10ms] dns: exchanged A api2.cursor.sh. 30 IN A 54.174.13.26", &buffer);
         writer.write("+0800 2026-07-26 00:01:56 INFO [2 0ms] inbound/tun[tun-in]: inbound connection to 54.174.13.26:443", &buffer);
-        writer.write("+0800 2026-07-26 00:01:56 INFO [2 1ms] router: found process path: /Users/m9/.local/share/cursor-agent/versions/x/node, user: m9", &buffer);
+        writer.write("+0800 2026-07-26 00:01:56 INFO [2 1ms] router: found process path: /home/user/.local/share/cursor-agent/versions/x/node, user: user", &buffer);
         writer.write("+0800 2026-07-26 00:01:56 INFO [2 2ms] outbound/vless[sg-1]: outbound connection to 54.174.13.26:443", &buffer);
         crate::logging::flush();
         let events = std::fs::read_to_string(dir.join("events.jsonl")).unwrap();

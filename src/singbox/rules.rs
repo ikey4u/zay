@@ -390,14 +390,11 @@ pub fn clash_dns_rules(has_rules: bool) -> Vec<Value> {
                 "action": "route",
                 "server": "dns-direct"
             }),
+            // Domain rule-sets only. IP/CIDR sets (`private`, `lancidr`, …) are legacy
+            // address filters in DNS rules and rejected by sing-box 1.14+ without
+            // `match_response` — keep those matches on the route side instead.
             json!({
                 "rule_set": ["geosite-cn", "direct", "icloud", "apple"],
-                "query_type": ["A", "AAAA"],
-                "action": "route",
-                "server": "dns-direct"
-            }),
-            json!({
-                "rule_set": ["private", "lancidr"],
                 "query_type": ["A", "AAAA"],
                 "action": "route",
                 "server": "dns-direct"
@@ -459,12 +456,14 @@ pub fn builtin_route_rules(
 
 /// Non-CN HTTP to raw IP (no SNI/Host yet) → Proxy; skip when domain is in geosite-cn/direct.
 fn foreign_http_proxy_fallback(proxy_tag: &str) -> Value {
+    // Note: `ip_is_private: false` is NOT a valid sing-box condition (bool false ==
+    // zero-value → "missing conditions"). Use invert of private instead.
     json!({
         "type": "logical",
         "mode": "and",
         "rules": [
             { "network": "tcp", "port": [80] },
-            { "ip_is_private": false },
+            { "ip_is_private": true, "invert": true },
             { "rule_set": ["geoip-cn"], "invert": true },
             { "rule_set": ["cncidr"], "invert": true },
             { "rule_set": ["geosite-cn", "direct"], "invert": true }

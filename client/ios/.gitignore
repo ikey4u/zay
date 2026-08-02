@@ -1,0 +1,9 @@
+Zay.xcodeproj/
+DerivedData/
+Vendor/libzay_ios*.a
+Vendor/Libbox.xcframework/
+Vendor/ZayCore.framework/
+Rust/zay-ios/target/
+*.xcuserstate
+xcuserdata/
+project.local.yml
