@@ -383,7 +383,10 @@ fn prepare_winpcap(out_dir: &Path, runtime_dir: &Path) {
     }
 
     let packet_dll = runtime_dir.join("Packet.dll");
-    if !packet_dll.is_file() || ensure_pe_x86_64(&packet_dll).is_err() {
+    // WinPcap's installer ships several Packet.dll builds; the NetMon-enabled
+    // x64 variant imports obsolete NPPTools.dll and fails to start on modern
+    // Windows. Keep only a PE that does not depend on it.
+    if !packet_dll.is_file() || ensure_winpcap_packet_dll(&packet_dll).is_err() {
         let installer = base_dir.join("WinPcap_4_1_3.exe");
         download_if_missing(
             WINPCAP_INSTALLER_URL,
@@ -392,6 +395,8 @@ fn prepare_winpcap(out_dir: &Path, runtime_dir: &Path) {
         );
         extract_winpcap_packet_dll(&installer, &packet_dll)
             .unwrap_or_else(|e| panic!("extract WinPcap Packet.dll: {e}"));
+        ensure_winpcap_packet_dll(&packet_dll)
+            .unwrap_or_else(|e| panic!("verify WinPcap Packet.dll: {e}"));
     }
 
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
@@ -500,16 +505,44 @@ fn extract_winpcap_packet_dll(
         }
 
         let content = file.decompress().map_err(|e| e.to_string())?;
-        if is_pe_x86_64_bytes(&content) {
+        if is_usable_winpcap_packet_dll(&content) {
             candidates.push((content.len(), content));
         }
     }
     candidates.sort_by_key(|(size, _)| *size);
     let Some((_, content)) = candidates.pop() else {
-        return Err("no x86_64 Packet.dll found in WinPcap installer".into());
+        return Err(
+            "no usable x86_64 Packet.dll (without NPPTools.dll) in WinPcap installer"
+                .into(),
+        );
     };
     fs::write(dest, content).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+fn pe_imports_dll(buf: &[u8], dll_name: &str) -> bool {
+    let needle = dll_name.as_bytes();
+    buf.windows(needle.len()).any(|window| {
+        window.eq_ignore_ascii_case(needle)
+    })
+}
+
+fn is_usable_winpcap_packet_dll(buf: &[u8]) -> bool {
+    is_pe_x86_64_bytes(buf) && !pe_imports_dll(buf, "NPPTools.dll")
+}
+
+fn ensure_winpcap_packet_dll(path: &Path) -> Result<(), String> {
+    let bytes = fs::read(path).map_err(|e| e.to_string())?;
+    if is_usable_winpcap_packet_dll(&bytes) {
+        Ok(())
+    } else if !is_pe_x86_64_bytes(&bytes) {
+        Err(format!("{} is not an x86_64 PE file", path.display()))
+    } else {
+        Err(format!(
+            "{} depends on obsolete NPPTools.dll",
+            path.display()
+        ))
+    }
 }
 
 fn is_pe_x86_64_bytes(buf: &[u8]) -> bool {
