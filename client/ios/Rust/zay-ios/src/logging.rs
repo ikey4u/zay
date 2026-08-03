@@ -45,7 +45,7 @@ pub fn init_logging() {
     static INIT: OnceCell<()> = OnceCell::new();
     INIT.get_or_init(|| {
         let filter = EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| EnvFilter::new("info,easytier=info,zay_ios=debug"));
+            .unwrap_or_else(|_| EnvFilter::new("warn,easytier=warn,zay_ios=info"));
         let _ = tracing_subscriber::fmt()
             .with_env_filter(filter)
             .with_ansi(false)

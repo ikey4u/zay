@@ -2,55 +2,77 @@ import Foundation
 import Libbox
 
 /// Libbox CommandClient bridge for selector / urltest (Packet Tunnel).
+///
+/// Kept mostly idle: connect lazily on first UI/control request, and use a long
+/// statusInterval so group pushes do not wake the extension every few seconds.
 final class ProxyCommandBridge: NSObject, LibboxCommandClientHandlerProtocol {
+    /// Nanoseconds. 5s was a major battery drain for always-on VPN.
+    private static let statusIntervalNs: Int64 = 120_000_000_000 // 120s
+
     private let lock = NSLock()
     private var client: LibboxCommandClient?
     private var groupsJSON: String = #"{"groups":[]}"#
     private var isClientConnected = false
 
     func start() {
-        stop()
+        // No-op: connect lazily via ensureClient on first control/UI request.
+    }
+
+    @discardableResult
+    private func ensureClient() -> LibboxCommandClient? {
+        lock.lock()
+        if let client {
+            lock.unlock()
+            return client
+        }
+        lock.unlock()
+
         let opts = LibboxCommandClientOptions()
         opts.addCommand(LibboxCommandGroup)
-        opts.statusInterval = 5_000_000_000
+        opts.statusInterval = Self.statusIntervalNs
         guard let client = LibboxNewCommandClient(self, opts) else {
             ZayLog.warn("ProxyCommandBridge: NewCommandClient failed")
-            return
+            return nil
         }
-        self.client = client
         do {
             try client.connect()
-            ZayLog.info("ProxyCommandBridge connected (groups)")
+            lock.lock()
+            self.client = client
+            lock.unlock()
+            ZayLog.info("ProxyCommandBridge connected (groups, interval=120s)")
+            return client
         } catch {
             ZayLog.warn("ProxyCommandBridge connect: \(error.localizedDescription)")
-            self.client = nil
+            return nil
         }
     }
 
     func stop() {
-        try? client?.disconnect()
-        client = nil
         lock.lock()
+        let existing = client
+        client = nil
         isClientConnected = false
         groupsJSON = #"{"groups":[]}"#
         lock.unlock()
+        try? existing?.disconnect()
     }
 
     func snapshotJSON() -> String {
+        _ = ensureClient()
         lock.lock()
         defer { lock.unlock() }
         return groupsJSON
     }
 
     func selectOutbound(groupTag: String = "Proxy", outboundTag: String) throws {
-        guard let client else {
+        guard let client = ensureClient() else {
             throw NSError(domain: "zay", code: 60, userInfo: [NSLocalizedDescriptionKey: "代理控制通道未就绪"])
         }
         try client.selectOutbound(groupTag, outboundTag: outboundTag)
     }
 
     func urlTest(outboundTag: String = "Auto") throws {
-        guard let client else {
+        guard let client = ensureClient() else {
             throw NSError(domain: "zay", code: 60, userInfo: [NSLocalizedDescriptionKey: "代理控制通道未就绪"])
         }
         try client.urlTest(outboundTag)
@@ -94,7 +116,6 @@ final class ProxyCommandBridge: NSObject, LibboxCommandClientHandlerProtocol {
         lock.lock()
         isClientConnected = true
         lock.unlock()
-        ZayLog.debug("ProxyCommandBridge handler connected")
     }
 
     func disconnected(_ message: String?) {

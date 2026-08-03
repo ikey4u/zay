@@ -73,23 +73,17 @@ enum ZayLog {
         }
         lock.unlock()
 
-        // 2) Console — skip for high-volume debug paths.
-        if console {
+        // 2) Console — only warn/error (info/debug to file/memory only).
+        // Continuous print/OSLog from Packet Tunnel keeps the radio/CPU warmer.
+        if console, level == "error" || level == "warn" {
             print("[zay][\(level)] \(message)")
             switch level {
             case "error":
                 logger.error("\(message, privacy: .public)")
-            case "warn":
-                logger.warning("\(message, privacy: .public)")
-            case "debug":
-                logger.debug("\(message, privacy: .public)")
             default:
-                logger.info("\(message, privacy: .public)")
+                logger.warning("\(message, privacy: .public)")
             }
-            // NSLog is expensive; only for warn/error.
-            if level == "error" || level == "warn" {
-                NSLog("[zay][%@] %@", level, message)
-            }
+            NSLog("[zay][%@] %@", level, message)
         }
 
         // 3) File (+ optional Rust) — must not block caller.
@@ -370,7 +364,7 @@ enum ZayNative {
             "mesh_cidrs": meshCIDRs,
             "bypass_ips": bypassIPs,
             "socks_port": config.socksPort,
-            "log_level": "info",
+            "log_level": "warn",
             "working_dir": workingDir,
             "selected_proxy_tag": config.resolvedSelectedProxyTag,
             "rules_profile": rulesProfile,

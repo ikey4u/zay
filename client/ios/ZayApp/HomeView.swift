@@ -100,7 +100,7 @@ struct HomeView: View {
                     )
                 )
 
-            Text("一键接入全局代理与 Mesh")
+            Text(configStore.config.meshEnabled ? "全局代理与 Mesh" : "全局代理")
                 .font(.custom(ZayTheme.captionFont, size: 16))
                 .foregroundStyle(Color.white.opacity(0.55))
         }
@@ -193,9 +193,13 @@ struct HomeView: View {
         if !vpn.isInstalled {
             text = "首次需安装 VPN：点上方按钮，在系统弹窗中选择「允许」"
         } else if configStore.config.isValid {
-            text = "配置已就绪 · 点右上角可调整"
+            text = configStore.config.meshEnabled
+                ? "配置已就绪 · Mesh 已开（锁屏会暂停组网）"
+                : "配置已就绪 · 仅代理（Mesh 可在设置开启）"
+        } else if configStore.config.meshEnabled, !configStore.config.meshConfigReady {
+            text = "已开 Mesh · 请到设置补全中继与网络身份"
         } else {
-            text = "VPN 已安装 · 请到右上角设置填写代理与网络信息"
+            text = "VPN 已安装 · 请到右上角设置填写代理 URL"
         }
         return Text(text)
             .font(.custom(ZayTheme.captionFont, size: 13))

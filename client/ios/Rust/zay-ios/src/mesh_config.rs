@@ -77,8 +77,9 @@ pub fn build_easytier_toml(input: &MeshInput) -> Result<String> {
         "socks5_proxy = \"socks5://127.0.0.1:{socks_port}\"\n"
     ));
 
-    // Listeners help LAN P2P when possible; on cellular they are best-effort.
-    out.push_str("\nlisteners = [\"tcp://0.0.0.0:11010\", \"udp://0.0.0.0:11010\"]\n");
+    // Listeners + hole punching keep STUN / P2P probes alive — costly on cellular.
+    // iOS is a leaf: outbound peer to the relay is enough for mesh SOCKS.
+    out.push_str("\nlisteners = []\n");
 
     out.push_str("\n[[peer]]\n");
     out.push_str(&format!("uri = {peer:?}\n"));
@@ -89,10 +90,11 @@ pub fn build_easytier_toml(input: &MeshInput) -> Result<String> {
 
     out.push_str("\n[flags]\n");
     out.push_str("no_tun = true\n");
-    out.push_str("default_protocol = \"udp\"\n");
-    out.push_str("latency_first = true\n");
-    out.push_str("mtu = 1420\n");
-    out.push_str("disable_udp_hole_punching = false\n");
+    // TCP to relay is steadier and quieter than UDP+STUN on mobile.
+    out.push_str("default_protocol = \"tcp\"\n");
+    out.push_str("latency_first = false\n");
+    out.push_str("mtu = 1280\n");
+    out.push_str("disable_udp_hole_punching = true\n");
 
     Ok(out)
 }
@@ -122,14 +124,18 @@ mod tests {
             relay_url: "1.2.3.4:11010".into(),
             ipv4: None,
             instance_name: None,
-            hostname: Some("iphone-m9".into()),
+            hostname: Some("iphone-test".into()),
             socks_port: Some(18080),
         })
         .unwrap();
         assert!(toml.contains("network_name = \"mesh.example\""));
-        assert!(toml.contains("hostname = \"iphone-m9\""));
+        assert!(toml.contains("hostname = \"iphone-test\""));
         assert!(toml.contains("uri = \"tcp://1.2.3.4:11010\""));
         assert!(toml.contains("no_tun = true"));
         assert!(toml.contains("socks5_proxy = \"socks5://127.0.0.1:18080\""));
+        assert!(toml.contains("listeners = []"));
+        assert!(toml.contains("disable_udp_hole_punching = true"));
+        assert!(toml.contains("latency_first = false"));
+        assert!(toml.contains("default_protocol = \"tcp\""));
     }
 }

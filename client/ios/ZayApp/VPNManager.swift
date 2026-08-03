@@ -158,7 +158,11 @@ final class VPNManager: ObservableObject {
 
         // 2) Then require config to actually start the tunnel.
         guard config.isValid else {
-            lastError = "VPN 配置已安装。请到设置填写代理 URL、中继、网络名与密钥后再启动"
+            if config.meshEnabled, !config.meshConfigReady {
+                lastError = "已启用 Mesh：请填写中继、网络名与密钥"
+            } else {
+                lastError = "请到设置填写代理 URL 后再启动"
+            }
             statusDetail = lastError ?? ""
             return
         }
@@ -223,6 +227,26 @@ final class VPNManager: ObservableObject {
         ZayLog.info("stopVPNTunnel requested")
     }
 
+    /// Mesh toggle changed: restart tunnel when connected so EasyTier starts/stops.
+    func applyMeshSettingChange(config: ZayRuntimeConfig) async {
+        guard status == .connected || status == .connecting || status == .reasserting else {
+            statusDetail = config.meshEnabled ? "Mesh 已开启 · 下次连接生效" : "Mesh 已关闭 · 下次连接更省电"
+            return
+        }
+        guard config.isValid else {
+            lastError = config.meshEnabled && !config.meshConfigReady
+                ? "已启用 Mesh：请填写中继、网络名与密钥"
+                : "配置不完整"
+            statusDetail = lastError ?? ""
+            return
+        }
+        statusDetail = "正在按 Mesh 开关重连…"
+        await stop()
+        // Brief yield so the extension can tear down before start.
+        try? await Task.sleep(nanoseconds: 600_000_000)
+        await start(config: config)
+    }
+
     /// Ask the Packet Tunnel for EasyTier mesh status JSON.
     func fetchMeshStatusJSON() async throws -> String? {
         try await sendTunnelMessage("status")
@@ -259,7 +283,7 @@ final class VPNManager: ObservableObject {
     private func applyProtocol(to manager: NETunnelProviderManager, config: ZayRuntimeConfig?) {
         let proto = NETunnelProviderProtocol()
         proto.providerBundleIdentifier = ZayBundleID.tunnel
-        proto.serverAddress = "Zay Mesh+Proxy"
+        proto.serverAddress = config?.meshEnabled == true ? "Zay Proxy+Mesh" : "Zay Proxy"
         // Keep tunnel alive when screen locks / device sleeps.
         proto.disconnectOnSleep = false
         if let config, let data = try? JSONEncoder().encode(config) {

@@ -54,39 +54,56 @@ struct SettingsView: View {
             }
 
             Section {
-                row(.relayURL, value: summary(\.relayURL, empty: "未设置"))
-                row(.networkName, value: summary(\.networkName, empty: "未设置"))
-                row(
-                    .networkSecret,
-                    value: configStore.config.networkSecret.isEmpty ? "未设置" : "已设置",
-                    muted: configStore.config.networkSecret.isEmpty
-                )
-                row(.hostname, value: summary(\.hostname, empty: "设备名（默认）"))
-                row(.meshIPv4, value: summary(\.meshIPv4, empty: "自动分配"))
-                row(.meshCIDRHint, value: summary(\.meshCIDRHint, empty: "未设置"))
-
-                Button {
-                    navigator.open(.meshStatus)
-                } label: {
-                    HStack {
-                        Text("Mesh 状态")
+                Toggle(isOn: meshEnabledBinding) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("启用 Mesh")
                             .font(.custom(ZayTheme.bodyFont, size: 16))
                             .foregroundStyle(ZayTheme.ink)
-                        Spacer()
-                        Text(VPNManager.shared.status == .connected ? "查看节点" : "未连接")
-                            .font(.custom(ZayTheme.captionFont, size: 15))
-                            .foregroundStyle(ZayTheme.inkTertiary)
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 13, weight: .semibold))
+                        Text(configStore.config.meshEnabled ? "已开启 · 较耗电" : "关闭时仅跑代理，更省电")
+                            .font(.custom(ZayTheme.captionFont, size: 12))
                             .foregroundStyle(ZayTheme.inkTertiary)
                     }
-                    .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .tint(ZayTheme.accent)
+
+                Group {
+                    row(.relayURL, value: summary(\.relayURL, empty: "未设置"))
+                    row(.networkName, value: summary(\.networkName, empty: "未设置"))
+                    row(
+                        .networkSecret,
+                        value: configStore.config.networkSecret.isEmpty ? "未设置" : "已设置",
+                        muted: configStore.config.networkSecret.isEmpty
+                    )
+                    row(.hostname, value: summary(\.hostname, empty: "设备名（默认）"))
+                    row(.meshIPv4, value: summary(\.meshIPv4, empty: "自动分配"))
+                    row(.meshCIDRHint, value: summary(\.meshCIDRHint, empty: "未设置"))
+
+                    Button {
+                        navigator.open(.meshStatus)
+                    } label: {
+                        HStack {
+                            Text("Mesh 状态")
+                                .font(.custom(ZayTheme.bodyFont, size: 16))
+                                .foregroundStyle(ZayTheme.ink)
+                            Spacer()
+                            Text(meshStatusLabel)
+                                .font(.custom(ZayTheme.captionFont, size: 15))
+                                .foregroundStyle(ZayTheme.inkTertiary)
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(ZayTheme.inkTertiary)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+                .disabled(!configStore.config.meshEnabled)
+                .opacity(configStore.config.meshEnabled ? 1 : 0.45)
             } header: {
                 Text("Mesh")
             } footer: {
-                Text("EasyTier 组网：中继节点、网络身份与虚拟网段。节点名会显示在其他 peer 上。")
+                Text("默认关闭。开启后连接时会启动 EasyTier；锁屏时自动暂停组网以省电，解锁后恢复。修改开关若已连接会重连隧道。")
+                    .font(.custom(ZayTheme.captionFont, size: 12))
             }
 
             Section {
@@ -150,6 +167,26 @@ struct SettingsView: View {
         .toolbarBackground(ZayTheme.canvas, for: .navigationBar)
         .toolbarBackground(.visible, for: .navigationBar)
         .toolbarColorScheme(.light, for: .navigationBar)
+    }
+
+    private var meshEnabledBinding: Binding<Bool> {
+        Binding(
+            get: { configStore.config.meshEnabled },
+            set: { newValue in
+                let previous = configStore.config.meshEnabled
+                guard newValue != previous else { return }
+                configStore.update { $0.meshEnabled = newValue }
+                configStore.saveNow()
+                Task {
+                    await VPNManager.shared.applyMeshSettingChange(config: configStore.config)
+                }
+            }
+        )
+    }
+
+    private var meshStatusLabel: String {
+        guard configStore.config.meshEnabled else { return "已关闭" }
+        return VPNManager.shared.status == .connected ? "查看节点" : "未连接"
     }
 
     private func row(_ field: SettingField, value: String, muted: Bool? = nil) -> some View {

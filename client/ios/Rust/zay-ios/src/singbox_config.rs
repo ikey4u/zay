@@ -45,7 +45,7 @@ pub fn build_singbox_json(input: &SingboxInput) -> Result<String> {
     let log_level = input
         .log_level
         .as_deref()
-        .unwrap_or("debug")
+        .unwrap_or("warn")
         .to_string();
     let socks_port = input.socks_port.unwrap_or(18080);
 
@@ -77,16 +77,23 @@ pub fn build_singbox_json(input: &SingboxInput) -> Result<String> {
     let resolved = resolve_proxy(&input.proxy_url, working_dir, prefer_cache)
         .with_context(|| format!("resolving proxy_url {}", input.proxy_url))?;
 
-    let mut outbounds = vec![
-        json!({ "type": "direct", "tag": "direct" }),
-        json!({
+    let mut outbounds = vec![json!({ "type": "direct", "tag": "direct" })];
+
+    let mesh: Vec<String> = input
+        .mesh_cidrs
+        .iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if !mesh.is_empty() {
+        outbounds.push(json!({
             "type": "socks",
             "tag": "mesh-socks",
             "server": "127.0.0.1",
             "server_port": socks_port,
             "version": "5"
-        }),
-    ];
+        }));
+    }
 
     let selected = input
         .selected_proxy_tag
@@ -131,9 +138,11 @@ pub fn build_singbox_json(input: &SingboxInput) -> Result<String> {
                 "type": "urltest",
                 "tag": "Auto",
                 "outbounds": tags.clone(),
+                // Long interval: urltest wakes radio + extension; 5m is harsh on battery.
                 "url": "https://www.gstatic.com/generate_204",
-                "interval": "300s",
-                "tolerance": 100
+                "interval": "3600s",
+                "tolerance": 150,
+                "idle_timeout": "7200s"
             }));
             let mut members = vec!["Auto".to_string()];
             members.extend(tags.clone());
@@ -166,12 +175,6 @@ pub fn build_singbox_json(input: &SingboxInput) -> Result<String> {
     }));
 
     // Mesh CIDRs → EasyTier SOCKS (MUST be before ip_is_private / clash private).
-    let mesh: Vec<String> = input
-        .mesh_cidrs
-        .iter()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
     if !mesh.is_empty() {
         route_rules.push(json!({
             "ip_cidr": mesh,

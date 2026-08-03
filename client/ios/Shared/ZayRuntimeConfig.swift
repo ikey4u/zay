@@ -14,8 +14,10 @@ struct ZayRuntimeConfig: Codable, Equatable {
     var socksPort: Int
     /// Preferred `Proxy` selector member. Empty / `Auto` → urltest auto.
     var selectedProxyTag: String
-    /// User-added rule lists (Clash / Shadowrocket / plain / remote).
+    /// User-added rule lists (Settings → 规则列表).
     var customRules: [CustomRuleEntry]
+    /// When false (default), tunnel runs proxy only — no EasyTier (saves battery).
+    var meshEnabled: Bool
 
     static let storageKey = "zay.runtime.config"
 
@@ -30,7 +32,8 @@ struct ZayRuntimeConfig: Codable, Equatable {
             hostname: "",
             socksPort: 18080,
             selectedProxyTag: "Auto",
-            customRules: []
+            customRules: [],
+            meshEnabled: false
         )
     }
 
@@ -44,7 +47,8 @@ struct ZayRuntimeConfig: Codable, Equatable {
         hostname: String = "",
         socksPort: Int,
         selectedProxyTag: String = "Auto",
-        customRules: [CustomRuleEntry] = []
+        customRules: [CustomRuleEntry] = [],
+        meshEnabled: Bool = false
     ) {
         self.proxyURL = proxyURL
         self.relayURL = relayURL
@@ -56,6 +60,7 @@ struct ZayRuntimeConfig: Codable, Equatable {
         self.socksPort = socksPort
         self.selectedProxyTag = selectedProxyTag
         self.customRules = customRules
+        self.meshEnabled = meshEnabled
     }
 
     init(from decoder: Decoder) throws {
@@ -70,11 +75,20 @@ struct ZayRuntimeConfig: Codable, Equatable {
         socksPort = try c.decodeIfPresent(Int.self, forKey: .socksPort) ?? 18080
         selectedProxyTag = try c.decodeIfPresent(String.self, forKey: .selectedProxyTag) ?? "Auto"
         customRules = try c.decodeIfPresent([CustomRuleEntry].self, forKey: .customRules) ?? []
+        meshEnabled = try c.decodeIfPresent(Bool.self, forKey: .meshEnabled) ?? false
     }
 
     var isValid: Bool {
-        !proxyURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !relayURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let proxyOK = !proxyURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        guard proxyOK else { return false }
+        guard meshEnabled else { return true }
+        return !relayURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !networkName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !networkSecret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var meshConfigReady: Bool {
+        !relayURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && !networkName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && !networkSecret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }

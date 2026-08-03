@@ -7,7 +7,6 @@ import Libbox
 final class PacketTunnelProvider: NEPacketTunnelProvider {
     private var commandServer: LibboxCommandServer?
     private var platform: TunnelPlatformInterface?
-    private var meshMonitor: DispatchSourceTimer?
     private var config: ZayRuntimeConfig = .empty
     private var proxyBridge: ProxyCommandBridge?
     /// Progressive rules reload state.
@@ -16,6 +15,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private var workingDirPath: String = ""
     private var currentRulesStage: Int = 0
     private var rulesReloadWorkItem: DispatchWorkItem?
+    /// EasyTier currently running in this extension process.
+    private var meshRunning = false
+    /// Stopped Mesh in `sleep`; restore on `wake` if still enabled.
+    private var meshSuspendedBySleep = false
 
     override func startTunnel(options: [String: NSObject]?, completionHandler: @escaping (Error?) -> Void) {
         AppGroup.ensureLogDirectory()
@@ -65,13 +68,30 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     /// Required when `disconnectOnSleep = false` so iOS keeps the extension alive across lock/sleep.
     override func sleep(completionHandler: @escaping () -> Void) {
-        ZayLog.info("NE sleep (quiesce; tunnel stays up)")
+        ZayLog.info("NE sleep (pause Libbox; suspend Mesh)")
+        proxyBridge?.stop()
+        commandServer?.pause()
+        if meshRunning {
+            ZayNative.stopMesh()
+            meshRunning = false
+            meshSuspendedBySleep = true
+            ZayLog.info("Mesh suspended for sleep")
+        }
         completionHandler()
     }
 
     override func wake() {
         ZayLog.info("NE wake")
-        // Path monitor / Libbox will rebind underlay; avoid heavy reconnect here.
+        commandServer?.wake()
+        if meshSuspendedBySleep, config.meshEnabled {
+            meshSuspendedBySleep = false
+            do {
+                try startMeshRuntime(config: config, updateRoutes: false)
+                ZayLog.info("Mesh resumed after wake")
+            } catch {
+                ZayLog.warn("Mesh resume failed: \(error.localizedDescription)")
+            }
+        }
     }
 
     private static func stopReasonLabel(_ reason: NEProviderStopReason) -> String {
@@ -199,43 +219,25 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         teardownRuntime(reason: "bootstrap-reset")
         clearLastFailure()
 
-        ZayLog.info("bootstrap begin")
+        ZayLog.info("bootstrap begin meshEnabled=\(config.meshEnabled)")
         ZayLog.info("proxy=\(config.proxyURL)")
         ZayLog.info("relay=\(config.relayURL)")
         ZayLog.info("network=\(config.networkName)")
         ZayLog.info("socks_port=\(config.socksPort)")
         ZayLog.info("selected_proxy=\(config.resolvedSelectedProxyTag)")
 
-        // 1) EasyTier without owning TUN — local SOCKS for mesh.
-        let toml = try ZayNative.buildEasytierTOML(config: config)
-        ZayLog.debug("easytier toml:\n\(toml)")
-        try ZayNative.startMesh(toml: toml)
-        ZayLog.info("EasyTier started (no_tun + SOCKS)")
-
-        var meshCIDRs = [config.meshCIDRHint].filter { !$0.isEmpty }
-        let fixedIP = config.meshIPv4.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !fixedIP.isEmpty, let cidr = IPv4CIDR(cidr: fixedIP) {
-            meshCIDRs = [cidr.raw]
-        }
-        // Brief wait for DHCP VIP if no fixed IP (non-blocking long wait — max 3s).
-        if fixedIP.isEmpty {
-            for attempt in 1...3 {
-                Thread.sleep(forTimeInterval: 1.0)
-                let status = ZayNative.meshStatusJSON()
-                ZayLog.info("mesh status[\(attempt)]: \(status)")
-                if let cidr = Self.extractMeshCIDR(from: status) {
-                    meshCIDRs = [cidr]
-                    ZayLog.info("detected mesh CIDR: \(cidr)")
-                    break
-                }
-            }
-        }
-        ZayLog.info("mesh CIDRs for routing=\(meshCIDRs)")
-
+        meshSuspendedBySleep = false
+        var meshCIDRs: [String] = []
         var bypass: [String] = []
-        if let host = ZayNative.relayHost(from: config.relayURL) {
-            bypass.append(host)
-            ZayLog.info("bypass relay host: \(host)")
+
+        if config.meshEnabled {
+            meshCIDRs = try startMeshRuntime(config: config, updateRoutes: false)
+            if let host = ZayNative.relayHost(from: config.relayURL) {
+                bypass.append(host)
+                ZayLog.info("bypass relay host: \(host)")
+            }
+        } else {
+            ZayLog.info("Mesh disabled — proxy-only tunnel")
         }
 
         let base = AppGroup.containerURL?.path ?? NSTemporaryDirectory()
@@ -276,7 +278,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         setup.workingPath = working
         setup.tempPath = temp
         setup.logMaxLines = 5000
-        setup.debug = true
+        setup.debug = false
         setup.oomKillerEnabled = false
         setup.oomKillerDisabled = true
         var setupError: NSError?
@@ -310,7 +312,6 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         ZayLog.info("sing-box service started")
 
         let bridge = ProxyCommandBridge()
-        bridge.start()
         self.proxyBridge = bridge
 
         // Apply persisted selector preference after groups come up.
@@ -321,10 +322,44 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             }
         }
 
-        startMeshMonitor()
+        // Progressive rules; Mesh already started above when enabled.
         scheduleProgressiveRules()
         clearLastFailure()
-        ZayLog.info("bootstrap complete (rules progressive maxOk=\(RulesProgress.maxOk) failed=\(RulesProgress.failed.map(String.init) ?? "nil"))")
+        ZayLog.info("bootstrap complete mesh=\(meshRunning) rules maxOk=\(RulesProgress.maxOk) failed=\(RulesProgress.failed.map(String.init) ?? "nil")")
+    }
+
+    /// Start EasyTier SOCKS portal; returns mesh CIDRs for sing-box routing.
+    @discardableResult
+    private func startMeshRuntime(config: ZayRuntimeConfig, updateRoutes: Bool) throws -> [String] {
+        let toml = try ZayNative.buildEasytierTOML(config: config)
+        ZayLog.debug("easytier toml:\n\(toml)")
+        try ZayNative.startMesh(toml: toml)
+        meshRunning = true
+        ZayLog.info("EasyTier started (no_tun + SOCKS)")
+
+        var meshCIDRs = [config.meshCIDRHint].filter { !$0.isEmpty }
+        let fixedIP = config.meshIPv4.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !fixedIP.isEmpty, let cidr = IPv4CIDR(cidr: fixedIP) {
+            meshCIDRs = [cidr.raw]
+        }
+        if fixedIP.isEmpty {
+            for attempt in 1...3 {
+                Thread.sleep(forTimeInterval: 1.0)
+                let status = ZayNative.meshStatusJSON()
+                ZayLog.info("mesh status[\(attempt)]: \(status)")
+                if let cidr = Self.extractMeshCIDR(from: status) {
+                    meshCIDRs = [cidr]
+                    ZayLog.info("detected mesh CIDR: \(cidr)")
+                    break
+                }
+            }
+        }
+        ZayLog.info("mesh CIDRs for routing=\(meshCIDRs)")
+        lastMeshCIDRs = meshCIDRs
+        if updateRoutes {
+            // Reserved for hot-enable Mesh without full tunnel restart.
+        }
+        return meshCIDRs
     }
 
     /// Walk rules stages upward: restore known-good, then probe the next set.
@@ -398,8 +433,6 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         ZayLog.info("teardownRuntime (\(reason))")
         rulesReloadWorkItem?.cancel()
         rulesReloadWorkItem = nil
-        meshMonitor?.cancel()
-        meshMonitor = nil
         proxyBridge?.stop()
         proxyBridge = nil
         do {
@@ -411,20 +444,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         commandServer = nil
         platform?.reset()
         platform = nil
+        meshRunning = false
+        meshSuspendedBySleep = false
         ZayNative.stopMesh()
         ZayLog.info("teardownRuntime done")
-    }
-
-    private func startMeshMonitor() {
-        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
-        // Sparse heartbeat: avoid waking/logging every few seconds while locked.
-        timer.schedule(deadline: .now() + 30, repeating: 120)
-        timer.setEventHandler {
-            let status = ZayNative.meshStatusJSON()
-            ZayLog.debug("mesh heartbeat bytes=\(status.utf8.count)")
-        }
-        timer.resume()
-        meshMonitor = timer
     }
 
     private static func extractMeshCIDR(from statusJSON: String) -> String? {
@@ -463,6 +486,8 @@ final class TunnelPlatformInterface: NSObject, LibboxPlatformInterfaceProtocol, 
     private weak var interfaceListener: LibboxInterfaceUpdateListenerProtocol?
     /// Own Packet Tunnel utun name — never report as the default outbound interface.
     private var myTunName: String?
+    private var lastDefaultIfaceName: String?
+    private var lastGetInterfacesLog = Date.distantPast
 
     init(provider: NEPacketTunnelProvider) {
         self.provider = provider
@@ -475,6 +500,7 @@ final class TunnelPlatformInterface: NSObject, LibboxPlatformInterfaceProtocol, 
         interfaceListener = nil
         networkSettings = nil
         myTunName = nil
+        lastDefaultIfaceName = nil
     }
 
     // MARK: CommandServerHandler
@@ -660,10 +686,12 @@ final class TunnelPlatformInterface: NSObject, LibboxPlatformInterfaceProtocol, 
         // Prefer getifaddrs underlay — NWPath often only lists our utun once the
         // full tunnel is up, which Libbox then excludes → empty dial set.
         if let underlay = PhysicalNetworkInterfaces.preferredUnderlay(excluding: myTunName) {
-            ZayLog.info(
-                "default interface: \(underlay.name) idx=\(underlay.index) (getifaddrs) pathStatus=\(path.status) expensive=\(path.isExpensive)"
-            )
-            persistIfaceDebug(path: path, defaultName: underlay.name)
+            if lastDefaultIfaceName != underlay.name {
+                lastDefaultIfaceName = underlay.name
+                ZayLog.info(
+                    "default interface: \(underlay.name) idx=\(underlay.index) (getifaddrs) pathStatus=\(path.status)"
+                )
+            }
             listener.updateDefaultInterface(
                 underlay.name,
                 interfaceIndex: underlay.index,
@@ -674,15 +702,19 @@ final class TunnelPlatformInterface: NSObject, LibboxPlatformInterfaceProtocol, 
         }
 
         guard path.status != .unsatisfied, let iface = preferredPhysicalInterface(on: path) else {
+            if lastDefaultIfaceName != nil {
+                lastDefaultIfaceName = nil
+                ZayLog.warn("default interface: none (path=\(path.status))")
+            }
             listener.updateDefaultInterface("", interfaceIndex: -1, isExpensive: false, isConstrained: false)
-            ZayLog.warn("default interface: none (path=\(path.status) ifaddrs=\(PhysicalNetworkInterfaces.summary()))")
-            persistIfaceDebug(path: path, defaultName: nil)
             return
         }
-        ZayLog.info(
-            "default interface: \(iface.name) idx=\(iface.index) type=\(iface.type) (NWPath fallback)"
-        )
-        persistIfaceDebug(path: path, defaultName: iface.name)
+        if lastDefaultIfaceName != iface.name {
+            lastDefaultIfaceName = iface.name
+            ZayLog.info(
+                "default interface: \(iface.name) idx=\(iface.index) type=\(iface.type) (NWPath fallback)"
+            )
+        }
         listener.updateDefaultInterface(
             iface.name,
             interfaceIndex: Int32(iface.index),
@@ -750,26 +782,13 @@ final class TunnelPlatformInterface: NSObject, LibboxPlatformInterfaceProtocol, 
         }
 
         let interfaces = Array(byName.values)
-        let summary = interfaces.map { "\($0.name ?? "?")#\($0.index)" }.joined(separator: ", ")
-        ZayLog.info("getInterfaces: [\(summary)] myTun=\(myTunName ?? "-")")
-        persistIfaceDebug(path: defaultInterfaceMonitor?.currentPath, defaultName: nil)
-        return NetworkInterfaceArray(interfaces)
-    }
-
-    private func persistIfaceDebug(path: Network.NWPath?, defaultName: String?) {
-        guard let url = AppGroup.containerURL?.appendingPathComponent("iface-debug.txt") else { return }
-        var lines: [String] = []
-        lines.append("time=\(ISO8601DateFormatter().string(from: Date()))")
-        lines.append("myTun=\(myTunName ?? "-")")
-        lines.append("default=\(defaultName ?? "-")")
-        lines.append("ifaddrs=[\(PhysicalNetworkInterfaces.summary(excluding: nil))]")
-        if let path {
-            let pathList = path.availableInterfaces.map { "\($0.name)#\($0.index)/\($0.type)" }
-            lines.append("nwpath status=\(path.status) ifaces=[\(pathList.joined(separator: ", "))]")
-        } else {
-            lines.append("nwpath=(nil)")
+        let now = Date()
+        if now.timeIntervalSince(lastGetInterfacesLog) > 30 {
+            lastGetInterfacesLog = now
+            let summary = interfaces.map { "\($0.name ?? "?")#\($0.index)" }.joined(separator: ", ")
+            ZayLog.debug("getInterfaces: [\(summary)] myTun=\(myTunName ?? "-")")
         }
-        try? lines.joined(separator: "\n").write(to: url, atomically: true, encoding: .utf8)
+        return NetworkInterfaceArray(interfaces)
     }
 
     func underNetworkExtension() -> Bool { true }
