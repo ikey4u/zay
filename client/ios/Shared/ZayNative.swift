@@ -449,7 +449,12 @@ enum ZayNative {
     }
 
     static func stopMesh() {
-        _ = zay_ios_stop_mesh()
+        let rc = zay_ios_stop_mesh()
+        if rc != 0 {
+            ZayLog.warn("stopMesh failed: \(lastError())")
+        } else {
+            ZayLog.info("stopMesh ok")
+        }
     }
 
     static func setTunFd(instanceName: String = "zay-ios", fd: Int32) throws {

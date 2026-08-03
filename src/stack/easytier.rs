@@ -297,28 +297,62 @@ fn clear_stale_easytier_iface_linux() -> Result<()> {
 }
 
 mod imp {
-    use std::path::Path;
+    use std::{path::Path, sync::Arc};
 
     use anyhow::{Context, Result};
     use easytier::{
         common::config::{ConfigFileControl, TomlConfigLoader},
-        instance_manager::NetworkInstanceManager,
-        proto::{
-            api::instance::{
-                ListPeerRequest, ListRouteRequest, ShowNodeInfoRequest,
-                list_peer_route_pair,
-            },
-            rpc_types::controller::BaseController,
+        instance::factory::{
+            NativeInstanceManager, NativeProcessManagement,
+            native_instance_manager_with_runtime, native_process_management,
         },
     };
     use once_cell::sync::Lazy;
+    use tokio::runtime::{Builder, Runtime};
     use uuid::Uuid;
 
     use super::to_easytier_toml;
     use crate::settings::{MeshConfig, MeshRole};
 
-    static INSTANCE_MANAGER: Lazy<NetworkInstanceManager> =
-        Lazy::new(NetworkInstanceManager::new);
+    struct NoopHooks;
+
+    #[async_trait::async_trait]
+    impl easytier_core::management::InstanceMutationHooks for NoopHooks {
+        async fn post_remove_network_instances(
+            &self,
+            _instance_ids: &[Uuid],
+        ) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    struct Ctx {
+        runtime: Runtime,
+        manager: Arc<NativeInstanceManager>,
+        process_management: NativeProcessManagement,
+    }
+
+    impl Ctx {
+        fn new() -> Self {
+            let runtime = Builder::new_multi_thread()
+                .enable_all()
+                .thread_name("zay-et")
+                .build()
+                .expect("easytier tokio runtime");
+            let manager = Arc::new(native_instance_manager_with_runtime(
+                runtime.handle().clone(),
+            ));
+            let process_management =
+                native_process_management(manager.clone(), Arc::new(NoopHooks));
+            Self {
+                runtime,
+                manager,
+                process_management,
+            }
+        }
+    }
+
+    static CTX: Lazy<Ctx> = Lazy::new(Ctx::new);
 
     pub fn start(mesh: &MeshConfig, _data_dir: &Path) -> Result<Uuid> {
         match mesh.role {
@@ -398,16 +432,23 @@ mod imp {
         }
         let cfg = TomlConfigLoader::new_from_str(&toml)
             .context("parsing EasyTier mesh config")?;
-        let id = INSTANCE_MANAGER
-            .run_network_instance(cfg, false, ConfigFileControl::STATIC_CONFIG)
+        let id = CTX
+            .runtime
+            .block_on(
+                CTX.process_management
+                    .run_owned_network_instance(cfg, ConfigFileControl::STATIC_CONFIG),
+            )
             .context("starting EasyTier mesh")?;
         eprintln!("mesh started (instance {id}, role={:?})", mesh.role);
         Ok(id)
     }
 
     pub fn stop_all() -> Result<()> {
-        INSTANCE_MANAGER
-            .retain_network_instance(Vec::new())
+        CTX.runtime
+            .block_on(
+                CTX.process_management
+                    .retain_owned_network_instances_by_name(Vec::new()),
+            )
             .context("stopping EasyTier mesh")?;
         Ok(())
     }
@@ -507,7 +548,8 @@ mod imp {
     }
 
     fn mesh_has_virtual_ip() -> Result<bool> {
-        let infos = INSTANCE_MANAGER
+        let infos = CTX
+            .manager
             .collect_network_infos_sync()
             .context("querying EasyTier mesh status")?;
         Ok(infos.values().any(|info| {
@@ -519,66 +561,36 @@ mod imp {
     }
 
     fn mesh_peer_count() -> Result<usize> {
-        let infos = INSTANCE_MANAGER
+        let infos = CTX
+            .manager
             .collect_network_infos_sync()
             .context("querying EasyTier mesh status")?;
         Ok(infos.values().map(|i| i.peers.len()).sum())
     }
 
-    /// Query EasyTier's peer-management API, the same source used by
-    /// `easytier-cli peer` and `easytier-cli route`.
+    /// Query EasyTier's running snapshot (same data surface as `easytier-cli peer` / `route`).
     pub async fn status() -> Result<Vec<super::MeshInstanceStatus>> {
-        let ids = INSTANCE_MANAGER.list_network_instance_ids();
-        let mut instances = Vec::with_capacity(ids.len());
-        for id in ids {
-            let service = INSTANCE_MANAGER
-                .get_instance_service(&id)
-                .with_context(|| {
-                    format!("getting EasyTier RPC service for instance {id}")
-                })?;
-            let peer_api = service.get_peer_manage_service();
-            let node = peer_api
-                .show_node_info(
-                    BaseController::default(),
-                    ShowNodeInfoRequest::default(),
-                )
-                .await
-                .context("calling EasyTier PeerManageRpc.ShowNodeInfo")?
-                .node_info
-                .context(
-                    "EasyTier PeerManageRpc returned no local node information",
-                )?;
-            let connected_peers = peer_api
-                .list_peer(
-                    BaseController::default(),
-                    ListPeerRequest::default(),
-                )
-                .await
-                .context("calling EasyTier PeerManageRpc.ListPeer")?
-                .peer_infos;
-            let routes = peer_api
-                .list_route(
-                    BaseController::default(),
-                    ListRouteRequest::default(),
-                )
-                .await
-                .context("calling EasyTier PeerManageRpc.ListRoute")?
-                .routes;
-            let route_count = routes.len();
-            let peer_host_by_id: std::collections::HashMap<u32, String> =
-                routes
-                    .iter()
-                    .map(|r| {
-                        let host = if r.hostname.is_empty() {
-                            format!("peer-{}", r.peer_id)
-                        } else {
-                            r.hostname.clone()
-                        };
-                        (r.peer_id, host)
-                    })
-                    .collect();
-            let peers = list_peer_route_pair(connected_peers.clone(), routes)
-                .into_iter()
+        let infos = CTX
+            .manager
+            .collect_network_infos_sync()
+            .context("querying EasyTier mesh status")?;
+        let mut instances = Vec::with_capacity(infos.len());
+        for (id, info) in infos {
+            let peer_host_by_id: std::collections::HashMap<u32, String> = info
+                .routes
+                .iter()
+                .map(|r| {
+                    let host = if r.hostname.is_empty() {
+                        format!("peer-{}", r.peer_id)
+                    } else {
+                        r.hostname.clone()
+                    };
+                    (r.peer_id, host)
+                })
+                .collect();
+            let peers = info
+                .peer_route_pairs
+                .iter()
                 .filter_map(|pair| {
                     let route = pair.route.as_ref()?;
                     let next_hop = route
@@ -604,19 +616,23 @@ mod imp {
                         peer_id: route.peer_id.to_string(),
                         hostname: (!route.hostname.is_empty())
                             .then(|| route.hostname.clone()),
-                        virtual_ipv4: route.ipv4_addr.map(|ip| ip.to_string()),
+                        virtual_ipv4: route.ipv4_addr.as_ref().map(|ip| ip.to_string()),
                         path,
                         latency_ms,
                         tunnel,
                     })
                 })
-                .collect();
+                .collect::<Vec<_>>();
+            let virtual_ipv4 = info
+                .my_node_info
+                .as_ref()
+                .and_then(|n| n.virtual_ipv4.as_ref())
+                .map(|ip| ip.to_string());
             instances.push(super::MeshInstanceStatus {
                 instance_id: id.to_string(),
-                virtual_ipv4: (!node.ipv4_addr.is_empty())
-                    .then_some(node.ipv4_addr),
-                connected_peers: connected_peers.len(),
-                routes: route_count,
+                virtual_ipv4,
+                connected_peers: info.peers.len(),
+                routes: info.routes.len(),
                 peers,
             });
         }
@@ -624,7 +640,7 @@ mod imp {
     }
 
     fn log_mesh_status_now() {
-        let Ok(infos) = INSTANCE_MANAGER.collect_network_infos_sync() else {
+        let Ok(infos) = CTX.manager.collect_network_infos_sync() else {
             eprintln!("warn: could not query EasyTier mesh status");
             return;
         };

@@ -57,10 +57,8 @@ struct SettingEditorView: View {
         .scrollDismissesKeyboard(.interactively)
         .navigationTitle(field.title)
         .navigationBarTitleDisplayMode(.inline)
-        .preferredColorScheme(.light)
         .toolbarBackground(ZayTheme.canvas, for: .navigationBar)
         .toolbarBackground(.visible, for: .navigationBar)
-        .toolbarColorScheme(.light, for: .navigationBar)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button("完成") {

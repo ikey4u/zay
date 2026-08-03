@@ -14,15 +14,16 @@ struct ContentView: View {
                         } label: {
                             Image(systemName: "gearshape")
                                 .font(.system(size: 17, weight: .semibold))
-                                .foregroundStyle(Color.white.opacity(0.9))
+                                .foregroundStyle(ZayTheme.ink.opacity(0.85))
                                 .frame(width: 36, height: 36)
-                                .background(Color.white.opacity(0.12))
+                                .background(ZayTheme.ink.opacity(0.08))
                                 .clipShape(Circle())
                         }
                         .accessibilityLabel("设置")
                     }
                 }
                 .toolbarBackground(.hidden, for: .navigationBar)
+                .navigationBarTitleDisplayMode(.inline)
                 .navigationDestination(for: AppRoute.self) { route in
                     switch route {
                     case .settings:

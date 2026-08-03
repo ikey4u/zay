@@ -49,20 +49,13 @@ struct SettingsView: View {
                 .buttonStyle(.plain)
             } header: {
                 Text("代理")
-            } footer: {
-                Text("订阅或直连代理、节点选择与分流规则。")
             }
 
             Section {
                 Toggle(isOn: meshEnabledBinding) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("启用 Mesh")
-                            .font(.custom(ZayTheme.bodyFont, size: 16))
-                            .foregroundStyle(ZayTheme.ink)
-                        Text(configStore.config.meshEnabled ? "已开启 · 较耗电" : "关闭时仅跑代理，更省电")
-                            .font(.custom(ZayTheme.captionFont, size: 12))
-                            .foregroundStyle(ZayTheme.inkTertiary)
-                    }
+                    Text("启用 Mesh")
+                        .font(.custom(ZayTheme.bodyFont, size: 16))
+                        .foregroundStyle(ZayTheme.ink)
                 }
                 .tint(ZayTheme.accent)
 
@@ -101,9 +94,6 @@ struct SettingsView: View {
                 .opacity(configStore.config.meshEnabled ? 1 : 0.45)
             } header: {
                 Text("Mesh")
-            } footer: {
-                Text("默认关闭。开启后连接时会启动 EasyTier；锁屏时自动暂停组网以省电，解锁后恢复。修改开关若已连接会重连隧道。")
-                    .font(.custom(ZayTheme.captionFont, size: 12))
             }
 
             Section {
@@ -124,49 +114,30 @@ struct SettingsView: View {
                 .buttonStyle(.plain)
             } header: {
                 Text("诊断")
-            } footer: {
-                Text("查看隧道与 App 运行日志，可复制或导出诊断信息。")
-                    .font(.custom(ZayTheme.captionFont, size: 12))
             }
 
             Section {
                 Button {
                     Task {
-                        _ = await VPNManager.shared.installVPNConfiguration(reinstall: false)
-                    }
-                } label: {
-                    Text(VPNManager.shared.isInstalled ? "重新保存 VPN 配置" : "安装 VPN 配置")
-                        .font(.custom(ZayTheme.bodyFont, size: 16))
-                        .foregroundStyle(ZayTheme.accent)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-
-                Button {
-                    Task {
                         _ = await VPNManager.shared.installVPNConfiguration(reinstall: true)
                     }
                 } label: {
-                    Text("删除并重装 VPN 配置")
+                    Text("重置")
                         .font(.custom(ZayTheme.bodyFont, size: 16))
                         .foregroundStyle(ZayTheme.danger)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
             } header: {
                 Text("VPN")
-            } footer: {
-                Text("首次安装时系统会弹出「添加 VPN 配置」。若无弹窗，请在 Xcode 为 App 与 Tunnel 勾选 Network Extensions → Packet Tunnel Provider，删掉 App 后重装到真机。")
-                    .font(.custom(ZayTheme.captionFont, size: 12))
             }
         }
         .listStyle(.insetGrouped)
         .scrollContentBackground(.hidden)
         .background(ZayTheme.canvas.ignoresSafeArea())
         .navigationTitle("设置")
-        .navigationBarTitleDisplayMode(.large)
-        .preferredColorScheme(.light)
+        .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(ZayTheme.canvas, for: .navigationBar)
         .toolbarBackground(.visible, for: .navigationBar)
-        .toolbarColorScheme(.light, for: .navigationBar)
     }
 
     private var meshEnabledBinding: Binding<Bool> {

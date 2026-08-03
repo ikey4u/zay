@@ -25,10 +25,8 @@ struct MeshStatusView: View {
         .background(ZayTheme.canvas.ignoresSafeArea())
         .navigationTitle("Mesh 状态")
         .navigationBarTitleDisplayMode(.large)
-        .preferredColorScheme(.light)
         .toolbarBackground(ZayTheme.canvas, for: .navigationBar)
         .toolbarBackground(.visible, for: .navigationBar)
-        .toolbarColorScheme(.light, for: .navigationBar)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button {

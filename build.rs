@@ -10,10 +10,8 @@ use sha2::{Digest, Sha256};
 
 include!("shared/clash_rules_convert.rs");
 
-/// Pinned sing-box release embedded by Zay.
-const PINNED_SINGBOX_VERSION: &str = "v1.13.12";
-const SINGBOX_RELEASE_BASE: &str =
-    "https://github.com/SagerNet/sing-box/releases/download";
+/// Build embedded `sing-box` from the pinned `vendor/sing-box` submodule (requires Go).
+const VENDOR_SINGBOX_DIR: &str = "vendor/sing-box";
 const WINPCAP_DEV_PACK_URL: &str =
     "https://www.winpcap.org/install/bin/WpdPack_4_1_2.zip";
 const WINPCAP_DEV_PACK_SHA256: &str =
@@ -62,6 +60,11 @@ fn main() {
     println!("cargo:rerun-if-changed=Cargo.toml");
     println!("cargo:rerun-if-changed=Cargo.lock");
     println!("cargo:rerun-if-env-changed=TARGET");
+
+    println!("cargo:rerun-if-changed=vendor/sing-box/go.mod");
+    println!("cargo:rerun-if-changed=vendor/sing-box/cmd/sing-box");
+    println!("cargo:rerun-if-changed=vendor/sing-box/release/DEFAULT_BUILD_TAGS_OTHERS");
+    println!("cargo:rerun-if-changed=vendor/Easytier/easytier/Cargo.toml");
 
     let pkg_version =
         env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".into());
@@ -276,13 +279,24 @@ fn write_clash_rules_stamp(path: &Path, key: &str) -> Result<(), String> {
 }
 
 fn embed_singbox(out_dir: &Path, target: &str) {
-    let version_tag = PINNED_SINGBOX_VERSION.trim_start_matches('v');
-    let (suffix, ext) =
-        singbox_artifact_for_target(target).unwrap_or_else(|| {
-            panic!("unsupported build target for embedded sing-box: {target}")
-        });
-    let artifact = format!("sing-box-{version_tag}-{suffix}");
-    let version = PINNED_SINGBOX_VERSION;
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
+    let vendor = manifest_dir.join(VENDOR_SINGBOX_DIR);
+    if !vendor.join("go.mod").is_file() {
+        panic!(
+            "missing {VENDOR_SINGBOX_DIR} (go.mod). Init submodules:\n  git submodule update --init --recursive"
+        );
+    }
+
+    let commit = git_output(&[
+        "-C",
+        vendor.to_str().expect("vendor path utf-8"),
+        "rev-parse",
+        "HEAD",
+    ])
+    .unwrap_or_else(|| "unknown".into());
+    let short = commit.chars().take(12).collect::<String>();
+    let version = format!("vendor-{short}");
+
     let exe_name = if target.contains("windows") {
         "sing-box.exe"
     } else {
@@ -291,32 +305,73 @@ fn embed_singbox(out_dir: &Path, target: &str) {
     let embed_path = out_dir.join(exe_name);
     let stamp_path = out_dir.join("singbox.stamp");
 
-    if stamp_matches(&stamp_path, version, target) && embed_path.is_file() {
-        emit_singbox_rustc_env(&embed_path, version);
+    if stamp_matches(&stamp_path, &version, target) && embed_path.is_file() {
+        emit_singbox_rustc_env(&embed_path, &version);
         return;
     }
 
-    let archive_path = out_dir.join(format!("{artifact}.{ext}"));
-    let url = format!("{SINGBOX_RELEASE_BASE}/{version}/{artifact}.{ext}");
-
-    eprintln!("cargo:warning=zay: downloading sing-box {version} for {target}");
-    download(&url, &archive_path).unwrap_or_else(|e| {
-        panic!("failed to download sing-box from {url}: {e}");
+    let (goos, goarch) = go_target_for_rust_target(target).unwrap_or_else(|| {
+        panic!("unsupported build target for vendor sing-box: {target}")
     });
-
-    extract_singbox(&archive_path, ext, &embed_path, &artifact).unwrap_or_else(
-        |e| {
+    let tags = fs::read_to_string(vendor.join("release/DEFAULT_BUILD_TAGS_OTHERS"))
+        .unwrap_or_else(|e| {
             panic!(
-                "failed to extract sing-box archive {}: {e}",
-                archive_path.display()
-            );
-        },
+                "read {}: {e}",
+                vendor.join("release/DEFAULT_BUILD_TAGS_OTHERS").display()
+            )
+        });
+    let tags = tags.trim();
+    let ldflags = format!(
+        "-X 'github.com/sagernet/sing-box/constant.Version={version}' -s -w -buildid="
     );
 
-    let _ = fs::remove_file(&archive_path);
+    eprintln!(
+        "cargo:warning=zay: building sing-box from {VENDOR_SINGBOX_DIR} ({short}) for {goos}/{goarch}"
+    );
+
+    let status = Command::new("go")
+        .current_dir(&vendor)
+        .env("CGO_ENABLED", "0")
+        .env("GOOS", goos)
+        .env("GOARCH", goarch)
+        .env("GOTOOLCHAIN", "auto")
+        .args([
+            "build",
+            "-trimpath",
+            "-tags",
+            tags,
+            "-ldflags",
+            &ldflags,
+            "-o",
+        ])
+        .arg(&embed_path)
+        .arg("./cmd/sing-box")
+        .status()
+        .unwrap_or_else(|e| {
+            panic!("failed to spawn `go` (install Go and ensure it is on PATH): {e}")
+        });
+    if !status.success() {
+        panic!(
+            "go build sing-box failed with {status} (cwd {})",
+            vendor.display()
+        );
+    }
+
     chmod_executable(&embed_path);
-    write_stamp(&stamp_path, version, target).expect("write singbox.stamp");
-    emit_singbox_rustc_env(&embed_path, version);
+    write_stamp(&stamp_path, &version, target).expect("write singbox.stamp");
+    emit_singbox_rustc_env(&embed_path, &version);
+}
+
+fn go_target_for_rust_target(target: &str) -> Option<(&'static str, &'static str)> {
+    Some(match target {
+        "aarch64-apple-darwin" => ("darwin", "arm64"),
+        "x86_64-apple-darwin" => ("darwin", "amd64"),
+        "aarch64-unknown-linux-gnu" | "aarch64-unknown-linux-musl" => ("linux", "arm64"),
+        "x86_64-unknown-linux-gnu" | "x86_64-unknown-linux-musl" => ("linux", "amd64"),
+        "x86_64-pc-windows-gnu" | "x86_64-pc-windows-msvc" => ("windows", "amd64"),
+        "aarch64-pc-windows-msvc" => ("windows", "arm64"),
+        _ => return None,
+    })
 }
 
 #[cfg(unix)]
@@ -577,42 +632,6 @@ fn emit_singbox_rustc_env(embed_path: &Path, version: &str) {
     println!("cargo:rustc-env=SINGBOX_VERSION={version}");
 }
 
-fn extract_singbox(
-    archive: &Path,
-    ext: &str,
-    dest: &Path,
-    artifact: &str,
-) -> Result<(), String> {
-    match ext {
-        "tar.gz" => extract_tar_gz(archive, dest),
-        "zip" => extract_zip(archive, dest, artifact),
-        other => Err(format!("unsupported archive extension: {other}")),
-    }
-}
-
-fn extract_tar_gz(archive_path: &Path, dest: &Path) -> Result<(), String> {
-    let file = File::open(archive_path).map_err(|e| e.to_string())?;
-    let decoder = flate2::read::GzDecoder::new(file);
-    let mut tar = tar::Archive::new(decoder);
-    for entry in tar.entries().map_err(|e| e.to_string())? {
-        let mut entry = entry.map_err(|e| e.to_string())?;
-        let path = entry.path().map_err(|e| e.to_string())?;
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default();
-        if name == "sing-box" || name == "sing-box.exe" {
-            let mut output = File::create(dest).map_err(|e| e.to_string())?;
-            copy(&mut entry, &mut output).map_err(|e| e.to_string())?;
-            return Ok(());
-        }
-    }
-    Err(format!(
-        "sing-box binary not found in {}",
-        archive_path.display()
-    ))
-}
-
 fn stamp_matches(stamp_path: &Path, version: &str, target: &str) -> bool {
     fs::read_to_string(stamp_path)
         .map(|s| s.trim() == format!("{version}\n{target}"))
@@ -628,31 +647,6 @@ fn write_stamp(
     writeln!(f, "{version}")?;
     writeln!(f, "{target}")?;
     Ok(())
-}
-
-fn singbox_artifact_for_target(
-    target: &str,
-) -> Option<(&'static str, &'static str)> {
-    Some(match target {
-        "aarch64-apple-darwin" => ("darwin-arm64", "tar.gz"),
-        "x86_64-apple-darwin" => ("darwin-amd64", "tar.gz"),
-        "aarch64-unknown-linux-gnu" | "aarch64-unknown-linux-musl" => {
-            ("linux-arm64", "tar.gz")
-        }
-        "x86_64-unknown-linux-gnu" | "x86_64-unknown-linux-musl" => {
-            ("linux-amd64", "tar.gz")
-        }
-        "i686-unknown-linux-gnu" => ("linux-386", "tar.gz"),
-        "armv7-unknown-linux-gnueabihf" => ("linux-armv7", "tar.gz"),
-        "riscv64gc-unknown-linux-gnu" => ("linux-riscv64", "tar.gz"),
-        "loongarch64-unknown-linux-gnu" => ("linux-loong64", "tar.gz"),
-        "x86_64-pc-windows-msvc" | "x86_64-pc-windows-gnu" => {
-            ("windows-amd64", "zip")
-        }
-        "i686-pc-windows-msvc" => ("windows-386", "zip"),
-        "aarch64-pc-windows-msvc" => ("windows-arm64", "zip"),
-        _ => return None,
-    })
 }
 
 fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
@@ -676,24 +670,4 @@ fn download(url: &str, dest: &Path) -> Result<(), String> {
     fs::write(dest, body)
         .map_err(|e| format!("write {}: {e}", dest.display()))?;
     Ok(())
-}
-
-fn extract_zip(
-    archive_path: &Path,
-    dest: &Path,
-    artifact: &str,
-) -> Result<(), String> {
-    let file = File::open(archive_path).map_err(|e| e.to_string())?;
-    let mut zip = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
-    let expected = format!("{artifact}.exe");
-    for i in 0..zip.len() {
-        let mut entry = zip.by_index(i).map_err(|e| e.to_string())?;
-        let name = entry.name().to_string();
-        if name.ends_with(".exe") || name == expected {
-            let mut output = File::create(dest).map_err(|e| e.to_string())?;
-            copy(&mut entry, &mut output).map_err(|e| e.to_string())?;
-            return Ok(());
-        }
-    }
-    Err(format!("no .exe found in {}", archive_path.display()))
 }

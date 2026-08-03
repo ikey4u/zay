@@ -16,4 +16,8 @@ final class AppNavigator: ObservableObject {
         guard !path.isEmpty else { return }
         path.removeLast()
     }
+
+    func popToRoot() {
+        path = NavigationPath()
+    }
 }

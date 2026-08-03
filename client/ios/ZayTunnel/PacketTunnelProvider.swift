@@ -19,6 +19,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private var meshRunning = false
     /// Stopped Mesh in `sleep`; restore on `wake` if still enabled.
     private var meshSuspendedBySleep = false
+    /// Cleared on user stop / teardown so `wake` cannot resurrect Mesh after disconnect.
+    private var meshAllowed = true
 
     override func startTunnel(options: [String: NSObject]?, completionHandler: @escaping (Error?) -> Void) {
         AppGroup.ensureLogDirectory()
@@ -37,6 +39,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         }
         config = cfg
         cfg.save()
+        meshAllowed = true
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do {
@@ -45,7 +48,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             } catch {
                 ZayLog.error("bootstrap failed: \(error.localizedDescription)")
                 self?.writeLastFailure(error.localizedDescription)
-                self?.teardownRuntime(reason: "bootstrap-failed")
+                self?.teardownRuntime(reason: "bootstrap-failed", finalStop: true)
                 DispatchQueue.main.async { completionHandler(error) }
             }
         }
@@ -62,7 +65,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         if Self.isUnexpectedStop(reason) {
             writeLastFailure("隧道退出: \(label) (code=\(reason.rawValue))")
         }
-        teardownRuntime(reason: "stopTunnel:\(label)")
+        teardownRuntime(reason: "stopTunnel:\(label)", finalStop: true)
         completionHandler()
     }
 
@@ -80,17 +83,99 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         completionHandler()
     }
 
-    override func wake() {
-        ZayLog.info("NE wake")
-        commandServer?.wake()
-        if meshSuspendedBySleep, config.meshEnabled {
-            meshSuspendedBySleep = false
-            do {
-                try startMeshRuntime(config: config, updateRoutes: false)
-                ZayLog.info("Mesh resumed after wake")
-            } catch {
-                ZayLog.warn("Mesh resume failed: \(error.localizedDescription)")
+    /// User disconnect / final teardown: Mesh must not come back via wake.
+    private func stopMeshFully(reason: String) {
+        meshAllowed = false
+        meshSuspendedBySleep = false
+        ZayNative.stopMesh()
+        let wasRunning = meshRunning
+        meshRunning = false
+        lastMeshCIDRs = []
+        ZayLog.info("Mesh fully stopped (\(reason)) wasRunning=\(wasRunning)")
+    }
+
+    /// Settings toggle: start/stop EasyTier without tearing down the proxy tunnel.
+    private func hotSetMesh(enabled: Bool) -> String {
+        // App already persisted the toggle; reload so relay/secret match the UI.
+        config = ZayRuntimeConfig.load()
+        config.meshEnabled = enabled
+        config.save()
+
+        do {
+            if enabled {
+                guard config.meshConfigReady else {
+                    return #"{"ok":false,"error":"请填写中继、网络名与密钥"}"#
+                }
+                meshAllowed = true
+                meshSuspendedBySleep = false
+                if meshRunning {
+                    ZayNative.stopMesh()
+                    meshRunning = false
+                }
+                let cidrs = try startMeshRuntime(config: config, updateRoutes: false)
+                if let host = ZayNative.relayHost(from: config.relayURL),
+                   !lastBypassIPs.contains(host) {
+                    lastBypassIPs.append(host)
+                }
+                lastMeshCIDRs = cidrs
+                try reloadSingboxMeshRoutes()
+                ZayLog.info("hot mesh-enable ok cidrs=\(cidrs)")
+                return #"{"ok":true,"enabled":true}"#
+            } else {
+                ZayNative.stopMesh()
+                meshRunning = false
+                meshSuspendedBySleep = false
+                // Keep meshAllowed — tunnel still up; user may toggle on again.
+                lastMeshCIDRs = []
+                try reloadSingboxMeshRoutes()
+                ZayLog.info("hot mesh-disable ok")
+                return #"{"ok":true,"enabled":false}"#
             }
+        } catch {
+            ZayLog.error("hotSetMesh enabled=\(enabled): \(error.localizedDescription)")
+            let msg = Self.jsonEscape(error.localizedDescription)
+            return #"{"ok":false,"error":"\#(msg)"}"#
+        }
+    }
+
+    /// Reload current rules stage with updated mesh CIDRs (proxy stays up).
+    private func reloadSingboxMeshRoutes() throws {
+        guard let server = commandServer, !workingDirPath.isEmpty else {
+            throw NSError(
+                domain: "zay",
+                code: 60,
+                userInfo: [NSLocalizedDescriptionKey: "代理尚未就绪，无法热更新 Mesh 路由"]
+            )
+        }
+        let stage = max(currentRulesStage, 0)
+        let json = try ZayNative.buildSingboxJSON(
+            config: config,
+            meshCIDRs: lastMeshCIDRs,
+            bypassIPs: lastBypassIPs,
+            workingDir: workingDirPath,
+            rulesProfile: RulesProgress.profileString(stage),
+            preferCache: true
+        )
+        try server.startOrReloadService(json, options: LibboxOverrideOptions())
+        ZayLog.info("sing-box mesh routes reloaded stage=\(stage) cidrs=\(lastMeshCIDRs)")
+    }
+
+    override func wake() {
+        ZayLog.info("NE wake meshAllowed=\(meshAllowed) suspended=\(meshSuspendedBySleep)")
+        commandServer?.wake()
+        guard meshAllowed, meshSuspendedBySleep, config.meshEnabled else {
+            if meshSuspendedBySleep, !meshAllowed {
+                meshSuspendedBySleep = false
+                ZayLog.info("skip Mesh resume — tunnel is stopping / stopped")
+            }
+            return
+        }
+        meshSuspendedBySleep = false
+        do {
+            try startMeshRuntime(config: config, updateRoutes: false)
+            ZayLog.info("Mesh resumed after wake")
+        } catch {
+            ZayLog.warn("Mesh resume failed: \(error.localizedDescription)")
         }
     }
 
@@ -145,6 +230,26 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         ZayLog.debug("handleAppMessage: \(req)")
         if req == "status" {
             completionHandler?(ZayNative.meshStatusJSON().data(using: .utf8))
+            return
+        }
+        if req == "stop-mesh" {
+            // App disconnect: kill EasyTier and forbid wake/hot-start until next startTunnel.
+            stopMeshFully(reason: "app-stop-mesh")
+            completionHandler?(#"{"ok":true}"#.data(using: .utf8))
+            return
+        }
+        if req == "mesh-enable" {
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let result = self?.hotSetMesh(enabled: true) ?? #"{"ok":false,"error":"extension gone"}"#
+                completionHandler?(result.data(using: .utf8))
+            }
+            return
+        }
+        if req == "mesh-disable" {
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let result = self?.hotSetMesh(enabled: false) ?? #"{"ok":false,"error":"extension gone"}"#
+                completionHandler?(result.data(using: .utf8))
+            }
             return
         }
         if req == "logs" {
@@ -216,7 +321,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     private func bootstrap(config: ZayRuntimeConfig) throws {
         // Drop leftovers from a previous failed start in this process.
-        teardownRuntime(reason: "bootstrap-reset")
+        teardownRuntime(reason: "bootstrap-reset", finalStop: false)
         clearLastFailure()
 
         ZayLog.info("bootstrap begin meshEnabled=\(config.meshEnabled)")
@@ -331,9 +436,19 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     /// Start EasyTier SOCKS portal; returns mesh CIDRs for sing-box routing.
     @discardableResult
     private func startMeshRuntime(config: ZayRuntimeConfig, updateRoutes: Bool) throws -> [String] {
+        guard meshAllowed else {
+            ZayLog.warn("startMeshRuntime skipped — mesh not allowed")
+            return []
+        }
         let toml = try ZayNative.buildEasytierTOML(config: config)
         ZayLog.debug("easytier toml:\n\(toml)")
         try ZayNative.startMesh(toml: toml)
+        guard meshAllowed else {
+            ZayNative.stopMesh()
+            meshRunning = false
+            ZayLog.warn("Mesh started then immediately stopped (disallowed)")
+            return []
+        }
         meshRunning = true
         ZayLog.info("EasyTier started (no_tun + SOCKS)")
 
@@ -344,6 +459,12 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         }
         if fixedIP.isEmpty {
             for attempt in 1...3 {
+                guard meshAllowed else {
+                    ZayNative.stopMesh()
+                    meshRunning = false
+                    ZayLog.warn("Mesh aborted during VIP wait (disallowed)")
+                    return []
+                }
                 Thread.sleep(forTimeInterval: 1.0)
                 let status = ZayNative.meshStatusJSON()
                 ZayLog.info("mesh status[\(attempt)]: \(status)")
@@ -354,10 +475,16 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 }
             }
         }
+        guard meshAllowed else {
+            ZayNative.stopMesh()
+            meshRunning = false
+            ZayLog.warn("Mesh aborted after VIP wait (disallowed)")
+            return []
+        }
         ZayLog.info("mesh CIDRs for routing=\(meshCIDRs)")
         lastMeshCIDRs = meshCIDRs
         if updateRoutes {
-            // Reserved for hot-enable Mesh without full tunnel restart.
+            try reloadSingboxMeshRoutes()
         }
         return meshCIDRs
     }
@@ -429,8 +556,13 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     /// Stop Libbox / EasyTier / monitors. Safe to call repeatedly.
-    private func teardownRuntime(reason: String) {
-        ZayLog.info("teardownRuntime (\(reason))")
+    /// - Parameter finalStop: user/system tear-down; blocks `wake` from resurrecting Mesh.
+    ///   Bootstrap reset passes `false` so Mesh can start immediately after.
+    private func teardownRuntime(reason: String, finalStop: Bool) {
+        ZayLog.info("teardownRuntime (\(reason)) finalStop=\(finalStop)")
+        if finalStop {
+            meshAllowed = false
+        }
         rulesReloadWorkItem?.cancel()
         rulesReloadWorkItem = nil
         proxyBridge?.stop()
@@ -444,9 +576,12 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         commandServer = nil
         platform?.reset()
         platform = nil
-        meshRunning = false
-        meshSuspendedBySleep = false
         ZayNative.stopMesh()
+        meshRunning = false
+        if finalStop {
+            meshSuspendedBySleep = false
+            lastMeshCIDRs = []
+        }
         ZayLog.info("teardownRuntime done")
     }
 

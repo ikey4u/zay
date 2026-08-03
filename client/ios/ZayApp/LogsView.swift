@@ -56,10 +56,8 @@ struct LogsView: View {
         .background(ZayTheme.canvas.ignoresSafeArea())
         .navigationTitle("运行日志")
         .navigationBarTitleDisplayMode(.inline)
-        .preferredColorScheme(.light)
         .toolbarBackground(ZayTheme.canvas, for: .navigationBar)
         .toolbarBackground(.visible, for: .navigationBar)
-        .toolbarColorScheme(.light, for: .navigationBar)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button("清空") {
@@ -140,7 +138,7 @@ private struct LogTextView: UIViewRepresentable {
         tv.isEditable = false
         tv.isSelectable = true
         tv.backgroundColor = .clear
-        tv.textColor = UIColor(red: 0.18, green: 0.42, blue: 0.34, alpha: 1)
+        tv.textColor = .label
         tv.font = UIFont(name: ZayTheme.monoFont, size: 11) ?? .monospacedSystemFont(ofSize: 11, weight: .regular)
         tv.textContainerInset = UIEdgeInsets(top: 12, left: 10, bottom: 12, right: 10)
         tv.alwaysBounceVertical = true
@@ -148,6 +146,7 @@ private struct LogTextView: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: UITextView, context: Context) {
+        uiView.textColor = .label
         if uiView.text != text {
             let wasAtBottom = uiView.contentOffset.y + uiView.bounds.height >= uiView.contentSize.height - 40
             uiView.text = text

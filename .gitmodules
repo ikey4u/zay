@@ -1,0 +1,7 @@
+[submodule "vendor/Easytier"]
+	path = vendor/Easytier
+	url = https://github.com/EasyTier/Easytier.git
+[submodule "vendor/sing-box"]
+	path = vendor/sing-box
+	url = https://github.com/sagernet/sing-box.git
+	branch = testing

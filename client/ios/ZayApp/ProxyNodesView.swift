@@ -68,7 +68,6 @@ struct ProxyNodesView: View {
         .background(ZayTheme.canvas.ignoresSafeArea())
         .navigationTitle("代理节点")
         .navigationBarTitleDisplayMode(.large)
-        .preferredColorScheme(.light)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button {

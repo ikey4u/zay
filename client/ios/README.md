@@ -30,6 +30,7 @@ Mesh（EasyTier）+ 全局 TUN 代理（sing-box）的 iOS 客户端。
 - Go 1.22+（编译 Libbox）
 - [XcodeGen](https://github.com/yonaskolb/XcodeGen)：`brew install xcodegen`
 - Apple Developer 账号（真机 Network Extension 需要）
+- 仓库根目录的 git submodules：`vendor/Easytier`、`vendor/sing-box`（`git submodule update --init --recursive`）
 
 ## 一键构建脚本
 

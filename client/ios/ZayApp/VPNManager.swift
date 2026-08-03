@@ -34,6 +34,7 @@ final class VPNManager: ObservableObject {
                             self.lastError = "隧道已断开，请到设置 → 运行日志复制诊断信息"
                         }
                         ZayLog.warn("VPN disconnected after \(previous.rawValue)")
+                        self.clearMeshPreferenceBecauseDisconnected()
                     }
                     if session.status == .connected {
                         self.lastError = nil
@@ -78,6 +79,7 @@ final class VPNManager: ObservableObject {
                 statusDetail = "尚未安装，点启动会弹出系统授权"
                 ZayLog.info("VPN not installed (managers=\(managers.count))")
             }
+            clearMeshPreferenceBecauseDisconnected()
         } catch {
             ZayLog.error("refreshInstallState: \(describe(error))")
         }
@@ -213,8 +215,22 @@ final class VPNManager: ObservableObject {
             ZayLog.info("stopVPNTunnel skipped (no manager)")
             return
         }
+        isBusy = true
+        defer { isBusy = false }
+
+        // Stop EasyTier while the session is still up — don't wait for stopTunnel.
+        if status == .connected || status == .connecting || status == .reasserting {
+            do {
+                _ = try await sendTunnelMessage("stop-mesh")
+                ZayLog.info("stop-mesh acknowledged by extension")
+            } catch {
+                ZayLog.warn("stop-mesh IPC failed: \(describe(error))")
+            }
+        }
+
         do {
-            // Disable on-demand first, otherwise iOS may immediately restart the tunnel.
+            // Disable on-demand first, otherwise iOS may immediately restart the tunnel
+            // (and Mesh would come back with it).
             manager.isOnDemandEnabled = false
             manager.onDemandRules = []
             try await manager.saveToPreferences()
@@ -222,29 +238,79 @@ final class VPNManager: ObservableObject {
         } catch {
             ZayLog.warn("disable on-demand before stop: \(describe(error))")
         }
-        manager.connection.stopVPNTunnel()
-        status = manager.connection.status
+
+        let reloaded = (try? await NETunnelProviderManager.loadAllFromPreferences())?
+            .first(where: { managerMatches($0) })
+        let live = reloaded ?? manager
+        self.manager = live
+        live.isOnDemandEnabled = false
+        live.onDemandRules = []
+        live.connection.stopVPNTunnel()
+        status = live.connection.status
         ZayLog.info("stopVPNTunnel requested")
+
+        // Wait briefly for disconnect; re-assert on-demand off if iOS raced us.
+        for _ in 0..<10 {
+            if live.connection.status == .disconnected || live.connection.status == .invalid {
+                break
+            }
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            status = live.connection.status
+        }
+        if live.isOnDemandEnabled {
+            live.isOnDemandEnabled = false
+            live.onDemandRules = []
+            try? await live.saveToPreferences()
+            ZayLog.warn("re-cleared on-demand after stop")
+        }
+        status = live.connection.status
+        ZayLog.info("stop settled status=\(statusText)")
+
+        // Home off ⇒ Mesh preference off; next start should be proxy-only unless user turns Mesh on again.
+        clearMeshPreferenceBecauseDisconnected()
     }
 
-    /// Mesh toggle changed: restart tunnel when connected so EasyTier starts/stops.
+    /// When VPN is down, do not keep a stale Mesh "on" in settings / next bootstrap.
+    func clearMeshPreferenceBecauseDisconnected() {
+        switch status {
+        case .disconnected, .invalid:
+            break
+        default:
+            return
+        }
+        var cfg = ZayRuntimeConfig.load()
+        guard cfg.meshEnabled else { return }
+        cfg.meshEnabled = false
+        cfg.save()
+        ZayLog.info("cleared meshEnabled — connection is down")
+        NotificationCenter.default.post(name: .zayRuntimeConfigDidChange, object: nil)
+    }
+
+    /// Mesh toggle: hot start/stop EasyTier inside the running tunnel (no reconnect).
     func applyMeshSettingChange(config: ZayRuntimeConfig) async {
         guard status == .connected || status == .connecting || status == .reasserting else {
-            statusDetail = config.meshEnabled ? "Mesh 已开启 · 下次连接生效" : "Mesh 已关闭 · 下次连接更省电"
             return
         }
-        guard config.isValid else {
-            lastError = config.meshEnabled && !config.meshConfigReady
-                ? "已启用 Mesh：请填写中继、网络名与密钥"
-                : "配置不完整"
-            statusDetail = lastError ?? ""
+        if config.meshEnabled, !config.meshConfigReady {
+            lastError = "已启用 Mesh：请填写中继、网络名与密钥"
             return
         }
-        statusDetail = "正在按 Mesh 开关重连…"
-        await stop()
-        // Brief yield so the extension can tear down before start.
-        try? await Task.sleep(nanoseconds: 600_000_000)
-        await start(config: config)
+        lastError = nil
+        let cmd = config.meshEnabled ? "mesh-enable" : "mesh-disable"
+        do {
+            let raw = try await sendTunnelMessage(cmd) ?? ""
+            if let data = raw.data(using: .utf8),
+               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let ok = obj["ok"] as? Bool, !ok {
+                lastError = (obj["error"] as? String) ?? "Mesh 切换失败"
+                ZayLog.error("\(cmd) failed: \(lastError!)")
+                return
+            }
+            ZayLog.info("\(cmd) ok")
+        } catch {
+            lastError = "Mesh 切换失败：\(describe(error))"
+            ZayLog.error("\(cmd) IPC failed: \(describe(error))")
+        }
     }
 
     /// Ask the Packet Tunnel for EasyTier mesh status JSON.
@@ -257,7 +323,12 @@ final class VPNManager: ObservableObject {
         if manager == nil {
             await refreshInstallState()
         }
-        guard status == .connected else { return nil }
+        switch status {
+        case .connected, .connecting, .reasserting:
+            break
+        default:
+            return nil
+        }
         guard let session = manager?.connection as? NETunnelProviderSession else {
             throw NSError(
                 domain: "zay",
@@ -296,11 +367,15 @@ final class VPNManager: ObservableObject {
 
         // If the extension is jetsam'd / fails, reconnect when network is available.
         // Stop path clears these so the user can truly disconnect.
+        // Install-only (nil config) must not leave stale on-demand rules enabled.
         if config != nil {
             let rule = NEOnDemandRuleConnect()
             rule.interfaceTypeMatch = .any
             manager.onDemandRules = [rule]
             manager.isOnDemandEnabled = true
+        } else {
+            manager.onDemandRules = []
+            manager.isOnDemandEnabled = false
         }
     }
 

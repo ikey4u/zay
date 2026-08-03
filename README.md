@@ -26,7 +26,11 @@ equivalent component should persist.
 
 # PREBUILT FILES NOTICE
 
-Windows packages include runtime files extracted from the following official prebuilt archives. `build.rs` verifies each archive with the pinned SHA-256 hash before using it.
+**sing-box** is built from the pinned `vendor/sing-box` git submodule (requires Go on the build machine). See `vendor/README.md`.
+
+**EasyTier** is a Cargo path dependency on `vendor/Easytier` (same submodule pin).
+
+Windows packages additionally include runtime files extracted from the following official prebuilt archives. `build.rs` verifies each archive with the pinned SHA-256 hash before using it.
 
 | File(s) used | Source archive | SHA-256 |
 | --- | --- | --- |

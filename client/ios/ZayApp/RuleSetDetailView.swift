@@ -66,7 +66,6 @@ struct RuleSetDetailView: View {
         .background(ZayTheme.canvas.ignoresSafeArea())
         .navigationTitle(title.isEmpty ? "规则详情" : title)
         .navigationBarTitleDisplayMode(.inline)
-        .preferredColorScheme(.light)
         .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "搜索域名 / CIDR")
         .task { await load() }
     }

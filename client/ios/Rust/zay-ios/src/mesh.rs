@@ -75,11 +75,13 @@ pub fn start_mesh(toml: &str) -> Result<()> {
 pub fn stop_mesh() -> Result<()> {
     crate::logging::init_logging();
     tracing::info!("stopping all EasyTier instances");
+    let ids = CTX.manager.instance_ids();
+    if ids.is_empty() {
+        tracing::info!("EasyTier already idle");
+        return Ok(());
+    }
     CTX.runtime
-        .block_on(
-            CTX.process_management
-                .retain_owned_network_instances_by_name(Vec::new()),
-        )
+        .block_on(CTX.process_management.delete_owned_network_instances(ids))
         .context("stop EasyTier")?;
     tracing::info!("EasyTier stopped");
     Ok(())

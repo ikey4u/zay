@@ -106,7 +106,6 @@ struct RuleListView: View {
         .background(ZayTheme.canvas.ignoresSafeArea())
         .navigationTitle("规则列表")
         .navigationBarTitleDisplayMode(.large)
-        .preferredColorScheme(.light)
         .sheet(isPresented: $showAddRemote) {
             AddRemoteRuleSheet { entry in
                 configStore.update { $0.customRules.append(entry) }
