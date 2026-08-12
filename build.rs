@@ -64,6 +64,7 @@ fn main() {
     println!("cargo:rerun-if-changed=vendor/sing-box/go.mod");
     println!("cargo:rerun-if-changed=vendor/sing-box/cmd/sing-box");
     println!("cargo:rerun-if-changed=vendor/sing-box/release/DEFAULT_BUILD_TAGS_OTHERS");
+    println!("cargo:rerun-if-changed=vendor/sing-box/release/LDFLAGS");
     println!("cargo:rerun-if-changed=vendor/Easytier/easytier/Cargo.toml");
 
     let pkg_version =
@@ -321,8 +322,14 @@ fn embed_singbox(out_dir: &Path, target: &str) {
             )
         });
     let tags = tags.trim();
+    // Must include release/LDFLAGS (-checklinkname=0) or badtls go:linkname fails to link.
+    let shared_ldflags = fs::read_to_string(vendor.join("release/LDFLAGS"))
+        .unwrap_or_else(|e| {
+            panic!("read {}: {e}", vendor.join("release/LDFLAGS").display())
+        });
+    let shared_ldflags = shared_ldflags.trim();
     let ldflags = format!(
-        "-X 'github.com/sagernet/sing-box/constant.Version={version}' -s -w -buildid="
+        "-X 'github.com/sagernet/sing-box/constant.Version={version}' {shared_ldflags} -s -w -buildid="
     );
 
     eprintln!(
