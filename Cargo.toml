@@ -39,7 +39,7 @@ toml = "0.8"
 dirs = "6"
 futures-util = "0.3"
 russh = "0.60"
-ssh2-config = "0.7"
+ssh2-config = "0.7.2"
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
