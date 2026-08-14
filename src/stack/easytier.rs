@@ -109,6 +109,23 @@ fn write_vpn_portal(out: &mut String, mesh: &MeshConfig) -> Result<()> {
     Ok(())
 }
 
+fn write_instance_identity(out: &mut String, mesh: &MeshConfig) -> Result<()> {
+    // EasyTier's local instance id — not the peer display name. zay runs one
+    // mesh per process, so this stays a fixed internal value.
+    writeln!(out, "instance_name = \"zay\"")?;
+    // EasyTier shows `hostname` to other peers. Only set it when the user
+    // configured `[mesh].name`; otherwise keep the OS hostname.
+    if let Some(name) = mesh
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        writeln!(out, "hostname = {name:?}")?;
+    }
+    Ok(())
+}
+
 /// Relay-only: no `ipv4`, no WG portal.
 fn to_easytier_relay_toml(mesh: &MeshConfig) -> Result<String> {
     if mesh.role != MeshRole::Relay {
@@ -128,13 +145,8 @@ fn to_easytier_relay_toml(mesh: &MeshConfig) -> Result<String> {
         bail!("[mesh].mesh_routes is only for role = \"node\"");
     }
 
-    let instance_name = mesh.instance_name.as_deref().unwrap_or("zay").trim();
-    if instance_name.is_empty() {
-        bail!("[mesh].instance_name must not be empty");
-    }
-
     let mut out = String::new();
-    writeln!(out, "instance_name = {instance_name:?}")?;
+    write_instance_identity(&mut out, mesh)?;
     if mesh
         .ipv4
         .as_deref()
@@ -186,13 +198,8 @@ fn to_easytier_node_toml(mesh: &MeshConfig) -> Result<String> {
         bail!("[mesh].role must be \"node\"");
     }
 
-    let instance_name = mesh.instance_name.as_deref().unwrap_or("zay").trim();
-    if instance_name.is_empty() {
-        bail!("[mesh].instance_name must not be empty");
-    }
-
     let mut out = String::new();
-    writeln!(out, "instance_name = {instance_name:?}")?;
+    write_instance_identity(&mut out, mesh)?;
     write_ipv4_and_dhcp(&mut out, mesh)?;
 
     // Nodes must listen so same-LAN peers can open a direct tunnel. Without
@@ -737,7 +744,7 @@ mod tests {
         MeshConfig {
             enabled: true,
             role,
-            instance_name: Some("zay".into()),
+            name: None,
             network_name: "test-net".into(),
             network_secret: "secret".into(),
             dhcp: None,
@@ -766,6 +773,26 @@ mod tests {
         assert!(toml.contains("udp://0.0.0.0:11010"));
         assert!(!toml.contains("[vpn_portal_config]"));
         assert!(!toml.contains("private_mode"));
+    }
+
+    #[test]
+    fn explicit_name_is_peer_hostname() {
+        let mut m = mesh(MeshRole::Node);
+        m.name = Some("weapon".into());
+        m.ipv4 = Some("10.126.126.10/24".into());
+        let toml = to_easytier_toml(&m).unwrap();
+        assert!(toml.contains("instance_name = \"zay\""));
+        assert!(toml.contains("hostname = \"weapon\""));
+    }
+
+    #[test]
+    fn unset_name_does_not_override_os_hostname() {
+        let mut m = mesh(MeshRole::Node);
+        m.name = None;
+        m.ipv4 = Some("10.126.126.10/24".into());
+        let toml = to_easytier_toml(&m).unwrap();
+        assert!(toml.contains("instance_name = \"zay\""));
+        assert!(!toml.contains("hostname ="));
     }
 
     #[test]

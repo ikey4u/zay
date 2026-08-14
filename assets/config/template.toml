@@ -40,7 +40,7 @@
 # [proxy.mesh] # srv: relay / hub
 # enabled = true
 # role = "relay"
-# instance_name = "relay"
+# name = "relay"            # shown to other mesh peers; default is this machine's hostname
 # network_name = "mesh.example"
 # network_secret = "CHANGE_ME"
 # ipv4 = "10.126.126.1/24"
@@ -50,7 +50,7 @@
 # [proxy.mesh] # client A: node with proxy subscription
 # enabled = true
 # role = "node"
-# instance_name = "client-a"
+# name = "client-a"         # shown to other mesh peers; default is this machine's hostname
 # network_name = "mesh.example"
 # network_secret = "CHANGE_ME"
 # ipv4 = "10.126.126.2/24"
@@ -61,7 +61,7 @@
 # [proxy.mesh] # client B: node with proxy subscription
 # enabled = true
 # role = "node"
-# instance_name = "client-b"
+# name = "client-b"         # shown to other mesh peers; default is this machine's hostname
 # network_name = "mesh.example"
 # network_secret = "CHANGE_ME"
 # ipv4 = "10.126.126.3/24"

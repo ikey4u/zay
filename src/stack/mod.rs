@@ -465,8 +465,13 @@ fn mesh_config_to_edit_table(mesh: &MeshConfig) -> Table {
             MeshRole::Node => "node",
         })),
     );
-    if let Some(v) = &mesh.instance_name {
-        t.insert("instance_name", Item::Value(Value::from(v.as_str())));
+    if let Some(v) = mesh
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        t.insert("name", Item::Value(Value::from(v)));
     }
     t.insert(
         "network_name",
@@ -581,7 +586,7 @@ fn build_mesh_config_from_cli(
             Ok(MeshConfig {
                 enabled: true,
                 role,
-                instance_name: Some("relay".into()),
+                name: None,
                 network_name: auth.network_name,
                 network_secret: auth.network_secret,
                 dhcp: None,
@@ -602,7 +607,7 @@ fn build_mesh_config_from_cli(
             Ok(MeshConfig {
                 enabled: true,
                 role,
-                instance_name: Some("zay".into()),
+                name: None,
                 network_name: auth.network_name,
                 network_secret: auth.network_secret,
                 dhcp: None,

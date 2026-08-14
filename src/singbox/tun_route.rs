@@ -1071,7 +1071,7 @@ en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST>
             mesh: Some(MeshConfig {
                 enabled: true,
                 role: MeshRole::Relay,
-                instance_name: Some("relay".into()),
+                name: None,
                 network_name: "n".into(),
                 network_secret: "s".into(),
                 dhcp: None,
@@ -1117,7 +1117,7 @@ en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST>
             mesh: Some(MeshConfig {
                 enabled: true,
                 role: MeshRole::Relay,
-                instance_name: Some("relay".into()),
+                name: None,
                 network_name: "n".into(),
                 network_secret: "s".into(),
                 dhcp: None,
@@ -1166,7 +1166,7 @@ en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST>
             mesh: Some(MeshConfig {
                 enabled: true,
                 role: MeshRole::Node,
-                instance_name: None,
+                name: None,
                 network_name: "n".into(),
                 network_secret: "s".into(),
                 dhcp: None,
@@ -1216,7 +1216,7 @@ en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST>
             mesh: Some(MeshConfig {
                 enabled: true,
                 role: MeshRole::Node,
-                instance_name: None,
+                name: None,
                 network_name: "n".into(),
                 network_secret: "s".into(),
                 dhcp: None,
@@ -1265,7 +1265,7 @@ en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST>
             mesh: Some(MeshConfig {
                 enabled: true,
                 role: MeshRole::Node,
-                instance_name: None,
+                name: None,
                 network_name: "n".into(),
                 network_secret: "s".into(),
                 dhcp: None,
@@ -1336,7 +1336,7 @@ en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST>
             mesh: Some(MeshConfig {
                 enabled: true,
                 role: MeshRole::Node,
-                instance_name: Some("zay".into()),
+                name: None,
                 network_name: "n".into(),
                 network_secret: "s".into(),
                 dhcp: None,

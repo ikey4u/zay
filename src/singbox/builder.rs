@@ -456,7 +456,7 @@ mod tests {
             mesh: Some(MeshConfig {
                 enabled: true,
                 role: MeshRole::Node,
-                instance_name: Some("zay".into()),
+                name: None,
                 network_name: "my-network".into(),
                 network_secret: "change-me".into(),
                 dhcp: None,
@@ -509,7 +509,7 @@ mod tests {
             mesh: Some(MeshConfig {
                 enabled: true,
                 role: MeshRole::Relay,
-                instance_name: Some("relay".into()),
+                name: None,
                 network_name: "my-network".into(),
                 network_secret: "change-me".into(),
                 dhcp: None,

@@ -133,6 +133,7 @@ Key paths are dot-separated TOML paths:
 proxy.mixed_port
 proxy.health_check_url
 proxy.mixin
+proxy.mesh.name
 proxy.mesh.network_name
 proxy.mesh.mesh_routes
 ```

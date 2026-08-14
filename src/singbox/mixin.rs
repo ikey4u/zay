@@ -144,7 +144,7 @@ mod tests {
             mesh: Some(MeshConfig {
                 enabled: true,
                 role: MeshRole::Node,
-                instance_name: None,
+                name: None,
                 network_name: "n".into(),
                 network_secret: "s".into(),
                 dhcp: None,

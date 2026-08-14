@@ -429,7 +429,7 @@ mod tests {
         let mesh = MeshConfig {
             enabled: true,
             role: MeshRole::Relay,
-            instance_name: None,
+            name: None,
             network_name: "n".into(),
             network_secret: "s".into(),
             dhcp: None,
@@ -453,7 +453,7 @@ mod tests {
         let mesh = MeshConfig {
             enabled: true,
             role: MeshRole::Node,
-            instance_name: None,
+            name: None,
             network_name: "n".into(),
             network_secret: "s".into(),
             dhcp: None,

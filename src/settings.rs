@@ -26,7 +26,13 @@ pub struct MeshConfig {
     #[serde(default)]
     pub enabled: bool,
     pub role: MeshRole,
-    pub instance_name: Option<String>,
+    /// Display name other mesh peers see. Unset uses the OS hostname.
+    #[serde(
+        default,
+        alias = "instance_name",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub name: Option<String>,
     pub network_name: String,
     pub network_secret: String,
     pub dhcp: Option<bool>,
@@ -807,7 +813,7 @@ local_forwards = ["3308:db.internal:3306"]
         let mut mesh = Some(MeshConfig {
             enabled: true,
             role: MeshRole::Node,
-            instance_name: None,
+            name: None,
             network_name: "test".into(),
             network_secret: "secret".into(),
             dhcp: None,
@@ -832,7 +838,7 @@ local_forwards = ["3308:db.internal:3306"]
         let mesh = MeshConfig {
             enabled: true,
             role: MeshRole::Node,
-            instance_name: None,
+            name: None,
             network_name: "test".into(),
             network_secret: "secret".into(),
             dhcp: None,
@@ -856,7 +862,7 @@ local_forwards = ["3308:db.internal:3306"]
         let mesh = MeshConfig {
             enabled: true,
             role: MeshRole::Node,
-            instance_name: None,
+            name: None,
             network_name: "test".into(),
             network_secret: "secret".into(),
             dhcp: None,
@@ -876,6 +882,34 @@ local_forwards = ["3308:db.internal:3306"]
             mesh_tun_exclude_cidrs(&mesh).unwrap(),
             vec!["172.31.0.0/20".to_string(), "10.8.0.0/24".to_string()]
         );
+    }
+
+    #[test]
+    fn mesh_name_is_display_name() {
+        let parsed: MeshConfig = toml::from_str(
+            r#"
+role = "node"
+network_name = "n"
+network_secret = "s"
+name = "weapon"
+"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.name.as_deref(), Some("weapon"));
+    }
+
+    #[test]
+    fn mesh_instance_name_alias_maps_to_name() {
+        let parsed: MeshConfig = toml::from_str(
+            r#"
+role = "node"
+network_name = "n"
+network_secret = "s"
+instance_name = "legacy"
+"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.name.as_deref(), Some("legacy"));
     }
 
     #[test]
