@@ -354,6 +354,19 @@ mod imp {
 
     static CTX: Lazy<Ctx> = Lazy::new(Ctx::new);
 
+    /// EasyTier's `Runtime::block_on` / `Handle::block_on` panic if the current
+    /// thread has entered any Tokio runtime (`spawn_blocking` on 1.52+ does).
+    fn outside_tokio<T: Send>(f: impl FnOnce() -> T + Send) -> T {
+        if tokio::runtime::Handle::try_current().is_ok() {
+            match std::thread::scope(|scope| scope.spawn(f).join()) {
+                Ok(value) => value,
+                Err(panic) => std::panic::resume_unwind(panic),
+            }
+        } else {
+            f()
+        }
+    }
+
     pub fn start(mesh: &MeshConfig, _data_dir: &Path) -> Result<Uuid> {
         match mesh.role {
             MeshRole::Relay => {
@@ -432,24 +445,25 @@ mod imp {
         }
         let cfg = TomlConfigLoader::new_from_str(&toml)
             .context("parsing EasyTier mesh config")?;
-        let id = CTX
-            .runtime
-            .block_on(
+        let id = outside_tokio(|| {
+            CTX.runtime.block_on(
                 CTX.process_management
                     .run_owned_network_instance(cfg, ConfigFileControl::STATIC_CONFIG),
             )
-            .context("starting EasyTier mesh")?;
+        })
+        .context("starting EasyTier mesh")?;
         eprintln!("mesh started (instance {id}, role={:?})", mesh.role);
         Ok(id)
     }
 
     pub fn stop_all() -> Result<()> {
-        CTX.runtime
-            .block_on(
+        outside_tokio(|| {
+            CTX.runtime.block_on(
                 CTX.process_management
                     .retain_owned_network_instances_by_name(Vec::new()),
             )
-            .context("stopping EasyTier mesh")?;
+        })
+        .context("stopping EasyTier mesh")?;
         Ok(())
     }
 
@@ -547,11 +561,21 @@ mod imp {
         }
     }
 
+    fn collect_infos() -> Result<
+        std::collections::BTreeMap<
+            Uuid,
+            easytier::proto::api::manage::NetworkInstanceRunningInfo,
+        >,
+    > {
+        outside_tokio(|| {
+            CTX.manager
+                .collect_network_infos_sync()
+                .context("querying EasyTier mesh status")
+        })
+    }
+
     fn mesh_has_virtual_ip() -> Result<bool> {
-        let infos = CTX
-            .manager
-            .collect_network_infos_sync()
-            .context("querying EasyTier mesh status")?;
+        let infos = collect_infos()?;
         Ok(infos.values().any(|info| {
             info.my_node_info
                 .as_ref()
@@ -561,19 +585,13 @@ mod imp {
     }
 
     fn mesh_peer_count() -> Result<usize> {
-        let infos = CTX
-            .manager
-            .collect_network_infos_sync()
-            .context("querying EasyTier mesh status")?;
+        let infos = collect_infos()?;
         Ok(infos.values().map(|i| i.peers.len()).sum())
     }
 
     /// Query EasyTier's running snapshot (same data surface as `easytier-cli peer` / `route`).
-    pub async fn status() -> Result<Vec<super::MeshInstanceStatus>> {
-        let infos = CTX
-            .manager
-            .collect_network_infos_sync()
-            .context("querying EasyTier mesh status")?;
+    pub fn status() -> Result<Vec<super::MeshInstanceStatus>> {
+        let infos = collect_infos()?;
         let mut instances = Vec::with_capacity(infos.len());
         for (id, info) in infos {
             let peer_host_by_id: std::collections::HashMap<u32, String> = info
@@ -640,7 +658,7 @@ mod imp {
     }
 
     fn log_mesh_status_now() {
-        let Ok(infos) = CTX.manager.collect_network_infos_sync() else {
+        let Ok(infos) = collect_infos() else {
             eprintln!("warn: could not query EasyTier mesh status");
             return;
         };

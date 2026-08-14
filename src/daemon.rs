@@ -274,6 +274,26 @@ impl Drop for Guard {
     }
 }
 
+/// EasyTier's `collect_network_infos_sync` uses `Handle::block_on`, which panics
+/// if the current thread has entered a Tokio runtime. The control server runs
+/// inside the daemon runtime, and `spawn_blocking` also enters it, so hop to a
+/// plain OS thread — the same pattern as `StackController` mesh start.
+async fn mesh_status_json() -> String {
+    let (tx, rx) = oneshot::channel();
+    thread::spawn(move || {
+        let result = crate::stack::easytier::status().and_then(|status| {
+            serde_json::to_string(&status)
+                .context("serializing EasyTier mesh status")
+        });
+        let _ = tx.send(result);
+    });
+    match rx.await {
+        Ok(Ok(json)) => json,
+        Ok(Err(error)) => serde_json::json!({ "error": format!("{error:#}") }).to_string(),
+        Err(_) => serde_json::json!({ "error": "mesh status thread exited" }).to_string(),
+    }
+}
+
 /// Start a loopback-only control listener shared by foreground and daemon runs.
 /// The persisted port is intentionally private to the current user's data directory.
 pub async fn start_control(
@@ -312,26 +332,7 @@ pub async fn start_control(
                     break;
                 }
                 "mesh-status" => {
-                    // EasyTier's RPC trait object is intentionally not Send.
-                    // Drive its API futures on a dedicated blocking thread.
-                    let response = tokio::task::spawn_blocking(|| {
-                        tokio::runtime::Builder::new_current_thread()
-                            .enable_all()
-                            .build()
-                            .context("creating EasyTier API runtime")?
-                            .block_on(crate::stack::easytier::status())
-                            .and_then(|status| {
-                                serde_json::to_string(&status)
-                                    .context("serializing EasyTier mesh status")
-                            })
-                    })
-                    .await
-                    .unwrap_or_else(|error| Err(anyhow::anyhow!(error)))
-                    .unwrap_or_else(|error| {
-                        serde_json::json!({ "error": format!("{error:#}") })
-                            .to_string()
-                    });
-                    let _ = stream.write_all(response.as_bytes()).await;
+                    let _ = stream.write_all(mesh_status_json().await.as_bytes()).await;
                 }
                 _ => {
                     let _ = stream.write_all(b"unknown command\n").await;

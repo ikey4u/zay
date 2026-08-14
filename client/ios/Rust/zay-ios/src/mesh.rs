@@ -52,6 +52,19 @@ impl Ctx {
 
 static CTX: Lazy<Ctx> = Lazy::new(Ctx::new);
 
+/// EasyTier's `Runtime::block_on` / `Handle::block_on` panic if the current
+/// thread has entered any Tokio runtime (`spawn_blocking` on 1.52+ does).
+fn outside_tokio<T: Send>(f: impl FnOnce() -> T + Send) -> T {
+    if tokio::runtime::Handle::try_current().is_ok() {
+        match std::thread::scope(|scope| scope.spawn(f).join()) {
+            Ok(value) => value,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    } else {
+        f()
+    }
+}
+
 pub fn start_mesh(toml: &str) -> Result<()> {
     crate::logging::init_logging();
     tracing::info!("parsing EasyTier config ({} bytes)", toml.len());
@@ -61,12 +74,13 @@ pub fn start_mesh(toml: &str) -> Result<()> {
     let name = cfg.get_inst_name();
     tracing::info!("starting EasyTier instance name={name}");
 
-    CTX.runtime
-        .block_on(
+    outside_tokio(|| {
+        CTX.runtime.block_on(
             CTX.process_management
                 .run_owned_network_instance(cfg, ConfigFileControl::STATIC_CONFIG),
         )
-        .context("run EasyTier instance")?;
+    })
+    .context("run EasyTier instance")?;
 
     tracing::info!("EasyTier instance started");
     Ok(())
@@ -75,15 +89,21 @@ pub fn start_mesh(toml: &str) -> Result<()> {
 pub fn stop_mesh() -> Result<()> {
     crate::logging::init_logging();
     tracing::info!("stopping all EasyTier instances");
-    let ids = CTX.manager.instance_ids();
-    if ids.is_empty() {
+    let stopped = outside_tokio(|| {
+        let ids = CTX.manager.instance_ids();
+        if ids.is_empty() {
+            return Ok::<bool, anyhow::Error>(false);
+        }
+        CTX.runtime
+            .block_on(CTX.process_management.delete_owned_network_instances(ids))
+            .context("stop EasyTier")?;
+        Ok(true)
+    })?;
+    if stopped {
+        tracing::info!("EasyTier stopped");
+    } else {
         tracing::info!("EasyTier already idle");
-        return Ok(());
     }
-    CTX.runtime
-        .block_on(CTX.process_management.delete_owned_network_instances(ids))
-        .context("stop EasyTier")?;
-    tracing::info!("EasyTier stopped");
     Ok(())
 }
 
@@ -104,10 +124,11 @@ pub fn set_tun_fd(inst_name: &str, fd: i32) -> Result<()> {
 }
 
 pub fn mesh_status_json() -> Result<String> {
-    let collected = CTX
-        .manager
-        .collect_network_infos_sync()
-        .context("collect_network_infos_sync")?;
+    let collected = outside_tokio(|| {
+        CTX.manager
+            .collect_network_infos_sync()
+            .context("collect_network_infos_sync")
+    })?;
 
     let mut arr = Vec::new();
     for (instance_id, value) in collected.iter() {
