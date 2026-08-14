@@ -10,7 +10,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::log_buf::{LogBuffer, SingboxLogWriter, pipe_singbox_to_buffer};
 use crate::{
@@ -25,7 +25,7 @@ use crate::{
     },
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StackRunState {
     Stopped,
@@ -35,7 +35,7 @@ pub enum StackRunState {
     Stopping,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StackStatus {
     pub state: StackRunState,
     pub pid: Option<u32>,
@@ -132,7 +132,16 @@ impl StackController {
                     st.pid = None;
                 }
                 Err(e) => {
-                    let error = format!("{e:#}");
+                    let mut error = format!("{e:#}");
+                    if let Some(fatal) =
+                        failure_logs.recent().into_iter().rev().find(|line| {
+                            let lower = line.to_ascii_lowercase();
+                            lower.contains("fatal")
+                                || lower.contains("address already in use")
+                        })
+                    {
+                        error = format!("{error}; {fatal}");
+                    }
                     crate::logging::emit_error("proxy", "failed", &error);
                     failure_logs.push(format!("proxy stack failed: {error}"));
                     st.state = StackRunState::Failed;
@@ -278,6 +287,8 @@ fn run_stack_managed(
 
     let code = status_wait.code().unwrap_or(1);
     if code != 0 {
+        // Let the stderr pipe copy FATAL lines into the log buffer first.
+        thread::sleep(Duration::from_millis(150));
         bail!("sing-box exited with status {code}");
     }
     Ok(())

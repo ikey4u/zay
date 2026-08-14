@@ -63,7 +63,9 @@ fn main() {
 
     println!("cargo:rerun-if-changed=vendor/sing-box/go.mod");
     println!("cargo:rerun-if-changed=vendor/sing-box/cmd/sing-box");
-    println!("cargo:rerun-if-changed=vendor/sing-box/release/DEFAULT_BUILD_TAGS_OTHERS");
+    println!(
+        "cargo:rerun-if-changed=vendor/sing-box/release/DEFAULT_BUILD_TAGS_OTHERS"
+    );
     println!("cargo:rerun-if-changed=vendor/sing-box/release/LDFLAGS");
     println!("cargo:rerun-if-changed=vendor/Easytier/easytier/Cargo.toml");
 
@@ -280,7 +282,9 @@ fn write_clash_rules_stamp(path: &Path, key: &str) -> Result<(), String> {
 }
 
 fn embed_singbox(out_dir: &Path, target: &str) {
-    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
+    let manifest_dir = PathBuf::from(
+        env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"),
+    );
     let vendor = manifest_dir.join(VENDOR_SINGBOX_DIR);
     if !vendor.join("go.mod").is_file() {
         panic!(
@@ -311,16 +315,18 @@ fn embed_singbox(out_dir: &Path, target: &str) {
         return;
     }
 
-    let (goos, goarch) = go_target_for_rust_target(target).unwrap_or_else(|| {
-        panic!("unsupported build target for vendor sing-box: {target}")
-    });
-    let tags = fs::read_to_string(vendor.join("release/DEFAULT_BUILD_TAGS_OTHERS"))
-        .unwrap_or_else(|e| {
-            panic!(
-                "read {}: {e}",
-                vendor.join("release/DEFAULT_BUILD_TAGS_OTHERS").display()
-            )
+    let (goos, goarch) =
+        go_target_for_rust_target(target).unwrap_or_else(|| {
+            panic!("unsupported build target for vendor sing-box: {target}")
         });
+    let tags =
+        fs::read_to_string(vendor.join("release/DEFAULT_BUILD_TAGS_OTHERS"))
+            .unwrap_or_else(|e| {
+                panic!(
+                    "read {}: {e}",
+                    vendor.join("release/DEFAULT_BUILD_TAGS_OTHERS").display()
+                )
+            });
     let tags = tags.trim();
     // Must include release/LDFLAGS (-checklinkname=0) or badtls go:linkname fails to link.
     let shared_ldflags = fs::read_to_string(vendor.join("release/LDFLAGS"))
@@ -369,13 +375,21 @@ fn embed_singbox(out_dir: &Path, target: &str) {
     emit_singbox_rustc_env(&embed_path, &version);
 }
 
-fn go_target_for_rust_target(target: &str) -> Option<(&'static str, &'static str)> {
+fn go_target_for_rust_target(
+    target: &str,
+) -> Option<(&'static str, &'static str)> {
     Some(match target {
         "aarch64-apple-darwin" => ("darwin", "arm64"),
         "x86_64-apple-darwin" => ("darwin", "amd64"),
-        "aarch64-unknown-linux-gnu" | "aarch64-unknown-linux-musl" => ("linux", "arm64"),
-        "x86_64-unknown-linux-gnu" | "x86_64-unknown-linux-musl" => ("linux", "amd64"),
-        "x86_64-pc-windows-gnu" | "x86_64-pc-windows-msvc" => ("windows", "amd64"),
+        "aarch64-unknown-linux-gnu" | "aarch64-unknown-linux-musl" => {
+            ("linux", "arm64")
+        }
+        "x86_64-unknown-linux-gnu" | "x86_64-unknown-linux-musl" => {
+            ("linux", "amd64")
+        }
+        "x86_64-pc-windows-gnu" | "x86_64-pc-windows-msvc" => {
+            ("windows", "amd64")
+        }
         "aarch64-pc-windows-msvc" => ("windows", "arm64"),
         _ => return None,
     })
@@ -448,7 +462,8 @@ fn prepare_winpcap(out_dir: &Path, runtime_dir: &Path) {
     // WinPcap's installer ships several Packet.dll builds; the NetMon-enabled
     // x64 variant imports obsolete NPPTools.dll and fails to start on modern
     // Windows. Keep only a PE that does not depend on it.
-    if !packet_dll.is_file() || ensure_winpcap_packet_dll(&packet_dll).is_err() {
+    if !packet_dll.is_file() || ensure_winpcap_packet_dll(&packet_dll).is_err()
+    {
         let installer = base_dir.join("WinPcap_4_1_3.exe");
         download_if_missing(
             WINPCAP_INSTALLER_URL,
@@ -584,9 +599,8 @@ fn extract_winpcap_packet_dll(
 
 fn pe_imports_dll(buf: &[u8], dll_name: &str) -> bool {
     let needle = dll_name.as_bytes();
-    buf.windows(needle.len()).any(|window| {
-        window.eq_ignore_ascii_case(needle)
-    })
+    buf.windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle))
 }
 
 fn is_usable_winpcap_packet_dll(buf: &[u8]) -> bool {

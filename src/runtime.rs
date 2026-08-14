@@ -66,7 +66,9 @@ async fn run_inner(
         "persistent runtime started",
     );
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
-    let control = daemon::start_control(&paths, shutdown_tx).await?;
+    let control =
+        daemon::start_control(&paths, shutdown_tx, running.stack.clone())
+            .await?;
     if let Some(guard) = daemon_guard {
         guard.mark_ready()?;
     }

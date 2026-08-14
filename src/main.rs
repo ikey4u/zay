@@ -370,6 +370,55 @@ fn preflight_persistent_tun(opts: &ServiceOpts) -> Result<Option<String>> {
     Ok(None)
 }
 
+fn print_stack_status(response: &str) -> Result<()> {
+    let value: serde_json::Value = serde_json::from_str(response)
+        .context("parsing proxy status response")?;
+    if let Some(error) = value.get("error").and_then(|value| value.as_str()) {
+        if error.contains("not enabled") {
+            return Ok(());
+        }
+        eprintln!("proxy: status unavailable ({error})");
+        return Ok(());
+    }
+    let status: crate::stack::controller::StackStatus =
+        serde_json::from_value(value).context("decoding proxy status")?;
+    match status.state {
+        crate::stack::controller::StackRunState::Failed => {
+            eprintln!(
+                "proxy: failed{}",
+                status
+                    .error
+                    .as_deref()
+                    .map(|error| format!(" ({error})"))
+                    .unwrap_or_default()
+            );
+        }
+        crate::stack::controller::StackRunState::Starting => {
+            println!("proxy: starting");
+        }
+        crate::stack::controller::StackRunState::Stopping => {
+            println!("proxy: stopping");
+        }
+        crate::stack::controller::StackRunState::Stopped => {
+            println!("proxy: stopped");
+        }
+        crate::stack::controller::StackRunState::Running => {
+            let mut line = "proxy: running".to_string();
+            if let Some(pid) = status.pid {
+                line.push_str(&format!(" (pid {pid}"));
+                if let Some(port) = status.mixed_port {
+                    line.push_str(&format!(", mixed {port}"));
+                }
+                line.push(')');
+            } else if let Some(port) = status.mixed_port {
+                line.push_str(&format!(" (mixed {port})"));
+            }
+            println!("{line}");
+        }
+    }
+    Ok(())
+}
+
 fn print_mesh_status(response: &str) -> Result<()> {
     let value: serde_json::Value = serde_json::from_str(&response)
         .context("parsing mesh status response")?;
@@ -431,6 +480,12 @@ fn run_status(
     match result {
         Ok(status) => {
             println!("zay: {status}");
+            match runtime.block_on(daemon::request(&paths, "stack-status")) {
+                Ok(response) => print_stack_status(&response)?,
+                Err(error) => {
+                    eprintln!("proxy: status unavailable ({error:#})")
+                }
+            }
             match runtime.block_on(daemon::request(&paths, "mesh-status")) {
                 Ok(response) => print_mesh_status(&response)?,
                 Err(error) => eprintln!("mesh: status unavailable ({error:#})"),

@@ -447,8 +447,10 @@ mod imp {
             .context("parsing EasyTier mesh config")?;
         let id = outside_tokio(|| {
             CTX.runtime.block_on(
-                CTX.process_management
-                    .run_owned_network_instance(cfg, ConfigFileControl::STATIC_CONFIG),
+                CTX.process_management.run_owned_network_instance(
+                    cfg,
+                    ConfigFileControl::STATIC_CONFIG,
+                ),
             )
         })
         .context("starting EasyTier mesh")?;
@@ -634,7 +636,10 @@ mod imp {
                         peer_id: route.peer_id.to_string(),
                         hostname: (!route.hostname.is_empty())
                             .then(|| route.hostname.clone()),
-                        virtual_ipv4: route.ipv4_addr.as_ref().map(|ip| ip.to_string()),
+                        virtual_ipv4: route
+                            .ipv4_addr
+                            .as_ref()
+                            .map(|ip| ip.to_string()),
                         path,
                         latency_ms,
                         tunnel,

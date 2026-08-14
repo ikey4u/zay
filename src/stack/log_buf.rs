@@ -36,6 +36,15 @@ impl LogBuffer {
             guard.pop_front();
         }
     }
+
+    pub fn recent(&self) -> Vec<String> {
+        self.inner
+            .read()
+            .expect("log buffer lock")
+            .iter()
+            .cloned()
+            .collect()
+    }
 }
 
 pub fn pipe_to_buffer(

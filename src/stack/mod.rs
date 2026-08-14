@@ -340,6 +340,7 @@ pub(crate) fn spawn_singbox(
     tun_enabled: bool,
     sudo_password: Option<&str>,
 ) -> Result<crate::singbox::assets::ManagedChild> {
+    crate::singbox::assets::ensure_mixed_port_free(settings.mixed_port)?;
     singbox::spawn(
         engine,
         &settings.singbox_dir(),

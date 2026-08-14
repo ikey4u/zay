@@ -9,6 +9,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::Arc,
     thread,
     time::{Duration, Instant},
 };
@@ -21,7 +22,7 @@ use tokio::{
     task::JoinHandle,
 };
 
-use crate::settings;
+use crate::{settings, stack::controller::StackController};
 
 const READY_WAIT: Duration = Duration::from_secs(45);
 
@@ -289,8 +290,11 @@ async fn mesh_status_json() -> String {
     });
     match rx.await {
         Ok(Ok(json)) => json,
-        Ok(Err(error)) => serde_json::json!({ "error": format!("{error:#}") }).to_string(),
-        Err(_) => serde_json::json!({ "error": "mesh status thread exited" }).to_string(),
+        Ok(Err(error)) => {
+            serde_json::json!({ "error": format!("{error:#}") }).to_string()
+        }
+        Err(_) => serde_json::json!({ "error": "mesh status thread exited" })
+            .to_string(),
     }
 }
 
@@ -299,6 +303,7 @@ async fn mesh_status_json() -> String {
 pub async fn start_control(
     paths: &Paths,
     shutdown: oneshot::Sender<()>,
+    stack: Option<Arc<StackController>>,
 ) -> Result<JoinHandle<()>> {
     fs::create_dir_all(&paths.run_dir)
         .with_context(|| format!("creating {}", paths.run_dir.display()))?;
@@ -332,7 +337,21 @@ pub async fn start_control(
                     break;
                 }
                 "mesh-status" => {
-                    let _ = stream.write_all(mesh_status_json().await.as_bytes()).await;
+                    let _ = stream
+                        .write_all(mesh_status_json().await.as_bytes())
+                        .await;
+                }
+                "stack-status" => {
+                    let response = match &stack {
+                        Some(controller) => serde_json::to_string(&controller.status())
+                            .unwrap_or_else(|error| {
+                                serde_json::json!({ "error": format!("{error:#}") })
+                                    .to_string()
+                            }),
+                        None => serde_json::json!({ "error": "proxy stack is not enabled" })
+                            .to_string(),
+                    };
+                    let _ = stream.write_all(response.as_bytes()).await;
                 }
                 _ => {
                     let _ = stream.write_all(b"unknown command\n").await;
