@@ -683,7 +683,13 @@ async fn proxy_tcp(
 
 #[cfg(test)]
 mod tests {
-    use std::{net::SocketAddr, sync::Arc, time::Duration};
+    use std::{
+        io::{BufRead as _, Write as _},
+        net::SocketAddr,
+        process::Stdio,
+        sync::Arc,
+        time::Duration,
+    };
 
     use rcgen::{
         BasicConstraints, CertificateParams, CertifiedKey,
@@ -1081,5 +1087,93 @@ mod tests {
             netlog.windows(4).any(|window| window == b"B2ON"),
             "Cronet NetLog did not record the BBRv2 connection option"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires the pinned Go sing-box toolchain"]
+    async fn bbr2_client_survives_impairment_against_pinned_go_server() {
+        const PAYLOAD_SIZE: usize = 2 * 1024 * 1024;
+
+        let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_address = target.local_addr().unwrap();
+        let echo = tokio::spawn(async move {
+            let (mut stream, _) = target.accept().await.unwrap();
+            let mut payload = vec![0_u8; PAYLOAD_SIZE];
+            stream.read_exact(&mut payload).await.unwrap();
+            stream.write_all(&payload).await.unwrap();
+        });
+
+        let CertifiedKey { cert, key_pair } =
+            generate_simple_self_signed(vec!["naive.example.com".into()])
+                .unwrap();
+        let certificate = cert.pem();
+        let temporary = tempfile::tempdir().unwrap();
+        let certificate_path = temporary.path().join("certificate.pem");
+        let key_path = temporary.path().join("key.pem");
+        std::fs::write(&certificate_path, &certificate).unwrap();
+        std::fs::write(&key_path, key_pair.serialize_pem()).unwrap();
+
+        let reservation = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let server_port = reservation.local_addr().unwrap().port();
+        drop(reservation);
+        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let workspace = manifest.join("../..");
+        let fixture = manifest.join("tests/fixtures/naive-go-server/main.go");
+        let mut child = std::process::Command::new("go")
+            .args(["run", "-tags", "with_quic", fixture.to_str().unwrap()])
+            .current_dir(workspace.join("inner/sing-box"))
+            .env("SINGBOX_NAIVE_GO_PORT", server_port.to_string())
+            .env("SINGBOX_NAIVE_GO_CERTIFICATE", &certificate_path)
+            .env("SINGBOX_NAIVE_GO_KEY", &key_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut ready = String::new();
+        std::io::BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut ready)
+            .unwrap();
+        let server: SocketAddr = ready.trim().parse().unwrap();
+        let (proxy, proxy_task) = spawn_udp_impairment_proxy(server).await;
+
+        let client_options: Options = serde_json::from_value(json!({
+            "dns":{"servers":[{"type":"hosts","tag":"hosts"}]},
+            "outbounds":[{
+                "type":"naive",
+                "tag":"naive-bbr2",
+                "server":"127.0.0.1",
+                "server_port":proxy.port(),
+                "username":"alice",
+                "password":"secret",
+                "quic":true,
+                "quic_congestion_control":"bbr2",
+                "tls":{
+                    "enabled":true,
+                    "server_name":"naive.example.com",
+                    "certificate":certificate
+                }
+            }]
+        }))
+        .unwrap();
+        let manager =
+            OutboundManager::from_options(&client_options, "").unwrap();
+        let mut stream = manager
+            .default()
+            .dial_tcp(&SocksAddr::from(target_address))
+            .await
+            .unwrap();
+        let payload = (0..PAYLOAD_SIZE)
+            .map(|index| (index as u8).wrapping_mul(31).wrapping_add(7))
+            .collect::<Vec<_>>();
+        stream.write_all(&payload).await.unwrap();
+        let mut received = vec![0_u8; PAYLOAD_SIZE];
+        stream.read_exact(&mut received).await.unwrap();
+        assert_eq!(received, payload);
+
+        drop(stream);
+        proxy_task.abort();
+        child.stdin.take().unwrap().write_all(b"\n").unwrap();
+        assert!(child.wait().unwrap().success());
+        echo.await.unwrap();
     }
 }

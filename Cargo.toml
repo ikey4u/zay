@@ -73,12 +73,14 @@ exclude = [
     "vendor/Easytier",
     "crates/singbox/vendor/shadowsocks",
     "crates/singbox/vendor/quinn-proto-chrome",
+    "crates/singbox/vendor/h3-standard-connect",
 ]
 resolver = "3"
 
 [patch.crates-io]
 rustls = { path = "crates/singbox/vendor/rustls-shadowtls" }
 quinn-proto = { path = "crates/singbox/vendor/quinn-proto-chrome" }
+h3 = { path = "crates/singbox/vendor/h3-standard-connect" }
 
 [profile.release.package.zay-ios]
 codegen-units = 1
