@@ -641,6 +641,27 @@ impl Controller for Bbr {
         self.has_non_app_limited_sample |= non_app_limited;
     }
 
+    fn on_lost_packet(
+        &mut self,
+        _now: Instant,
+        _sent: Instant,
+        _bytes: u64,
+        packet_space: u8,
+        packet_number: u64,
+    ) {
+        // Keep the delivery sampler proportional to the live QUIC flight.
+        // sing-quic removes lost/obsolete packet state from its growable
+        // packet-number queue; Quinn has already retired the packet when this
+        // callback runs, so it cannot produce a later bandwidth sample.
+        self.max_bandwidth
+            .retire_packet(packet_space, packet_number);
+    }
+
+    fn on_discarded_packet(&mut self, packet_space: u8, packet_number: u64) {
+        self.max_bandwidth
+            .retire_packet(packet_space, packet_number);
+    }
+
     fn on_end_acks(
         &mut self,
         now: Instant,
@@ -1116,5 +1137,39 @@ mod tests {
 
         filter.rebase(25_000);
         assert_eq!(filter.get(), 0);
+    }
+
+    #[test]
+    fn lost_and_discarded_packets_are_retired_from_delivery_sampler() {
+        let start = Instant::now();
+        let mut controller =
+            Bbr::new(Arc::new(BbrConfig::new(BbrProfile::Standard)), 1_200);
+        for packet in 1..=512_u64 {
+            let sent = start + Duration::from_micros(packet);
+            controller.on_sent_packet(
+                sent,
+                1_200,
+                2,
+                packet,
+                (packet - 1) * 1_200,
+                false,
+            );
+        }
+        assert_eq!(controller.max_bandwidth.tracked_packet_count(), 512);
+
+        for packet in 1..=256_u64 {
+            let sent = start + Duration::from_micros(packet);
+            controller.on_lost_packet(
+                start + Duration::from_millis(100),
+                sent,
+                1_200,
+                2,
+                packet,
+            );
+        }
+        for packet in 257..=512_u64 {
+            controller.on_discarded_packet(2, packet);
+        }
+        assert_eq!(controller.max_bandwidth.tracked_packet_count(), 0);
     }
 }

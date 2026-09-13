@@ -554,8 +554,12 @@ impl Controller for Bbr2 {
         packet_space: u8,
         packet_number: u64,
     ) {
-        self.sampler.on_lost_packet(packet_space, packet_number);
+        self.sampler.retire_packet(packet_space, packet_number);
         self.bytes_lost = self.bytes_lost.saturating_add(bytes);
+    }
+
+    fn on_discarded_packet(&mut self, packet_space: u8, packet_number: u64) {
+        self.sampler.retire_packet(packet_space, packet_number);
     }
 
     fn on_congestion_event(

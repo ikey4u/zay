@@ -6,6 +6,21 @@
 > [!IMPORTANT] 当前估算：**99%（当前加权估算 99.9%，置信区间约 ±1.5%）**
 > 这是本次迁移的进度单一真源。百分比按功能风险加权，不按代码行数或测试数量计算；只有进入 `crates/singbox` library、接入 Runtime、具备回归，并且没有已知关键 wire/lifecycle 差异的能力才计为完成。
 
+### 当前快照
+
+| 项目 | 当前状态 |
+| --- | --- |
+| 总体 | **99.9%**；本轮关闭高 BDP QUIC delivery sampler 的 256 包硬上限差异，完成度不因单纯增加回归而上调 |
+| 交付 | `crates/singbox` 为可嵌入 Rust library；binary/CLI 由 zay 实现；上游 CLI、daemon/service 与 experimental 应用控制 API 不计入分母 |
+| 最新实现 | BBRv1/BBRv2 跟踪全部未决 QUIC 包；乱序 ACK 不再因在途包超过 256 而丢样本；loss 与 Initial/Handshake packet-space discard 均精确回收 sampler state，discard 不计作拥塞损失 |
+| 最新验证 | 1628 项 unit 注册：1621 通过、7 默认忽略；50 项 crate 外 public-library integration 通过，稳定默认基线 **1671 项零失败**；7 个固定 Go/macOS 现场项另行全部执行通过，本轮合计 **1678 项零失败**；本地 Quinn fork 267 unit + 3 doctest、全特性全目标严格 Clippy 通过 |
+| 仍需外部验证 | 三桌面特权 TUN/系统 VPN/路由与休眠恢复、Linux kTLS 内核矩阵、Windows Schannel/WinDivert/IP Helper 真机、Android/iOS 真机切网、外部 C Tor、多项生产服务与公网长时/高损耗互通 |
+| 当前重点 | 固定 Cronet 的 Naive BBRv2 逐事件数值 oracle，以及丢包、乱序、ACK aggregation、带宽骤降/恢复差分；之后继续压缩可在本机确定性复现的 wire/error-timing 长尾 |
+
+<details>
+<summary>详细模块矩阵与上一基线（展开查看）</summary>
+
+
 | 追踪项 | 当前值 |
 | --- | --- |
 | 最后更新 | 2026-09-13 |
@@ -45,7 +60,10 @@
 | **合计** | **100%** |  | **99.9%** | 表内完成度为便于追踪的四舍五入值，精确估算使用未显示的小数；完成定义见下文门槛 |
 
 追踪规则：每完成或重新打开一个工作项，都必须同步修改上面的总体百分比、对应模块行、自动验证基线和“下一批关键缺口”；单纯增加测试数量不会自动提高完成度。`SINGBOX_PROGRESS` 注释界定首屏进度区，便于脚本或人工稳定定位。
+</details>
 <!-- SINGBOX_PROGRESS:END -->
+
+本轮继续校准 Naive/Hysteria 共用的 QUIC delivery sampler。固定 `sing-quic` 的 packet-number queue 以 256 槽起步但会按实际在途包增长；此前 Rust 把初始容量误作硬上限，超过 256 个未决包时会逐出最旧 send state，使高 BDP 路径上的晚到 ACK 静默丢失 delivery bytes/sample。现已移除该上限，并补齐 BBRv1 的逐包 loss 回收；本地 Quinn controller 契约增加 packet-space discard 通知，使 BBRv1/BBRv2 在 Initial/Handshake keys 淘汰时释放状态而不制造虚假 loss。512 包 flight 的首尾乱序 ACK、半数 loss/半数 discard 回归通过。完整稳定基线为 1628 项 unit（1621 通过、7 忽略）与 50 项 public-library integration，默认执行 1671 项零失败；7 个固定 Go/macOS 现场项另行全部通过，合计实际执行 1678 项零失败；本地 Quinn 267+3、全特性全目标严格 Clippy 与格式检查通过。固定 Cronet 的逐事件数值差分和公网高损耗矩阵仍保留，因此总体估算保持 99.9%。
 
 本轮把最后一项依赖手工外部进程的 REALITY 互通回归改为自包含测试。新增固定上游 Go REALITY server fixture，由测试动态启动完整 `with_utls` 服务端并连接 Rust REALITY client；固定 X25519 key、REALITY 1.8.1 session metadata、short-id、Chrome uTLS ClientHello、证书绑定和双向应用数据都穿过真实 Go/Rust wire。交叉测试同时发现原 synthetic cover 写完 ServerHello/CCS/加密记录形状后立即 EOF，会让固定 Go 服务端的并发 cover probe 在客户端 Finished 前误拆已认证连接；stub 现在保持连接直到 REALITY 服务端主动关闭。最终 6 项固定 Go ECH/REALITY 双向互通及 1 项 macOS `mDNSResponder` 现场测试全部实际执行通过，默认稳定基线仍保留为无需 Go/系统 daemon 的 1619+50 项。本轮提升的是完成证据强度，不以新增测试数量上调 99.9% 加权估算。
 
@@ -927,6 +945,7 @@ sing-box 使用 GPL-3.0-or-later。直接移植及其派生实现放在独立 `s
 
 ### 2026-09-13
 
+- 修正 Naive/Hysteria 共用 QUIC delivery sampler 的高 BDP 差异：固定 `sing-quic` 的 256 槽是可增长预分配而非硬上限，Rust 不再逐出仍未 ACK/loss 的最旧包；BBRv1 补齐 loss 回收，本地 Quinn 增加不计拥塞的 Initial/Handshake space discard 回调并由 BBRv1/BBRv2 消费。512 包乱序 ACK 与 loss/discard 回归、1628 unit、50 library integration、7 个固定 Go/macOS 现场项、Quinn 267+3 及严格 Clippy 全部通过；实际执行 1678 项 singbox 测试零失败，总体估算保持 99.9%。
 - 修正 AnyConnect DTLS/CSTP 失效分界：peer close、普通 DTLS 错误及 SSL rekey 退回存活 CSTP，只有 new-tunnel rekey 触发整隧道重建。稳定全量为 1530 项 unit（1523 通过、7 忽略）与 44 项 public-library integration，共执行 1567 项、零失败；原生严格 Clippy 通过。后台指数退避 DTLS 恢复仍列为下一项，总体估算保持 99.8%。
 - 接通 AnyConnect legacy DTLS 0.9、DTLS 1.2 与 PSK-NEGOTIATE 的 DPD 二分 path-MTU 探测；按 IPv4/IPv6 下界运行固定重试策略，record 层允许 DTLS overhead，探测值只向下更新公共 tunnel configuration，并在 userspace/system interface 创建前生效。稳定全量为 1529 项 unit（1522 通过、7 忽略）与 44 项 public-library integration，共执行 1566 项、零失败；格式、原生/Windows 严格 Clippy、iOS check 与 Linux x86_64 Zig 整库构建通过。总体估算保持 99.8%。
 - 校准 OpenConnect tunnel configuration 的公共归一化：`IPv6Disabled` 过滤地址、include/exclude route、DNS/NBNS 与 split-rule server 并删除空规则；F5 MTU<1280 进入相同边界，Fortinet 双栈无 IPv6 include route 时补 `::/0`。新增公开默认 MTU 1500、IPv4-mapped remote unmap，并让 Network Connect oNCP 配置补齐远端排除和 DNS host route。稳定全量为 1528 项 unit（1521 通过、7 忽略）与 44 项 public-library integration，共执行 1565 项、零失败；格式、原生/Windows 严格 Clippy、iOS check 与 Linux x86_64 Zig 整库构建通过。总体估算保持 99.8%。

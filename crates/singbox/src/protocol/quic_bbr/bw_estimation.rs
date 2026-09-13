@@ -7,7 +7,6 @@ use std::time::{Duration, Instant};
 
 use super::min_max::MinMax;
 
-const MAX_TRACKED_PACKETS: usize = 256;
 const MAX_A0_CANDIDATES: usize = 256;
 
 #[derive(Clone, Copy, Debug)]
@@ -146,9 +145,6 @@ impl BandwidthEstimation {
                 app_limited: self.app_limited_phase,
             },
         );
-        while self.sent_packets.len() > MAX_TRACKED_PACKETS {
-            self.sent_packets.pop_first();
-        }
     }
 
     pub(crate) fn on_ack_packet(
@@ -223,7 +219,7 @@ impl BandwidthEstimation {
         (increased, !sent.app_limited)
     }
 
-    pub(crate) fn on_lost_packet(
+    pub(crate) fn retire_packet(
         &mut self,
         packet_space: u8,
         packet_number: u64,
@@ -247,6 +243,11 @@ impl BandwidthEstimation {
 
     pub(crate) fn get_estimate(&self) -> u64 {
         self.max_filter.get()
+    }
+
+    #[cfg(test)]
+    pub(super) fn tracked_packet_count(&self) -> usize {
+        self.sent_packets.len()
     }
 
     pub(crate) fn bw_from_delta(bytes: u64, delta: Duration) -> Option<u64> {
@@ -373,6 +374,41 @@ mod tests {
             false,
         );
         assert!(!sampler.sent_packets[&(2, 13)].app_limited);
+    }
+
+    #[test]
+    fn high_bdp_flight_keeps_every_unresolved_packet() {
+        let start = Instant::now();
+        let mut sampler = BandwidthEstimation::new(true);
+
+        // sing-quic's packet-number queue starts with 256 slots but grows with
+        // the flight.  Treating that initial capacity as a hard limit drops
+        // the oldest delivery state on ordinary high-BDP paths, so a reordered
+        // ACK can no longer contribute its bytes or a bandwidth sample.
+        for packet in 1..=512_u64 {
+            sampler.on_sent_packet(
+                start + Duration::from_micros(packet),
+                1_200,
+                2,
+                packet,
+                (packet - 1) * 1_200,
+                false,
+            );
+        }
+        assert_eq!(sampler.sent_packets.len(), 512);
+
+        let (increased, non_app_limited) =
+            sampler.on_ack_packet(start + Duration::from_millis(100), 2, 1, 1);
+        assert!(increased);
+        assert!(non_app_limited);
+        assert_eq!(sampler.total_acked, 1_200);
+        assert_eq!(sampler.sent_packets.len(), 511);
+
+        // ACK the newest packet next to exercise the same state under extreme
+        // packet reordering.  Both ends of the flight must remain resolvable.
+        sampler.on_ack_packet(start + Duration::from_millis(101), 2, 512, 1);
+        assert_eq!(sampler.total_acked, 2_400);
+        assert_eq!(sampler.sent_packets.len(), 510);
     }
 
     #[test]

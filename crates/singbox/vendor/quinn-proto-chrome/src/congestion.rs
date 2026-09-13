@@ -83,6 +83,14 @@ pub trait Controller: Send + Sync {
     ) {
     }
 
+    /// An in-flight packet was retired because its packet-number space was
+    /// discarded, without treating it as congestion loss.
+    ///
+    /// Delivery-rate samplers use this to release per-packet send state when
+    /// Initial or Handshake keys are discarded.
+    #[allow(unused_variables)]
+    fn on_discarded_packet(&mut self, packet_space: u8, packet_number: u64) {}
+
     /// Packets are acked in batches, all with the same `now` argument. This indicates one of those batches has completed.
     #[allow(unused_variables)]
     fn on_end_acks(

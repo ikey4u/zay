@@ -2262,7 +2262,12 @@ impl Connection {
         space.time_of_last_ack_eliciting_packet = None;
         space.loss_time = None;
         let sent_packets = mem::take(&mut space.sent_packets);
-        for packet in sent_packets.into_values() {
+        for (packet_number, packet) in sent_packets {
+            if packet.size != 0 && packet.ack_eliciting {
+                self.path
+                    .congestion
+                    .on_discarded_packet(space_id as u8, packet_number);
+            }
             self.remove_in_flight(&packet);
         }
         self.set_loss_detection_timer(now)
