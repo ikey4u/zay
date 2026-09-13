@@ -18,7 +18,9 @@ use quinn_proto::{
 };
 use rand::{Rng, SeedableRng, rngs::StdRng};
 
-use super::quic_bbr::bw_estimation::BandwidthEstimation;
+use super::quic_bbr::{
+    AckAggregationState, bw_estimation::BandwidthEstimation,
+};
 
 const INITIAL_WINDOW_PACKETS: u64 = 32;
 const MIN_WINDOW_PACKETS: u64 = 4;
@@ -98,6 +100,7 @@ impl ControllerFactory for Bbr2Config {
 pub struct Bbr2 {
     config: Arc<Bbr2Config>,
     sampler: BandwidthEstimation,
+    ack_aggregation: AckAggregationState,
     rng: StdRng,
     mode: Mode,
     mtu: u64,
@@ -123,6 +126,8 @@ pub struct Bbr2 {
     bytes_acked: u64,
     bytes_lost: u64,
     loss_events: u8,
+    bandwidth_increased: bool,
+    extra_acked: u64,
     sample_min_rtt: Option<Duration>,
     largest_acked_packet: Option<u64>,
     last_event_time: Instant,
@@ -168,6 +173,8 @@ impl Bbr2 {
             bytes_acked: 0,
             bytes_lost: 0,
             loss_events: 0,
+            bandwidth_increased: false,
+            extra_acked: 0,
             sample_min_rtt: None,
             largest_acked_packet: None,
             last_event_time: now,
@@ -179,6 +186,7 @@ impl Bbr2 {
             probe_up_step: mtu,
             probe_rtt_done_stamp: None,
             probe_rtt_round_done: false,
+            ack_aggregation: AckAggregationState::new(true, false),
         }
     }
 
@@ -213,7 +221,10 @@ impl Bbr2 {
     }
 
     fn target_inflight(&self) -> u64 {
-        let mut target = self.bdp(self.cwnd_gain()).max(self.min_cwnd);
+        let mut target = self
+            .bdp(self.cwnd_gain())
+            .saturating_add(self.extra_acked)
+            .max(self.min_cwnd);
         if let Some(lo) = self.inflight_lo {
             target = target.min(lo.max(self.min_cwnd));
         }
@@ -449,6 +460,25 @@ impl Bbr2 {
         app_limited: bool,
         largest_packet_num_acked: Option<u64>,
     ) {
+        let newly_acked = self.sampler.bytes_acked_this_window();
+        if newly_acked > 0 {
+            let excess_acked =
+                self.ack_aggregation.update_ack_aggregation_bytes(
+                    newly_acked,
+                    now,
+                    self.round_count,
+                    self.sampler.get_estimate(),
+                    self.bandwidth_increased,
+                );
+            self.sampler.end_acks(excess_acked == 0);
+            self.extra_acked = if self.full_bandwidth_reached {
+                self.ack_aggregation.max_ack_height()
+            } else {
+                excess_acked
+            }
+            .min(self.cwnd);
+        }
+
         self.largest_acked_packet =
             largest_packet_num_acked.or(self.largest_acked_packet);
         self.round_started = self
@@ -466,11 +496,10 @@ impl Bbr2 {
         self.update_mode(now, in_flight, prior_in_flight, app_limited);
         self.update_pacing_rate();
         self.update_cwnd();
-        self.sampler.end_acks(false);
-
         self.bytes_acked = 0;
         self.bytes_lost = 0;
         self.loss_events = 0;
+        self.bandwidth_increased = false;
         self.sample_min_rtt = None;
         self.largest_acked_packet = None;
         self.last_event_time = now;
@@ -534,12 +563,13 @@ impl Controller for Bbr2 {
         packet_number: u64,
         _app_limited: bool,
     ) {
-        self.sampler.on_ack_packet(
+        let (bandwidth_increased, _) = self.sampler.on_ack_packet(
             now,
             packet_space,
             packet_number,
             self.round_count,
         );
+        self.bandwidth_increased |= bandwidth_increased;
         self.largest_acked_packet = Some(
             self.largest_acked_packet
                 .map_or(packet_number, |current| current.max(packet_number)),
@@ -756,5 +786,87 @@ mod tests {
         assert_eq!(controller.initial_window(), 32 * 1_350);
         assert!(controller.window() > old);
         assert!(controller.window() >= 4 * 1_350);
+    }
+
+    #[test]
+    fn ack_aggregation_adds_bounded_inflight_budget() {
+        let start = Instant::now();
+        let mut controller = controller(start);
+        controller.min_rtt = Duration::from_millis(100);
+        controller
+            .sampler
+            .on_sent_packet(start, 6_000, 2, 1, 0, false);
+        controller.sampler.on_ack_packet(
+            start + Duration::from_millis(100),
+            2,
+            1,
+            1,
+        );
+
+        let bandwidth = controller.sampler.get_estimate();
+        assert_eq!(bandwidth, 60_000);
+        assert_eq!(
+            controller.ack_aggregation.update_ack_aggregation_bytes(
+                6_000,
+                start + Duration::from_millis(100),
+                1,
+                bandwidth,
+                true,
+            ),
+            0
+        );
+        let excess = controller.ack_aggregation.update_ack_aggregation_bytes(
+            12_000,
+            start + Duration::from_millis(101),
+            1,
+            bandwidth,
+            false,
+        );
+        assert_eq!(excess, 17_880);
+
+        controller.full_bandwidth_reached = true;
+        controller.extra_acked = controller
+            .ack_aggregation
+            .max_ack_height()
+            .min(controller.cwnd);
+        let base = controller
+            .bdp(controller.cwnd_gain())
+            .max(controller.min_cwnd);
+        assert_eq!(controller.target_inflight(), base + excess);
+
+        controller.inflight_hi = Some(base + controller.mtu);
+        assert_eq!(controller.target_inflight(), base + controller.mtu);
+    }
+
+    #[test]
+    fn loss_only_event_preserves_ack_aggregation_budget() {
+        let start = Instant::now();
+        let mut controller = controller(start);
+        assert_eq!(
+            controller
+                .ack_aggregation
+                .update_ack_aggregation_bytes(6_000, start, 1, 60_000, false,),
+            0
+        );
+        let extra = controller.ack_aggregation.update_ack_aggregation_bytes(
+            12_000,
+            start + Duration::from_millis(1),
+            1,
+            60_000,
+            false,
+        );
+        assert_eq!(extra, 17_880);
+        controller.full_bandwidth_reached = true;
+        controller.extra_acked = extra;
+        controller.bytes_lost = controller.mtu;
+
+        controller.finish_event(
+            start + Duration::from_secs(1),
+            controller.cwnd,
+            false,
+            None,
+        );
+
+        assert_eq!(controller.extra_acked, extra);
     }
 }

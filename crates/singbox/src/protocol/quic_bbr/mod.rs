@@ -904,7 +904,7 @@ impl Default for AckHeightFilter {
 }
 
 #[derive(Debug, Copy, Clone)]
-struct AckAggregationState {
+pub(crate) struct AckAggregationState {
     max_ack_height: AckHeightFilter,
     aggregation_epoch_start_time: Option<Instant>,
     aggregation_epoch_bytes: u64,
@@ -913,7 +913,7 @@ struct AckAggregationState {
 }
 
 impl AckAggregationState {
-    fn new(
+    pub(crate) fn new(
         overestimate_avoidance: bool,
         reduce_on_bandwidth_increase: bool,
     ) -> Self {
@@ -926,7 +926,7 @@ impl AckAggregationState {
         }
     }
 
-    fn update_ack_aggregation_bytes(
+    pub(crate) fn update_ack_aggregation_bytes(
         &mut self,
         newly_acked_bytes: u64,
         now: Instant,
@@ -975,6 +975,10 @@ impl AckAggregationState {
             round,
         });
         diff
+    }
+
+    pub(crate) const fn max_ack_height(&self) -> u64 {
+        self.max_ack_height.get()
     }
 }
 
