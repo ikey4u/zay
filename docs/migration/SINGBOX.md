@@ -10,12 +10,12 @@
 
 | 项目 | 当前状态 |
 | --- | --- |
-| 总体 | **99.9%**；本轮关闭高 BDP QUIC delivery sampler 的 256 包硬上限差异，完成度不因单纯增加回归而上调 |
+| 总体 | **99.9%**；本轮新增固定 Cronet Naive/QUIC 跨语言有损链路证据，完成度不因单纯增加回归而上调 |
 | 交付 | `crates/singbox` 为可嵌入 Rust library；binary/CLI 由 zay 实现；上游 CLI、daemon/service 与 experimental 应用控制 API 不计入分母 |
-| 最新实现 | BBRv1/BBRv2 跟踪全部未决 QUIC 包；乱序 ACK 不再因在途包超过 256 而丢样本；loss 与 Initial/Handshake packet-space discard 均精确回收 sampler state，discard 不计作拥塞损失 |
-| 最新验证 | 1628 项 unit 注册：1621 通过、7 默认忽略；50 项 crate 外 public-library integration 通过，稳定默认基线 **1671 项零失败**；7 个固定 Go/macOS 现场项另行全部执行通过，本轮合计 **1678 项零失败**；本地 Quinn fork 267 unit + 3 doctest、全特性全目标严格 Clippy 通过 |
+| 最新实现 | 仓库内新增固定版本 Go Cronet Naive client fixture；以 `B2ON`（BBRv2）穿过 Rust HTTP/3 inbound 和确定性 UDP impairment proxy，完成 2 MiB 双向 CONNECT，并覆盖约 3.2% 双向丢包、周期性乱序与中段限速 |
+| 最新验证 | 1629 项 unit 注册：1621 通过、8 默认忽略；50 项 crate 外 public-library integration 通过，稳定默认基线 **1671 项零失败**；8 个固定 Go/macOS 现场项另行全部执行通过，本轮合计 **1679 项零失败**；本地 Quinn fork 267 unit + 3 doctest、全特性全目标严格 Clippy 通过 |
 | 仍需外部验证 | 三桌面特权 TUN/系统 VPN/路由与休眠恢复、Linux kTLS 内核矩阵、Windows Schannel/WinDivert/IP Helper 真机、Android/iOS 真机切网、外部 C Tor、多项生产服务与公网长时/高损耗互通 |
-| 当前重点 | 固定 Cronet 的 Naive BBRv2 逐事件数值 oracle，以及丢包、乱序、ACK aggregation、带宽骤降/恢复差分；之后继续压缩可在本机确定性复现的 wire/error-timing 长尾 |
+| 当前重点 | 固定 Cronet 与 Rust BBRv2 的逐事件数值 oracle、ACK aggregation 与恢复阶段差分；之后继续压缩可在本机确定性复现的 wire/error-timing 长尾 |
 
 <details>
 <summary>详细模块矩阵与上一基线（展开查看）</summary>
@@ -62,6 +62,8 @@
 追踪规则：每完成或重新打开一个工作项，都必须同步修改上面的总体百分比、对应模块行、自动验证基线和“下一批关键缺口”；单纯增加测试数量不会自动提高完成度。`SINGBOX_PROGRESS` 注释界定首屏进度区，便于脚本或人工稳定定位。
 </details>
 <!-- SINGBOX_PROGRESS:END -->
+
+本轮把固定上游版本的 Go Cronet Naive client 纳入仓库内自包含互操作 fixture。测试动态生成 Chromium 可接受的短期 CA/ServerAuth 证书与非特殊域名，强制 Cronet 记录并验证 `B2ON`/BBRv2；真实 HTTP/3 CONNECT 在 Rust Naive inbound 与 TCP echo 之间传输 2 MiB 双向内容。中间 UDP relay 在握手后确定性注入约 3.2% 双向丢包、每 13 包乱序及中段 2 ms/包限速，避免只验证理想回环。完整稳定基线为 1629 项 unit（1621 通过、8 忽略）与 50 项 public-library integration，默认执行 1671 项零失败；8 个固定 Go/macOS 现场项另行全部通过，合计实际执行 1679 项零失败。该项关闭 Cronet→Rust 的有损 wire/恢复互通证据，但逐事件 BBRv2 数值 oracle 与公网长时矩阵仍保留，因此总体估算保持 99.9%。
 
 本轮继续校准 Naive/Hysteria 共用的 QUIC delivery sampler。固定 `sing-quic` 的 packet-number queue 以 256 槽起步但会按实际在途包增长；此前 Rust 把初始容量误作硬上限，超过 256 个未决包时会逐出最旧 send state，使高 BDP 路径上的晚到 ACK 静默丢失 delivery bytes/sample。现已移除该上限，并补齐 BBRv1 的逐包 loss 回收；本地 Quinn controller 契约增加 packet-space discard 通知，使 BBRv1/BBRv2 在 Initial/Handshake keys 淘汰时释放状态而不制造虚假 loss。512 包 flight 的首尾乱序 ACK、半数 loss/半数 discard 回归通过。完整稳定基线为 1628 项 unit（1621 通过、7 忽略）与 50 项 public-library integration，默认执行 1671 项零失败；7 个固定 Go/macOS 现场项另行全部通过，合计实际执行 1678 项零失败；本地 Quinn 267+3、全特性全目标严格 Clippy 与格式检查通过。固定 Cronet 的逐事件数值差分和公网高损耗矩阵仍保留，因此总体估算保持 99.9%。
 
@@ -945,6 +947,7 @@ sing-box 使用 GPL-3.0-or-later。直接移植及其派生实现放在独立 `s
 
 ### 2026-09-13
 
+- 新增固定 Go Cronet Naive/QUIC BBRv2 自包含互操作 fixture：Rust 测试动态生成 Chromium 可接受的短期 CA 链，Cronet 通过非特殊域名精确映射到本机 Rust HTTP/3 inbound；2 MiB 双向 CONNECT 穿过确定性 UDP relay，并承受约 3.2% 双向丢包、周期性乱序和中段限速。NetLog 明确校验 `B2ON`/BBRv2。稳定基线为 1629 unit 中 1621 通过、8 忽略，加 50 library integration 共 1671 项默认零失败；8 个固定 Go/macOS 现场项全部实际通过，合计 1679 项零失败，总体估算保持 99.9%。
 - 修正 Naive/Hysteria 共用 QUIC delivery sampler 的高 BDP 差异：固定 `sing-quic` 的 256 槽是可增长预分配而非硬上限，Rust 不再逐出仍未 ACK/loss 的最旧包；BBRv1 补齐 loss 回收，本地 Quinn 增加不计拥塞的 Initial/Handshake space discard 回调并由 BBRv1/BBRv2 消费。512 包乱序 ACK 与 loss/discard 回归、1628 unit、50 library integration、7 个固定 Go/macOS 现场项、Quinn 267+3 及严格 Clippy 全部通过；实际执行 1678 项 singbox 测试零失败，总体估算保持 99.9%。
 - 修正 AnyConnect DTLS/CSTP 失效分界：peer close、普通 DTLS 错误及 SSL rekey 退回存活 CSTP，只有 new-tunnel rekey 触发整隧道重建。稳定全量为 1530 项 unit（1523 通过、7 忽略）与 44 项 public-library integration，共执行 1567 项、零失败；原生严格 Clippy 通过。后台指数退避 DTLS 恢复仍列为下一项，总体估算保持 99.8%。
 - 接通 AnyConnect legacy DTLS 0.9、DTLS 1.2 与 PSK-NEGOTIATE 的 DPD 二分 path-MTU 探测；按 IPv4/IPv6 下界运行固定重试策略，record 层允许 DTLS overhead，探测值只向下更新公共 tunnel configuration，并在 userspace/system interface 创建前生效。稳定全量为 1529 项 unit（1522 通过、7 忽略）与 44 项 public-library integration，共执行 1566 项、零失败；格式、原生/Windows 严格 Clippy、iOS check 与 Linux x86_64 Zig 整库构建通过。总体估算保持 99.8%。

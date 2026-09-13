@@ -683,9 +683,13 @@ async fn proxy_tcp(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{net::SocketAddr, sync::Arc, time::Duration};
 
-    use rcgen::{CertifiedKey, generate_simple_self_signed};
+    use rcgen::{
+        BasicConstraints, CertificateParams, CertifiedKey,
+        ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
+        generate_simple_self_signed,
+    };
     use serde_json::json;
     use tokio::{
         io::{AsyncReadExt as _, AsyncWriteExt as _},
@@ -703,6 +707,64 @@ mod tests {
         outbound::OutboundManager,
         route::Router,
     };
+
+    async fn spawn_udp_impairment_proxy(
+        server: SocketAddr,
+    ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let address = socket.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let mut client = None;
+            let mut sequence = 0_u64;
+            let mut held = None::<(Vec<u8>, SocketAddr)>;
+            let mut buffer = vec![0_u8; 65_535];
+            loop {
+                let Ok((length, source)) = socket.recv_from(&mut buffer).await
+                else {
+                    return;
+                };
+                let destination = if source == server {
+                    let Some(client) = client else {
+                        continue;
+                    };
+                    client
+                } else {
+                    client = Some(source);
+                    server
+                };
+                sequence += 1;
+
+                // Leave the handshake undisturbed, then introduce deterministic
+                // bidirectional loss, reordering, and a temporary low-bandwidth
+                // interval. This is deliberately based on relay sequence rather
+                // than encrypted QUIC contents.
+                if sequence > 64 && sequence.is_multiple_of(31) {
+                    continue;
+                }
+                let datagram = buffer[..length].to_vec();
+                if sequence > 64
+                    && sequence.is_multiple_of(13)
+                    && held.is_none()
+                {
+                    held = Some((datagram, destination));
+                    continue;
+                }
+                if (300..900).contains(&sequence) {
+                    tokio::time::sleep(Duration::from_millis(2)).await;
+                }
+                if socket.send_to(&datagram, destination).await.is_err() {
+                    return;
+                }
+                if let Some((datagram, destination)) = held.take() {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                    if socket.send_to(&datagram, destination).await.is_err() {
+                        return;
+                    }
+                }
+            }
+        });
+        (address, task)
+    }
 
     #[tokio::test]
     async fn proxies_tls_tcp_and_uot_udp_end_to_end() {
@@ -909,5 +971,115 @@ mod tests {
         inbound.close().await.unwrap();
         tcp_echo.await.unwrap();
         udp_echo.await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires the pinned Go Cronet toolchain"]
+    async fn pinned_cronet_bbr2_client_survives_loss_reorder_and_rate_shift() {
+        const PAYLOAD_SIZE: usize = 2 * 1024 * 1024;
+
+        let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_address = target.local_addr().unwrap();
+        let echo = tokio::spawn(async move {
+            let (mut stream, _) = target.accept().await.unwrap();
+            let mut payload = vec![0_u8; PAYLOAD_SIZE];
+            stream.read_exact(&mut payload).await.unwrap();
+            stream.write_all(&payload).await.unwrap();
+        });
+
+        let mut ca_parameters = CertificateParams::default();
+        let now = time::OffsetDateTime::now_utc();
+        ca_parameters.not_before = now - time::Duration::days(1);
+        ca_parameters.not_after = now + time::Duration::days(30);
+        ca_parameters.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca_parameters.key_usages = vec![
+            KeyUsagePurpose::KeyCertSign,
+            KeyUsagePurpose::DigitalSignature,
+        ];
+        let ca_key = KeyPair::generate().unwrap();
+        let ca_certificate = ca_parameters.self_signed(&ca_key).unwrap();
+        let mut leaf_parameters =
+            CertificateParams::new(vec!["naive.example.com".into()]).unwrap();
+        leaf_parameters.not_before = now - time::Duration::days(1);
+        leaf_parameters.not_after = now + time::Duration::days(30);
+        leaf_parameters.key_usages = vec![
+            KeyUsagePurpose::DigitalSignature,
+            KeyUsagePurpose::KeyEncipherment,
+        ];
+        leaf_parameters.extended_key_usages =
+            vec![ExtendedKeyUsagePurpose::ServerAuth];
+        let leaf_key = KeyPair::generate().unwrap();
+        let leaf_certificate = leaf_parameters
+            .signed_by(&leaf_key, &ca_certificate, &ca_key)
+            .unwrap();
+        let certificate =
+            format!("{}\n{}", leaf_certificate.pem(), ca_certificate.pem());
+        let trusted_root = ca_certificate.pem();
+        let inbound_options: NaiveInboundOptions =
+            serde_json::from_value(json!({
+                "listen":"127.0.0.1",
+                "listen_port":0,
+                "network":"udp",
+                "users":[{"username":"alice","password":"secret"}],
+                "tls":{
+                    "enabled":true,
+                    "certificate":certificate,
+                    "key":leaf_key.serialize_pem()
+                }
+            }))
+            .unwrap();
+        let direct_options: Options = serde_json::from_value(json!({
+            "dns":{"servers":[{"type":"hosts","tag":"hosts"}]},
+            "outbounds":[{"type":"direct","tag":"direct"}]
+        }))
+        .unwrap();
+        let direct = Arc::new(
+            OutboundManager::from_options(&direct_options, "").unwrap(),
+        );
+        let router = Arc::new(Router::from_json(&[], "").unwrap());
+        let mut inbound =
+            NaiveInbound::new("naive-cronet", inbound_options, router, direct)
+                .unwrap();
+        inbound.start(StartStage::Start).await.unwrap();
+        let server = inbound.local_addr().unwrap();
+        let (proxy, proxy_task) = spawn_udp_impairment_proxy(server).await;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let certificate_path = temporary.path().join("ca.pem");
+        let netlog_path = temporary.path().join("cronet-netlog.json");
+        std::fs::write(&certificate_path, trusted_root).unwrap();
+        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let workspace = manifest.join("../..");
+        let fixture = manifest.join("tests/fixtures/naive-go-client/main.go");
+        let status = tokio::task::spawn_blocking(move || {
+            std::process::Command::new("go")
+                .args(["run", fixture.to_str().unwrap()])
+                .current_dir(workspace.join("inner/sing-box"))
+                .env("SINGBOX_NAIVE_RUST_SERVER", proxy.to_string())
+                .env("SINGBOX_NAIVE_TARGET", target_address.to_string())
+                .env("SINGBOX_NAIVE_CA", certificate_path)
+                .env("SINGBOX_NAIVE_NETLOG", &netlog_path)
+                .status()
+                .map(|status| (status, netlog_path))
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        proxy_task.abort();
+        inbound.close().await.unwrap();
+        if !status.0.success() {
+            let path = temporary.keep();
+            panic!(
+                "pinned Cronet client failed; NetLog kept at {}",
+                path.display()
+            );
+        }
+        echo.await.unwrap();
+        let netlog = std::fs::read(status.1).unwrap();
+        assert!(
+            netlog.windows(4).any(|window| window == b"B2ON"),
+            "Cronet NetLog did not record the BBRv2 connection option"
+        );
     }
 }
