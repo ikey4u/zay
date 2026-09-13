@@ -92,6 +92,9 @@ pub(crate) async fn bind_tcp_listener(
     address: SocketAddr,
     options: &ListenOptions,
 ) -> io::Result<TcpListener> {
+    options.validate_removed_fields().map_err(|message| {
+        io::Error::new(io::ErrorKind::InvalidInput, message)
+    })?;
     let namespace = options.netns.clone();
     let options = options.clone();
     let listener = with_network_namespace(&namespace, move || {
@@ -1046,5 +1049,31 @@ mod tests {
         let (accepted, connected) = tokio::join!(listener.accept(), client);
         accepted.unwrap();
         connected.unwrap();
+    }
+
+    #[tokio::test]
+    async fn listener_rejects_removed_proxy_protocol_before_binding() {
+        for options in [
+            ListenOptions {
+                proxy_protocol: true,
+                ..Default::default()
+            },
+            ListenOptions {
+                proxy_protocol_accept_no_header: true,
+                ..Default::default()
+            },
+        ] {
+            let error = bind_tcp_listener(
+                SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0),
+                &options,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+            assert_eq!(
+                error.to_string(),
+                "Proxy Protocol is deprecated and removed in sing-box 1.6.0"
+            );
+        }
     }
 }

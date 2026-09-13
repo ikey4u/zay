@@ -195,9 +195,11 @@ fn options_from_value(
     value: Value,
     path: &Path,
 ) -> Result<Options, ConfigError> {
-    schema::validate(&value).map_err(|error| ConfigError::Decode {
-        path: path.to_owned(),
-        message: error.to_string(),
+    schema::validate_runtime_config(&value).map_err(|error| {
+        ConfigError::Decode {
+            path: path.to_owned(),
+            message: error.to_string(),
+        }
     })?;
     let options: Options =
         serde_json::from_value(value).map_err(|error| ConfigError::Decode {
@@ -376,6 +378,30 @@ pub struct Options {
     pub experimental: Option<ExperimentalOptions>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct RemovedInboundFields {
+    #[serde(default)]
+    sniff: bool,
+    #[serde(default)]
+    sniff_override_destination: bool,
+    #[serde(default)]
+    sniff_timeout: Duration,
+    #[serde(default)]
+    domain_strategy: DomainStrategy,
+    #[serde(default)]
+    udp_disable_domain_unmapping: bool,
+}
+
+impl RemovedInboundFields {
+    fn has_legacy_route_fields(&self) -> bool {
+        self.sniff
+            || self.sniff_override_destination
+            || self.sniff_timeout != Duration::ZERO
+            || self.domain_strategy != DomainStrategy::default()
+            || self.udp_disable_domain_unmapping
+    }
+}
+
 impl Options {
     pub fn validate(&self) -> Result<(), ConfigError> {
         let mut namespace_tags = HashSet::new();
@@ -462,6 +488,22 @@ impl Options {
 
         for (index, inbound) in self.inbounds.iter().enumerate() {
             if inbound.kind != constant::TYPE_CLOUDFLARED {
+                let removed: RemovedInboundFields = serde_json::from_value(
+                    Value::Object(inbound.fields.clone()),
+                )
+                .map_err(|error| {
+                    ConfigError::Validation(format!(
+                        "decode {} options for tag {:?}: {error}",
+                        inbound.kind, inbound.tag
+                    ))
+                })?;
+                if removed.has_legacy_route_fields() {
+                    return Err(ConfigError::Validation(
+                        "legacy inbound fields are deprecated in sing-box 1.11.0 and removed in sing-box 1.13.0, checkout migration: https://sing-box.sagernet.org/migration/#migrate-legacy-inbound-fields-to-rule-actions".into(),
+                    ));
+                }
+            }
+            if inbound.kind != constant::TYPE_CLOUDFLARED {
                 continue;
             }
             let tag = if inbound.tag.is_empty() {
@@ -477,6 +519,16 @@ impl Options {
                         "invalid cloudflared inbound {tag:?}: {error}"
                     ))
                 })?;
+        }
+
+        for outbound in &self.outbounds {
+            if outbound.kind != constant::TYPE_DIRECT {
+                continue;
+            }
+            let options = outbound.decode::<DirectOutboundOptions>()?;
+            options
+                .validate_removed_override_fields()
+                .map_err(|message| ConfigError::Validation(message.into()))?;
         }
 
         let mut outbound_tags = HashSet::new();
@@ -746,7 +798,7 @@ pub struct TaggedOptions {
 }
 
 impl TaggedOptions {
-    /// Decode the already schema-validated payload into a protocol-specific
+    /// Decode the already schema-checked payload into a protocol-specific
     /// option structure. `type` and `tag` are registry metadata and excluded.
     pub fn decode<T>(&self) -> Result<T, ConfigError>
     where
@@ -842,13 +894,86 @@ impl<T> Registry<T> {
 mod tests {
     use std::fs;
 
-    use super::{ConfigLoader, HttpClientReference, Options, RouteOptions};
+    use super::{
+        ConfigLoader, DirectOutboundOptions, HttpClientReference, Options,
+        RouteOptions,
+    };
 
     #[test]
     fn rejects_unknown_top_level_fields() {
         let error =
             serde_json::from_str::<Options>(r#"{"unknown":true}"#).unwrap_err();
         assert!(error.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn loader_preserves_schema_omitted_fields_for_go_compatible_handling() {
+        let directory = tempfile::tempdir().unwrap();
+
+        let hysteria = directory.path().join("hysteria.json");
+        fs::write(
+            &hysteria,
+            r#"{"inbounds":[{"type":"hysteria","recv_window_conn":8388608,"disable_mtu_discovery":true}]}"#,
+        )
+        .unwrap();
+        let options = ConfigLoader::new()
+            .path(&hysteria)
+            .read_and_merge()
+            .unwrap();
+        let decoded = options.inbounds[0]
+            .decode::<super::HysteriaInboundOptions>()
+            .unwrap();
+        assert_eq!(decoded.recv_window_conn, 8_388_608);
+        assert!(decoded.disable_mtu_discovery);
+
+        let proxy = directory.path().join("proxy-protocol.json");
+        fs::write(
+            &proxy,
+            r#"{"outbounds":[{"type":"direct","tag":"direct","proxy_protocol":2}]}"#,
+        )
+        .unwrap();
+        let options =
+            ConfigLoader::new().path(&proxy).read_and_merge().unwrap();
+        let direct = options.outbounds[0]
+            .decode::<DirectOutboundOptions>()
+            .unwrap();
+        assert_eq!(direct.proxy_protocol, 2);
+        let error = direct.validate_removed_proxy_protocol().unwrap_err();
+        assert_eq!(
+            error,
+            "Proxy Protocol is deprecated and removed in sing-box 1.6.0"
+        );
+    }
+
+    #[test]
+    fn loader_returns_upstream_errors_for_removed_hidden_fields() {
+        let directory = tempfile::tempdir().unwrap();
+        let inbound = directory.path().join("legacy-inbound.json");
+        fs::write(&inbound, r#"{"inbounds":[{"type":"socks","sniff":true}]}"#)
+            .unwrap();
+        let error = ConfigLoader::new()
+            .path(&inbound)
+            .read_and_merge()
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(
+            "legacy inbound fields are deprecated in sing-box 1.11.0 and removed in sing-box 1.13.0"
+        ));
+
+        let direct = directory.path().join("legacy-direct.json");
+        fs::write(
+            &direct,
+            r#"{"outbounds":[{"type":"direct","override_address":"127.0.0.1"}]}"#,
+        )
+        .unwrap();
+        let error = ConfigLoader::new()
+            .path(&direct)
+            .read_and_merge()
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(
+            "destination override fields in direct outbound are deprecated in sing-box 1.11.0 and removed in sing-box 1.13.0"
+        ));
     }
 
     #[test]

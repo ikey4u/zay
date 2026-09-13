@@ -203,6 +203,44 @@ pub struct ListenOptions {
     pub udp_timeout: UdpTimeout,
     #[serde(default)]
     pub detour: String,
+    // Deprecated fields remain part of the Go decoder even though they are
+    // omitted from the generated schema.  Retaining them lets Runtime return
+    // the same migration errors instead of a generic unknown-field error.
+    #[serde(default)]
+    pub proxy_protocol: bool,
+    #[serde(default)]
+    pub proxy_protocol_accept_no_header: bool,
+    #[serde(default)]
+    pub sniff: bool,
+    #[serde(default)]
+    pub sniff_override_destination: bool,
+    #[serde(default)]
+    pub sniff_timeout: Duration,
+    #[serde(default)]
+    pub domain_strategy: DomainStrategy,
+    #[serde(default)]
+    pub udp_disable_domain_unmapping: bool,
+}
+
+impl ListenOptions {
+    pub(crate) fn validate_removed_fields(&self) -> Result<(), &'static str> {
+        if self.sniff
+            || self.sniff_override_destination
+            || self.sniff_timeout != Duration::ZERO
+            || self.domain_strategy != DomainStrategy::default()
+            || self.udp_disable_domain_unmapping
+        {
+            return Err(
+                "legacy inbound fields are deprecated in sing-box 1.11.0 and removed in sing-box 1.13.0, checkout migration: https://sing-box.sagernet.org/migration/#migrate-legacy-inbound-fields-to-rule-actions",
+            );
+        }
+        if self.proxy_protocol || self.proxy_protocol_accept_no_header {
+            return Err(
+                "Proxy Protocol is deprecated and removed in sing-box 1.6.0",
+            );
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]

@@ -1334,6 +1334,7 @@ impl OutboundManager {
         }
         let mut direct_options = DirectOutboundOptions {
             dialer: options.clone(),
+            ..Default::default()
         };
         self.apply_platform_network_defaults(
             &mut direct_options.dialer.abstract_options,
@@ -3861,6 +3862,7 @@ impl Builder {
         if options.detour.is_empty() {
             let mut direct_options = DirectOutboundOptions {
                 dialer: options.clone(),
+                ..Default::default()
             };
             self.apply_platform_network_defaults(
                 &mut direct_options.dialer.abstract_options,
@@ -4036,6 +4038,10 @@ impl Builder {
         owner: &str,
         mut options: DirectOutboundOptions,
     ) -> Result<DirectOutbound, OutboundError> {
+        options
+            .validate_removed_override_fields()
+            .and_then(|_| options.validate_removed_proxy_protocol())
+            .map_err(|message| OutboundError::Removed(message.into()))?;
         self.apply_platform_network_defaults(
             &mut options.dialer.abstract_options,
         );

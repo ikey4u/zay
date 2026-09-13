@@ -641,6 +641,7 @@ fn standalone_reality_dialer(
         crate::protocol::direct::DirectOutbound::new(
             crate::option::DirectOutboundOptions {
                 dialer: reality.handshake.dialer.clone(),
+                ..Default::default()
             },
         ),
     )))

@@ -201,6 +201,36 @@ pub struct DirectInboundOptions {
 pub struct DirectOutboundOptions {
     #[serde(flatten)]
     pub dialer: DialerOptions,
+    #[serde(default)]
+    pub override_address: String,
+    #[serde(default)]
+    pub override_port: u16,
+    #[serde(default)]
+    pub proxy_protocol: u8,
+}
+
+impl DirectOutboundOptions {
+    pub(crate) fn validate_removed_override_fields(
+        &self,
+    ) -> Result<(), &'static str> {
+        if !self.override_address.is_empty() || self.override_port != 0 {
+            return Err(
+                "destination override fields in direct outbound are deprecated in sing-box 1.11.0 and removed in sing-box 1.13.0, use route options instead",
+            );
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_removed_proxy_protocol(
+        &self,
+    ) -> Result<(), &'static str> {
+        if self.proxy_protocol != 0 {
+            return Err(
+                "Proxy Protocol is deprecated and removed in sing-box 1.6.0",
+            );
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]

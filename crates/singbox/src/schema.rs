@@ -3,7 +3,7 @@
 use std::sync::LazyLock;
 
 use jsonschema::Validator;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::option::ConfigError;
 
@@ -42,11 +42,319 @@ pub fn validate(value: &Value) -> Result<(), ConfigError> {
     }
 }
 
+/// Validate a runtime configuration while preserving fields that the pinned
+/// Go decoder still accepts but deliberately omits from the documentation
+/// schema.
+///
+/// The upstream schema is a documentation/editor surface, not the parser's
+/// source of truth.  Several deprecated compatibility fields carry
+/// `schema:"omit"`; validating the untouched document would reject them as
+/// unknown before the typed decoder can either consume them or return the
+/// precise upstream migration error.  Keep [`validate`] exact for callers
+/// that explicitly want schema semantics and use this relaxed copy only for
+/// config loading.
+pub(crate) fn validate_runtime_config(
+    value: &Value,
+) -> Result<(), ConfigError> {
+    let mut schema_value = value.clone();
+    strip_schema_omitted_fields(&mut schema_value);
+    validate(&schema_value)
+}
+
+fn strip_schema_omitted_fields(value: &mut Value) {
+    let Some(root) = value.as_object_mut() else {
+        return;
+    };
+
+    if let Some(dns) = object_at_mut(root, "dns") {
+        dns.remove("independent_cache");
+        if let Some(rules) = dns.get_mut("rules").and_then(Value::as_array_mut)
+        {
+            for rule in rules {
+                strip_dns_rule(rule);
+            }
+        }
+    }
+
+    if let Some(route) = object_at_mut(root, "route") {
+        remove_fields(route, &["geoip", "geosite"]);
+        if let Some(rules) =
+            route.get_mut("rules").and_then(Value::as_array_mut)
+        {
+            for rule in rules {
+                strip_route_rule(rule);
+            }
+        }
+        if let Some(rule_sets) =
+            route.get_mut("rule_set").and_then(Value::as_array_mut)
+        {
+            for rule_set in rule_sets {
+                let Some(object) = rule_set.as_object_mut() else {
+                    continue;
+                };
+                if object.get("type").and_then(Value::as_str) == Some("remote")
+                {
+                    object.remove("download_detour");
+                }
+                if let Some(rules) =
+                    object.get_mut("rules").and_then(Value::as_array_mut)
+                {
+                    for rule in rules {
+                        strip_route_rule(rule);
+                    }
+                }
+            }
+        }
+    }
+
+    strip_tagged_options(root, "inbounds", |kind, object| {
+        if kind != "cloudflared" {
+            remove_fields(
+                object,
+                &[
+                    "sniff",
+                    "sniff_override_destination",
+                    "sniff_timeout",
+                    "domain_strategy",
+                    "udp_disable_domain_unmapping",
+                ],
+            );
+        }
+        if !matches!(kind, "cloudflared" | "tun") {
+            remove_fields(
+                object,
+                &["proxy_protocol", "proxy_protocol_accept_no_header"],
+            );
+        }
+        if kind == "hysteria" {
+            remove_fields(
+                object,
+                &[
+                    "recv_window_conn",
+                    "recv_window_client",
+                    "max_conn_client",
+                    "disable_mtu_discovery",
+                ],
+            );
+        } else if kind == "tun" {
+            remove_fields(
+                object,
+                &[
+                    "gso",
+                    "inet4_address",
+                    "inet6_address",
+                    "inet4_route_address",
+                    "inet6_route_address",
+                    "inet4_route_exclude_address",
+                    "inet6_route_exclude_address",
+                    "endpoint_independent_nat",
+                ],
+            );
+        }
+        strip_tls_omissions(object, true);
+    });
+
+    strip_tagged_options(root, "outbounds", |kind, object| {
+        if !matches!(kind, "block" | "bridge" | "selector" | "urltest") {
+            object.remove("domain_strategy");
+        }
+        if kind == "direct" {
+            remove_fields(
+                object,
+                &["override_address", "override_port", "proxy_protocol"],
+            );
+        } else if kind == "hysteria" {
+            remove_fields(
+                object,
+                &["recv_window_conn", "recv_window", "disable_mtu_discovery"],
+            );
+        }
+        strip_tls_omissions(object, false);
+    });
+
+    strip_tagged_options(root, "endpoints", |kind, object| {
+        if kind != "openvpn-server" {
+            object.remove("domain_strategy");
+        } else {
+            strip_listen_omissions(object, true);
+        }
+    });
+
+    strip_tagged_options(root, "services", |kind, object| {
+        if kind == "usbip-client" {
+            object.remove("domain_strategy");
+        }
+        if matches!(
+            kind,
+            "api"
+                | "ccm"
+                | "derp"
+                | "hysteria-realm"
+                | "ocm"
+                | "resolved"
+                | "ssm-api"
+                | "usbip-server"
+        ) {
+            strip_listen_omissions(object, false);
+        }
+        if matches!(kind, "derp" | "hysteria-realm") {
+            strip_tls_omissions(object, true);
+        }
+        if kind == "derp"
+            && let Some(stun) =
+                object.get_mut("stun").and_then(Value::as_object_mut)
+        {
+            strip_listen_omissions(stun, false);
+        }
+    });
+
+    if let Some(experimental) = object_at_mut(root, "experimental") {
+        if let Some(cache) = object_at_mut(experimental, "cache_file") {
+            cache.remove("store_rdrc");
+        }
+        if let Some(clash) = object_at_mut(experimental, "clash_api") {
+            remove_fields(
+                clash,
+                &[
+                    "cache_file",
+                    "cache_id",
+                    "store_mode",
+                    "store_selected",
+                    "store_fakeip",
+                ],
+            );
+        }
+    }
+}
+
+fn strip_tagged_options(
+    root: &mut Map<String, Value>,
+    key: &str,
+    mut strip: impl FnMut(&str, &mut Map<String, Value>),
+) {
+    let Some(values) = root.get_mut(key).and_then(Value::as_array_mut) else {
+        return;
+    };
+    for value in values {
+        let Some(object) = value.as_object_mut() else {
+            continue;
+        };
+        let kind = object
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        strip(&kind, object);
+    }
+}
+
+fn strip_tls_omissions(object: &mut Map<String, Value>, inbound: bool) {
+    let Some(tls) = object.get_mut("tls").and_then(Value::as_object_mut) else {
+        return;
+    };
+    if inbound {
+        tls.remove("acme");
+    }
+    if let Some(ech) = tls.get_mut("ech").and_then(Value::as_object_mut) {
+        remove_fields(
+            ech,
+            &[
+                "pq_signature_schemes_enabled",
+                "dynamic_record_sizing_disabled",
+            ],
+        );
+    }
+}
+
+fn strip_listen_omissions(
+    object: &mut Map<String, Value>,
+    include_legacy_inbound: bool,
+) {
+    remove_fields(
+        object,
+        &["proxy_protocol", "proxy_protocol_accept_no_header"],
+    );
+    if include_legacy_inbound {
+        remove_fields(
+            object,
+            &[
+                "sniff",
+                "sniff_override_destination",
+                "sniff_timeout",
+                "domain_strategy",
+                "udp_disable_domain_unmapping",
+            ],
+        );
+    }
+}
+
+fn strip_route_rule(value: &mut Value) {
+    let Some(rule) = value.as_object_mut() else {
+        return;
+    };
+    let logical = rule.get("type").and_then(Value::as_str) == Some("logical");
+    if !logical {
+        remove_fields(
+            rule,
+            &[
+                "geosite",
+                "source_geoip",
+                "geoip",
+                "rule_set_ipcidr_match_source",
+            ],
+        );
+    }
+    if let Some(rules) = rule.get_mut("rules").and_then(Value::as_array_mut) {
+        for child in rules {
+            strip_route_rule(child);
+        }
+    }
+}
+
+fn strip_dns_rule(value: &mut Value) {
+    let Some(rule) = value.as_object_mut() else {
+        return;
+    };
+    let logical = rule.get("type").and_then(Value::as_str) == Some("logical");
+    rule.remove("strategy");
+    if !logical {
+        remove_fields(
+            rule,
+            &[
+                "outbound",
+                "geosite",
+                "source_geoip",
+                "geoip",
+                "rule_set_ip_cidr_accept_empty",
+                "rule_set_ipcidr_match_source",
+            ],
+        );
+    }
+    if let Some(rules) = rule.get_mut("rules").and_then(Value::as_array_mut) {
+        for child in rules {
+            strip_dns_rule(child);
+        }
+    }
+}
+
+fn object_at_mut<'a>(
+    object: &'a mut Map<String, Value>,
+    key: &str,
+) -> Option<&'a mut Map<String, Value>> {
+    object.get_mut(key).and_then(Value::as_object_mut)
+}
+
+fn remove_fields(object: &mut Map<String, Value>, fields: &[&str]) {
+    for field in fields {
+        object.remove(*field);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
 
-    use super::validate;
+    use super::{validate, validate_runtime_config};
 
     #[test]
     fn validates_minimal_config() {
@@ -74,5 +382,130 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn runtime_validation_preserves_schema_omitted_go_fields() {
+        let documents = [
+            json!({
+                "inbounds": [{
+                    "type": "hysteria",
+                    "recv_window_conn": 8_388_608,
+                    "disable_mtu_discovery": true
+                }]
+            }),
+            json!({
+                "outbounds": [{
+                    "type": "direct",
+                    "proxy_protocol": 2
+                }]
+            }),
+            json!({
+                "dns": {"independent_cache": true}
+            }),
+            json!({
+                "inbounds": [{
+                    "type": "trojan",
+                    "tls": {
+                        "enabled": true,
+                        "ech": {
+                            "enabled": true,
+                            "pq_signature_schemes_enabled": true
+                        }
+                    }
+                }]
+            }),
+            json!({
+                "route": {
+                    "rule_set": [{
+                        "type": "remote",
+                        "tag": "legacy",
+                        "url": "https://example.com/rules.srs",
+                        "download_detour": "direct"
+                    }]
+                }
+            }),
+            json!({
+                "dns": {
+                    "rules": [{
+                        "type": "logical",
+                        "mode": "or",
+                        "rules": [{"domain": "example.com"}],
+                        "action": "route",
+                        "strategy": "prefer_ipv4"
+                    }]
+                }
+            }),
+        ];
+
+        for document in documents {
+            assert!(validate(&document).is_err(), "{document}");
+            validate_runtime_config(&document).unwrap_or_else(|error| {
+                panic!("runtime schema rejected {document}: {error}")
+            });
+        }
+    }
+
+    #[test]
+    fn runtime_validation_does_not_hide_unrelated_unknown_fields() {
+        let documents = [
+            json!({
+                "outbounds": [{
+                    "type": "direct",
+                    "proxy_protocol_typo": 2
+                }]
+            }),
+            json!({
+                "outbounds": [{
+                    "type": "selector",
+                    "outbounds": ["direct"],
+                    "domain_strategy": "prefer_ipv4"
+                }]
+            }),
+            json!({
+                "outbounds": [{
+                    "type": "trojan",
+                    "server": "example.com",
+                    "server_port": 443,
+                    "tls": {"enabled": true, "acme": {}}
+                }]
+            }),
+            json!({
+                "route": {
+                    "rule_set": [{
+                        "type": "inline",
+                        "tag": "invalid",
+                        "download_detour": "direct",
+                        "rules": []
+                    }]
+                }
+            }),
+            json!({
+                "route": {
+                    "rules": [{
+                        "type": "logical",
+                        "mode": "or",
+                        "rules": [],
+                        "geosite": "cn"
+                    }]
+                }
+            }),
+            json!({
+                "route": {
+                    "rules": [{
+                        "domain": "example.com",
+                        "strategy": "prefer_ipv4",
+                        "action": "route",
+                        "outbound": "direct"
+                    }]
+                }
+            }),
+        ];
+        for document in documents {
+            assert!(
+                validate_runtime_config(&document).is_err(),
+                "runtime schema unexpectedly accepted {document}"
+            );
+        }
     }
 }

@@ -2178,7 +2178,10 @@ impl DnsBuilder {
         &self,
         dialer: crate::option::DialerOptions,
     ) -> DirectOutboundOptions {
-        let mut options = DirectOutboundOptions { dialer };
+        let mut options = DirectOutboundOptions {
+            dialer,
+            ..Default::default()
+        };
         self.route_dialer_defaults
             .apply(&mut options.dialer.abstract_options);
         #[cfg(any(
