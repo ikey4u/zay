@@ -895,8 +895,9 @@ mod tests {
     use std::fs;
 
     use super::{
-        ConfigLoader, DirectOutboundOptions, HttpClientReference, Options,
-        RouteOptions,
+        ConfigLoader, DirectOutboundOptions, DomainStrategy,
+        HttpClientReference, Options, RemoteDnsServerOptions, RouteOptions,
+        RouteRuleActionOptions,
     };
 
     #[test]
@@ -943,6 +944,69 @@ mod tests {
             error,
             "Proxy Protocol is deprecated and removed in sing-box 1.6.0"
         );
+
+        let nested_dialers = directory.path().join("nested-dialers.json");
+        fs::write(
+            &nested_dialers,
+            r#"{
+                "ntp": {
+                    "enabled": true,
+                    "server": "time.example.com",
+                    "domain_strategy": "prefer_ipv4"
+                },
+                "dns": {
+                    "servers": [{
+                        "type": "udp",
+                        "tag": "remote",
+                        "server": "dns.example.com",
+                        "domain_strategy": "prefer_ipv6"
+                    }]
+                },
+                "http_clients": [{
+                    "tag": "resources",
+                    "domain_strategy": "ipv4_only"
+                }],
+                "route": {
+                    "rules": [{
+                        "action": "direct",
+                        "domain": "example.com",
+                        "domain_strategy": "ipv6_only"
+                    }]
+                }
+            }"#,
+        )
+        .unwrap();
+        let options = ConfigLoader::new()
+            .path(&nested_dialers)
+            .read_and_merge()
+            .unwrap();
+        assert_eq!(
+            options.ntp.unwrap().dialer.abstract_options.domain_strategy,
+            DomainStrategy::PreferIpv4
+        );
+        let remote = options.dns.unwrap().servers[0]
+            .decode::<RemoteDnsServerOptions>()
+            .unwrap();
+        assert_eq!(
+            remote.local.dialer.abstract_options.domain_strategy,
+            DomainStrategy::PreferIpv6
+        );
+        assert_eq!(
+            options.http_clients[0]
+                .options
+                .dialer
+                .abstract_options
+                .domain_strategy,
+            DomainStrategy::Ipv4Only
+        );
+        let route = options.route.unwrap();
+        let super::RouteRuleOptions::Default(rule) = &route.rules[0] else {
+            panic!("expected a default route rule");
+        };
+        let RouteRuleActionOptions::Direct(dialer) = &rule.action else {
+            panic!("expected a direct route action");
+        };
+        assert_eq!(dialer.domain_strategy, DomainStrategy::Ipv6Only);
     }
 
     #[test]

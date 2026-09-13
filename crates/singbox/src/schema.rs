@@ -62,18 +62,49 @@ pub(crate) fn validate_runtime_config(
 }
 
 fn strip_schema_omitted_fields(value: &mut Value) {
+    strip_nested_http_client_omissions(value);
     let Some(root) = value.as_object_mut() else {
         return;
     };
 
     if let Some(dns) = object_at_mut(root, "dns") {
         dns.remove("independent_cache");
+        if let Some(servers) =
+            dns.get_mut("servers").and_then(Value::as_array_mut)
+        {
+            for server in servers {
+                let Some(object) = server.as_object_mut() else {
+                    continue;
+                };
+                let kind =
+                    object.get("type").and_then(Value::as_str).unwrap_or("");
+                if matches!(
+                    kind,
+                    "local"
+                        | "udp"
+                        | "tcp"
+                        | "tls"
+                        | "https"
+                        | "quic"
+                        | "h3"
+                        | "dhcp"
+                        | "mdns"
+                ) {
+                    strip_dialer_omissions(object);
+                }
+                strip_tls_omissions(object, false);
+            }
+        }
         if let Some(rules) = dns.get_mut("rules").and_then(Value::as_array_mut)
         {
             for rule in rules {
                 strip_dns_rule(rule);
             }
         }
+    }
+
+    if let Some(ntp) = object_at_mut(root, "ntp") {
+        strip_dialer_omissions(ntp);
     }
 
     if let Some(route) = object_at_mut(root, "route") {
@@ -150,6 +181,30 @@ fn strip_schema_omitted_fields(value: &mut Value) {
                     "endpoint_independent_nat",
                 ],
             );
+        } else if kind == "cloudflared" {
+            for key in ["control_dialer", "tunnel_dialer"] {
+                if let Some(dialer) =
+                    object.get_mut(key).and_then(Value::as_object_mut)
+                {
+                    strip_dialer_omissions(dialer);
+                }
+            }
+        } else if kind == "shadowtls" {
+            if let Some(handshake) =
+                object.get_mut("handshake").and_then(Value::as_object_mut)
+            {
+                strip_dialer_omissions(handshake);
+            }
+            if let Some(handshakes) = object
+                .get_mut("handshake_for_server_name")
+                .and_then(Value::as_object_mut)
+            {
+                for handshake in handshakes.values_mut() {
+                    if let Some(handshake) = handshake.as_object_mut() {
+                        strip_dialer_omissions(handshake);
+                    }
+                }
+            }
         }
         strip_tls_omissions(object, true);
     });
@@ -254,6 +309,14 @@ fn strip_tls_omissions(object: &mut Map<String, Value>, inbound: bool) {
     };
     if inbound {
         tls.remove("acme");
+        if let Some(handshake) = tls
+            .get_mut("reality")
+            .and_then(Value::as_object_mut)
+            .and_then(|reality| reality.get_mut("handshake"))
+            .and_then(Value::as_object_mut)
+        {
+            strip_dialer_omissions(handshake);
+        }
     }
     if let Some(ech) = tls.get_mut("ech").and_then(Value::as_object_mut) {
         remove_fields(
@@ -263,6 +326,44 @@ fn strip_tls_omissions(object: &mut Map<String, Value>, inbound: bool) {
                 "dynamic_record_sizing_disabled",
             ],
         );
+    }
+}
+
+fn strip_dialer_omissions(object: &mut Map<String, Value>) {
+    object.remove("domain_strategy");
+}
+
+fn strip_http_client_omissions(value: &mut Value) {
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    strip_dialer_omissions(object);
+    strip_tls_omissions(object, false);
+}
+
+fn strip_nested_http_client_omissions(value: &mut Value) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                strip_nested_http_client_omissions(value);
+            }
+        }
+        Value::Object(object) => {
+            if let Some(clients) =
+                object.get_mut("http_clients").and_then(Value::as_array_mut)
+            {
+                for client in clients {
+                    strip_http_client_omissions(client);
+                }
+            }
+            if let Some(client) = object.get_mut("http_client") {
+                strip_http_client_omissions(client);
+            }
+            for value in object.values_mut() {
+                strip_nested_http_client_omissions(value);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -293,6 +394,9 @@ fn strip_route_rule(value: &mut Value) {
         return;
     };
     let logical = rule.get("type").and_then(Value::as_str) == Some("logical");
+    if rule.get("action").and_then(Value::as_str) == Some("direct") {
+        strip_dialer_omissions(rule);
+    }
     if !logical {
         remove_fields(
             rule,
@@ -436,6 +540,94 @@ mod tests {
                     }]
                 }
             }),
+            json!({
+                "ntp": {
+                    "enabled": true,
+                    "server": "time.example.com",
+                    "domain_strategy": "prefer_ipv4"
+                }
+            }),
+            json!({
+                "dns": {
+                    "servers": [{
+                        "type": "udp",
+                        "tag": "remote",
+                        "server": "dns.example.com",
+                        "domain_strategy": "prefer_ipv6"
+                    }]
+                }
+            }),
+            json!({
+                "http_clients": [{
+                    "tag": "resources",
+                    "domain_strategy": "prefer_ipv4"
+                }]
+            }),
+            json!({
+                "certificate_providers": [{
+                    "type": "acme",
+                    "tag": "managed",
+                    "domain": "example.com",
+                    "http_client": {
+                        "domain_strategy": "prefer_ipv4"
+                    }
+                }]
+            }),
+            json!({
+                "inbounds": [{
+                    "type": "shadowtls",
+                    "version": 3,
+                    "handshake": {
+                        "server": "cover.example.com",
+                        "server_port": 443,
+                        "domain_strategy": "prefer_ipv4"
+                    },
+                    "handshake_for_server_name": {
+                        "alt.example.com": {
+                            "server": "alt-cover.example.com",
+                            "server_port": 443,
+                            "domain_strategy": "prefer_ipv6"
+                        }
+                    }
+                }]
+            }),
+            json!({
+                "inbounds": [{
+                    "type": "trojan",
+                    "tls": {
+                        "enabled": true,
+                        "reality": {
+                            "enabled": true,
+                            "handshake": {
+                                "server": "cover.example.com",
+                                "server_port": 443,
+                                "domain_strategy": "prefer_ipv4"
+                            }
+                        }
+                    }
+                }]
+            }),
+            json!({
+                "inbounds": [{
+                    "type": "cloudflared",
+                    "token": "opaque",
+                    "control_dialer": {
+                        "domain_strategy": "prefer_ipv4"
+                    },
+                    "tunnel_dialer": {
+                        "domain_strategy": "prefer_ipv6"
+                    }
+                }]
+            }),
+            json!({
+                "route": {
+                    "rules": [{
+                        "action": "direct",
+                        "domain": "example.com",
+                        "domain_strategy": "prefer_ipv4"
+                    }]
+                }
+            }),
         ];
 
         for document in documents {
@@ -497,6 +689,24 @@ mod tests {
                         "strategy": "prefer_ipv4",
                         "action": "route",
                         "outbound": "direct"
+                    }]
+                }
+            }),
+            json!({
+                "dns": {
+                    "servers": [{
+                        "type": "hosts",
+                        "tag": "hosts",
+                        "domain_strategy": "prefer_ipv4"
+                    }]
+                }
+            }),
+            json!({
+                "route": {
+                    "rules": [{
+                        "action": "route",
+                        "outbound": "direct",
+                        "domain_strategy": "prefer_ipv4"
                     }]
                 }
             }),
