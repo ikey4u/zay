@@ -20,7 +20,7 @@ pub fn clear_error() {
 
 /// Return the last error message (caller must `zay_ios_free_string`).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn zay_ios_last_error() -> *mut c_char {
+pub extern "C" fn zay_ios_last_error() -> *mut c_char {
     LAST_ERROR.with(|slot| {
         slot.borrow_mut()
             .take()
@@ -30,6 +30,11 @@ pub unsafe extern "C" fn zay_ios_last_error() -> *mut c_char {
 }
 
 /// Free a string allocated by this library.
+///
+/// # Safety
+///
+/// `s` must be null or a pointer returned by this library that has not already
+/// been freed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zay_ios_free_string(s: *mut c_char) {
     if s.is_null() {

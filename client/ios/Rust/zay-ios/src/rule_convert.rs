@@ -3,18 +3,23 @@
 //! `shared/clash_rules_convert.rs`.
 
 #[path = "../../../../../shared/clash_rules_convert.rs"]
+#[allow(dead_code)]
 mod clash_rules_convert;
 
 use anyhow::{Context, Result, bail};
 use serde_json::json;
 
-pub use clash_rules_convert::{is_valid_singbox_ruleset_json, rule_text_to_singbox_source};
+pub use clash_rules_convert::{
+    is_valid_singbox_ruleset_json, rule_text_to_singbox_source,
+};
 
 /// Detect format + convert. Returns `{ "format", "rule_count", "json" }`.
 pub fn convert_rule_text(raw: &str, hint: Option<&str>) -> Result<String> {
     let format = detect_format(raw, hint);
     let json_text = match format.as_str() {
-        "singbox" if is_valid_singbox_ruleset_json(raw.trim()) => raw.trim().to_string(),
+        "singbox" if is_valid_singbox_ruleset_json(raw.trim()) => {
+            raw.trim().to_string()
+        }
         _ => rule_text_to_singbox_source(raw)?,
     };
     let rule_count = count_entries(&json_text).unwrap_or(0);
@@ -27,14 +32,14 @@ pub fn convert_rule_text(raw: &str, hint: Option<&str>) -> Result<String> {
 }
 
 fn detect_format(raw: &str, hint: Option<&str>) -> String {
-    if let Some(h) = hint.map(|s| s.trim().to_ascii_lowercase()) {
-        if matches!(
+    if let Some(h) = hint.map(|s| s.trim().to_ascii_lowercase())
+        && matches!(
             h.as_str(),
             "clash" | "shadowrocket" | "singbox" | "plain" | "auto"
-        ) && h != "auto"
-        {
-            return h;
-        }
+        )
+        && h != "auto"
+    {
+        return h;
     }
     let t = raw.trim();
     if t.starts_with('{') && is_valid_singbox_ruleset_json(t) {
@@ -65,7 +70,9 @@ fn count_entries(json_text: &str) -> Result<usize> {
         .context("missing rules")?;
     let mut n = 0usize;
     for rule in rules {
-        let Some(obj) = rule.as_object() else { continue };
+        let Some(obj) = rule.as_object() else {
+            continue;
+        };
         for (k, val) in obj {
             if k == "type" || k == "mode" || k == "invert" {
                 continue;

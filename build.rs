@@ -1,7 +1,7 @@
 use std::{
     env,
     fs::{self, File},
-    io::{Read, Write, copy},
+    io::{Read, copy},
     path::{Path, PathBuf},
     process::Command,
 };
@@ -10,8 +10,6 @@ use sha2::{Digest, Sha256};
 
 include!("shared/clash_rules_convert.rs");
 
-/// Build embedded `sing-box` from the pinned `vendor/sing-box` submodule (requires Go).
-const VENDOR_SINGBOX_DIR: &str = "vendor/sing-box";
 const WINPCAP_DEV_PACK_URL: &str =
     "https://www.winpcap.org/install/bin/WpdPack_4_1_2.zip";
 const WINPCAP_DEV_PACK_SHA256: &str =
@@ -61,12 +59,6 @@ fn main() {
     println!("cargo:rerun-if-changed=Cargo.lock");
     println!("cargo:rerun-if-env-changed=TARGET");
 
-    println!("cargo:rerun-if-changed=vendor/sing-box/go.mod");
-    println!("cargo:rerun-if-changed=vendor/sing-box/cmd/sing-box");
-    println!(
-        "cargo:rerun-if-changed=vendor/sing-box/release/DEFAULT_BUILD_TAGS_OTHERS"
-    );
-    println!("cargo:rerun-if-changed=vendor/sing-box/release/LDFLAGS");
     println!("cargo:rerun-if-changed=vendor/Easytier/easytier/Cargo.toml");
 
     let pkg_version =
@@ -86,7 +78,6 @@ fn main() {
 
     prepare_windows_runtime(&out_dir, target);
 
-    embed_singbox(&out_dir, target);
     embed_clash_rules(&out_dir);
 }
 
@@ -280,134 +271,6 @@ fn write_clash_rules_stamp(path: &Path, key: &str) -> Result<(), String> {
     }
     fs::write(path, key).map_err(|e| e.to_string())
 }
-
-fn embed_singbox(out_dir: &Path, target: &str) {
-    let manifest_dir = PathBuf::from(
-        env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"),
-    );
-    let vendor = manifest_dir.join(VENDOR_SINGBOX_DIR);
-    if !vendor.join("go.mod").is_file() {
-        panic!(
-            "missing {VENDOR_SINGBOX_DIR} (go.mod). Init submodules:\n  git submodule update --init --recursive"
-        );
-    }
-
-    let commit = git_output(&[
-        "-C",
-        vendor.to_str().expect("vendor path utf-8"),
-        "rev-parse",
-        "HEAD",
-    ])
-    .unwrap_or_else(|| "unknown".into());
-    let short = commit.chars().take(12).collect::<String>();
-    let version = format!("vendor-{short}");
-
-    let exe_name = if target.contains("windows") {
-        "sing-box.exe"
-    } else {
-        "sing-box"
-    };
-    let embed_path = out_dir.join(exe_name);
-    let stamp_path = out_dir.join("singbox.stamp");
-
-    if stamp_matches(&stamp_path, &version, target) && embed_path.is_file() {
-        emit_singbox_rustc_env(&embed_path, &version);
-        return;
-    }
-
-    let (goos, goarch) =
-        go_target_for_rust_target(target).unwrap_or_else(|| {
-            panic!("unsupported build target for vendor sing-box: {target}")
-        });
-    let tags =
-        fs::read_to_string(vendor.join("release/DEFAULT_BUILD_TAGS_OTHERS"))
-            .unwrap_or_else(|e| {
-                panic!(
-                    "read {}: {e}",
-                    vendor.join("release/DEFAULT_BUILD_TAGS_OTHERS").display()
-                )
-            });
-    let tags = tags.trim();
-    // Must include release/LDFLAGS (-checklinkname=0) or badtls go:linkname fails to link.
-    let shared_ldflags = fs::read_to_string(vendor.join("release/LDFLAGS"))
-        .unwrap_or_else(|e| {
-            panic!("read {}: {e}", vendor.join("release/LDFLAGS").display())
-        });
-    let shared_ldflags = shared_ldflags.trim();
-    let ldflags = format!(
-        "-X 'github.com/sagernet/sing-box/constant.Version={version}' {shared_ldflags} -s -w -buildid="
-    );
-
-    eprintln!(
-        "cargo:warning=zay: building sing-box from {VENDOR_SINGBOX_DIR} ({short}) for {goos}/{goarch}"
-    );
-
-    let status = Command::new("go")
-        .current_dir(&vendor)
-        .env("CGO_ENABLED", "0")
-        .env("GOOS", goos)
-        .env("GOARCH", goarch)
-        .env("GOTOOLCHAIN", "auto")
-        .args([
-            "build",
-            "-trimpath",
-            "-tags",
-            tags,
-            "-ldflags",
-            &ldflags,
-            "-o",
-        ])
-        .arg(&embed_path)
-        .arg("./cmd/sing-box")
-        .status()
-        .unwrap_or_else(|e| {
-            panic!("failed to spawn `go` (install Go and ensure it is on PATH): {e}")
-        });
-    if !status.success() {
-        panic!(
-            "go build sing-box failed with {status} (cwd {})",
-            vendor.display()
-        );
-    }
-
-    chmod_executable(&embed_path);
-    write_stamp(&stamp_path, &version, target).expect("write singbox.stamp");
-    emit_singbox_rustc_env(&embed_path, &version);
-}
-
-fn go_target_for_rust_target(
-    target: &str,
-) -> Option<(&'static str, &'static str)> {
-    Some(match target {
-        "aarch64-apple-darwin" => ("darwin", "arm64"),
-        "x86_64-apple-darwin" => ("darwin", "amd64"),
-        "aarch64-unknown-linux-gnu" | "aarch64-unknown-linux-musl" => {
-            ("linux", "arm64")
-        }
-        "x86_64-unknown-linux-gnu" | "x86_64-unknown-linux-musl" => {
-            ("linux", "amd64")
-        }
-        "x86_64-pc-windows-gnu" | "x86_64-pc-windows-msvc" => {
-            ("windows", "amd64")
-        }
-        "aarch64-pc-windows-msvc" => ("windows", "arm64"),
-        _ => return None,
-    })
-}
-
-#[cfg(unix)]
-fn chmod_executable(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    let mut perms = fs::metadata(path)
-        .unwrap_or_else(|e| panic!("metadata for {}: {e}", path.display()))
-        .permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(path, perms)
-        .unwrap_or_else(|e| panic!("chmod {}: {e}", path.display()));
-}
-
-#[cfg(not(unix))]
-fn chmod_executable(_path: &Path) {}
 
 fn prepare_windows_runtime(out_dir: &Path, target: &str) {
     if target != "x86_64-pc-windows-gnu" {
@@ -643,31 +506,6 @@ fn ensure_pe_x86_64(path: &Path) -> Result<(), String> {
     } else {
         Err(format!("{} is not an x86_64 PE file", path.display()))
     }
-}
-
-fn emit_singbox_rustc_env(embed_path: &Path, version: &str) {
-    println!(
-        "cargo:rustc-env=SINGBOX_EMBED={}",
-        embed_path.to_string_lossy()
-    );
-    println!("cargo:rustc-env=SINGBOX_VERSION={version}");
-}
-
-fn stamp_matches(stamp_path: &Path, version: &str, target: &str) -> bool {
-    fs::read_to_string(stamp_path)
-        .map(|s| s.trim() == format!("{version}\n{target}"))
-        .unwrap_or(false)
-}
-
-fn write_stamp(
-    stamp_path: &Path,
-    version: &str,
-    target: &str,
-) -> std::io::Result<()> {
-    let mut f = File::create(stamp_path)?;
-    writeln!(f, "{version}")?;
-    writeln!(f, "{target}")?;
-    Ok(())
 }
 
 fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {

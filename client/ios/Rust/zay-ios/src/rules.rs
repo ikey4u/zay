@@ -125,7 +125,10 @@ fn include_ruleset(id: &str, stage: RulesStage) -> bool {
     }
 }
 
-pub fn rule_set_definitions(working_dir: &Path, stage: RulesStage) -> Vec<Value> {
+pub fn rule_set_definitions(
+    working_dir: &Path,
+    stage: RulesStage,
+) -> Vec<Value> {
     let dir = working_dir.join(EMBEDDED_RULESET_DIR);
     let mut defs: Vec<Value> = RULE_SETS
         .iter()
@@ -185,28 +188,31 @@ pub fn custom_rule_set_definitions(
 }
 
 /// Route rules for custom sets — inserted before builtin blacklist rules.
-pub fn custom_route_rules(custom: &[CustomRuleSet], proxy_tag: &str) -> Vec<Value> {
+pub fn custom_route_rules(
+    custom: &[CustomRuleSet],
+    proxy_tag: &str,
+) -> Vec<Value> {
     custom
         .iter()
         .filter(|c| !c.id.trim().is_empty())
-        .filter_map(|c| {
+        .map(|c| {
             let tag = format!("custom-{}", c.id.trim());
             let action = c.action.trim().to_ascii_lowercase();
             match action.as_str() {
-                "direct" => Some(json!({
+                "direct" => json!({
                     "action": "route",
                     "rule_set": [tag],
                     "outbound": "direct"
-                })),
-                "reject" => Some(json!({
+                }),
+                "reject" => json!({
                     "action": "reject",
                     "rule_set": [tag]
-                })),
-                _ => Some(json!({
+                }),
+                _ => json!({
                     "action": "route",
                     "rule_set": [tag],
                     "outbound": proxy_tag
-                })),
+                }),
             }
         })
         .collect()

@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Wrap libzay_ios.a into ZayCore.framework (dynamic) so its EH personality
-# does not collide with Libbox's C++ personality inside the Packet Tunnel dylib.
+# Wrap the Rust iOS core and embedded singbox library into ZayCore.framework.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -27,7 +26,9 @@ xcrun --sdk iphoneos clang++ -dynamiclib \
   -framework Security \
   -framework SystemConfiguration \
   -framework Network \
+  -framework Foundation \
   -framework CoreFoundation \
+  -lsqlite3 \
   -install_name "@rpath/ZayCore.framework/ZayCore" \
   -compatibility_version 1 \
   -current_version 1 \

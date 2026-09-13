@@ -8,6 +8,10 @@ OUT="$ROOT/Vendor"
 HEADER_OUT="$ROOT/Shared"
 MIN_IOS="${IPHONEOS_DEPLOYMENT_TARGET:-16.0}"
 
+# zay-ios is a root-workspace member so it shares the migration's validated
+# dependency lock; keep artifacts in the historical mobile path expected below.
+export CARGO_TARGET_DIR="$CRATE/target"
+
 mkdir -p "$OUT" "$HEADER_OUT"
 
 export IPHONEOS_DEPLOYMENT_TARGET="$MIN_IOS"

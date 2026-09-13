@@ -5,7 +5,7 @@ pub mod easytier;
 pub mod log_buf;
 pub mod mesh;
 
-use std::{fs, path::PathBuf, sync::Arc, thread, time::Duration};
+use std::{fs, path::PathBuf, sync::Arc};
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
@@ -198,7 +198,6 @@ pub fn run(cli: StackCli) -> Result<()> {
 
     let state = Arc::new(api::AppState::from(prepared));
 
-    let engine = singbox::resolve_binary()?;
     let listen_host = if flags.gateway {
         "0.0.0.0"
     } else {
@@ -235,13 +234,40 @@ pub fn run(cli: StackCli) -> Result<()> {
         *state.config_json.write().expect("config lock") = refreshed;
     }
 
-    let mut child = match spawn_singbox(
-        &engine,
-        &state.settings,
-        &config_path,
-        state.tun_enabled,
-        None,
-    ) {
+    if !state.tun_enabled {
+        assets::ensure_mixed_port_free(state.settings.mixed_port)?;
+        let mut runtime = singbox::native::NativeRuntime::start(
+            &config_path,
+            &state.settings.singbox_dir(),
+        )?;
+        eprintln!("sing-box started in-process (Rust library)");
+
+        if !flags.no_rules {
+            rules::spawn_background_download(
+                state.settings.clone(),
+                state.config_json.clone(),
+            );
+        }
+
+        let control = runtime.handle();
+        ctrlc::set_handler(move || {
+            if flags.mesh_enabled() {
+                let _ = easytier::stop_all();
+            }
+            control.cancel();
+            eprintln!("stopping stack");
+        })
+        .context("installing Ctrl-C handler")?;
+
+        let result = runtime.wait();
+        if mesh_started {
+            easytier::stop_all()?;
+        }
+        return result;
+    }
+
+    let mut child = match spawn_tun_worker(&state.settings, &config_path, None)
+    {
         Ok(child) => child,
         Err(e) => {
             if mesh_started {
@@ -252,18 +278,10 @@ pub fn run(cli: StackCli) -> Result<()> {
     };
 
     if let Some(stdout) = child.take_stdout() {
-        assets::pipe_logs(stdout);
+        assets::pipe_worker_logs(stdout);
     }
     if let Some(stderr) = child.take_stderr() {
-        assets::pipe_logs(stderr);
-    }
-
-    if state.tun_enabled {
-        let settings = state.settings.clone();
-        thread::spawn(move || {
-            thread::sleep(Duration::from_secs(3));
-            singbox::tun_route::linux_register_tun_dns(&settings);
-        });
+        assets::pipe_worker_logs(stderr);
     }
 
     if !flags.no_rules {
@@ -278,7 +296,7 @@ pub fn run(cli: StackCli) -> Result<()> {
         if flags.mesh_enabled() {
             let _ = easytier::stop_all();
         }
-        assets::terminate_process(pid);
+        assets::terminate_worker_process(pid);
         eprintln!("stopping stack");
         std::process::exit(130);
     })
@@ -333,22 +351,30 @@ fn dump_config(cli: &StackCli, mesh: Option<MeshConfig>) -> Result<String> {
     .context("serializing proxy service configuration")
 }
 
-pub(crate) fn spawn_singbox(
-    engine: &std::path::Path,
+pub(crate) fn spawn_tun_worker(
     settings: &Settings,
     config_path: &std::path::Path,
-    tun_enabled: bool,
     sudo_password: Option<&str>,
-) -> Result<crate::singbox::assets::ManagedChild> {
+) -> Result<crate::singbox::assets::NativeTunWorker> {
     crate::singbox::assets::ensure_mixed_port_free(settings.mixed_port)?;
-    singbox::spawn(
-        engine,
-        &settings.singbox_dir(),
-        config_path,
-        false,
-        tun_enabled,
-        sudo_password,
-    )
+    #[cfg(unix)]
+    {
+        assets::spawn_native_tun_worker(
+            &settings.singbox_dir(),
+            config_path,
+            false,
+            sudo_password,
+        )
+    }
+    #[cfg(windows)]
+    {
+        assets::spawn_native_tun_worker(
+            &settings.singbox_dir(),
+            config_path,
+            false,
+            sudo_password,
+        )
+    }
 }
 
 pub(crate) fn ensure_stack_config_exists(common: &ProxyOpts) -> Result<()> {

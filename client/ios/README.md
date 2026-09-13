@@ -18,7 +18,7 @@ Mesh（EasyTier）+ 全局 TUN 代理（sing-box）的 iOS 客户端。
 点击 **启动** 后：
 
 1. Network Extension 内启动 EasyTier（`no_tun` + 本地 SOCKS5）
-2. 启动 sing-box（Libbox）占用 Packet Tunnel → **全局代理**
+2. 启动 ZayCore 内嵌的 Rust singbox library 占用 Packet Tunnel → **全局代理**
 3. Mesh CIDR 经 sing-box 路由到 EasyTier SOCKS，与其它 EasyTier 节点互通
 
 运行日志写入 App Group，可在主界面实时查看。
@@ -27,24 +27,21 @@ Mesh（EasyTier）+ 全局 TUN 代理（sing-box）的 iOS 客户端。
 
 - Xcode 15+（部署目标 iOS 16+）
 - Rust（已装 `aarch64-apple-ios`）
-- Go 1.22+（编译 Libbox）
 - [XcodeGen](https://github.com/yonaskolb/XcodeGen)：`brew install xcodegen`
 - Apple Developer 账号（真机 Network Extension 需要）
-- 仓库根目录的 git submodules：`vendor/Easytier`、`vendor/sing-box`（`git submodule update --init --recursive`）
+- 仓库根目录的 EasyTier submodule：`vendor/Easytier`（`git submodule update --init --recursive`）
 
 ## 一键构建脚本
 
 ```bash
 cd client/ios
 
-# 需要：Rust (aarch64-apple-ios)、Go、XcodeGen、Xcode
-# Go 可放到 ~/sdk/go 并 source Scripts/env-go.sh
+# 需要：Rust (aarch64-apple-ios)、XcodeGen、Xcode
 
 ./Scripts/build-all.sh
 # 等价于依次执行：
 #   ./Scripts/build-rust.sh              # libzay_ios.a
-#   ./Scripts/build-zaycore-framework.sh # ZayCore.framework（隔离 Rust EH）
-#   ./Scripts/build-libbox.sh            # Libbox.xcframework
+#   ./Scripts/build-zaycore-framework.sh # ZayCore.framework（含 singbox）
 #   ./Scripts/generate-project.sh        # Zay.xcodeproj
 
 open Zay.xcodeproj
@@ -61,8 +58,7 @@ open Zay.xcodeproj
 
 ```
 ZayApp ──App Group──► ZayTunnel (NEPacketTunnelProvider)
-                         ├─ Libbox / sing-box（真实 utun，全局代理）
-                         └─ ZayCore / EasyTier（no_tun + 本地 SOCKS，mesh）
+                         └─ ZayCore（Rust singbox 持有真实 utun；EasyTier 提供 mesh SOCKS）
 ```
 
 iOS 只有一个 Packet Tunnel：sing-box 占用真实 utun；mesh CIDR 经 sing-box 路由到 EasyTier 的本地 SOCKS5。

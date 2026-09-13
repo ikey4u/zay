@@ -2,10 +2,8 @@ import Darwin
 import Foundation
 import Network
 import NetworkExtension
-import Libbox
 
 final class PacketTunnelProvider: NEPacketTunnelProvider {
-    private var commandServer: LibboxCommandServer?
     private var platform: TunnelPlatformInterface?
     private var config: ZayRuntimeConfig = .empty
     private var proxyBridge: ProxyCommandBridge?
@@ -86,9 +84,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     /// Required when `disconnectOnSleep = false` so iOS keeps the extension alive across lock/sleep.
     override func sleep(completionHandler: @escaping () -> Void) {
-        ZayLog.info("NE sleep (pause Libbox; suspend Mesh)")
+        ZayLog.info("NE sleep (suspend Mesh; Rust singbox remains resident)")
         proxyBridge?.stop()
-        commandServer?.pause()
         withMeshQueue {
             if meshRunning {
                 ZayNative.stopMesh()
@@ -161,7 +158,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     /// Reload current rules stage with updated mesh CIDRs (proxy stays up).
     private func reloadSingboxMeshRoutes() throws {
-        guard let server = commandServer, !workingDirPath.isEmpty else {
+        guard !workingDirPath.isEmpty else {
             throw NSError(
                 domain: "zay",
                 code: 60,
@@ -177,12 +174,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             rulesProfile: RulesProgress.profileString(stage),
             preferCache: true
         )
-        try server.startOrReloadService(json, options: LibboxOverrideOptions())
+        try ZayNative.reloadSingbox(json: json, basePath: workingDirPath)
         ZayLog.info("sing-box mesh routes reloaded stage=\(stage) cidrs=\(lastMeshCIDRs)")
     }
 
     override func wake() {
-        commandServer?.wake()
         withMeshQueue {
             ZayLog.info("NE wake meshAllowed=\(meshAllowed) suspended=\(meshSuspendedBySleep)")
             guard meshAllowed, meshSuspendedBySleep, config.meshEnabled else {
@@ -221,6 +217,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         case .connectionFailed: return "connectionFailed"
         case .sleep: return "sleep"
         case .appUpdate: return "appUpdate"
+        case .internalError: return "internalError"
         @unknown default: return "unknown(\(reason.rawValue))"
         }
     }
@@ -292,7 +289,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         }
         if req == "proxy-urltest" {
             do {
-                // Prefer Auto urltest group; fall back to Proxy selector / each item.
+                // Prefer conventional group names, then probe any configured group.
                 if let err = proxyBridge?.urlTestBestEffort() {
                     throw err
                 }
@@ -372,10 +369,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         let base = AppGroup.containerURL?.path ?? NSTemporaryDirectory()
         let workingURL = AppGroup.workingDirectory ?? URL(fileURLWithPath: base)
         let working = workingURL.path
-        let tempURL = AppGroup.containerURL?.appendingPathComponent("tmp", isDirectory: true)
-        let temp = tempURL?.path ?? NSTemporaryDirectory()
         try? FileManager.default.createDirectory(atPath: working, withIntermediateDirectories: true)
-        try? FileManager.default.createDirectory(atPath: temp, withIntermediateDirectories: true)
 
         try ZayNative.ensureEmbeddedRules(workingDir: working)
         ZayLog.info("embedded clash-rules ready under \(working)/ruleset-embedded")
@@ -402,43 +396,21 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         try? singboxJSON.write(to: url, atomically: true, encoding: .utf8)
         ZayLog.info("wrote \(url.path)")
 
-        let setup = LibboxSetupOptions()
-        setup.basePath = base
-        setup.workingPath = working
-        setup.tempPath = temp
-        setup.logMaxLines = 5000
-        setup.debug = false
-        setup.oomKillerEnabled = false
-        setup.oomKillerDisabled = true
-        var setupError: NSError?
-        guard LibboxSetup(setup, &setupError) else {
-            throw setupError ?? NSError(domain: "zay", code: 20, userInfo: [NSLocalizedDescriptionKey: "LibboxSetup failed"])
-        }
-        ZayLog.info("LibboxSetup ok base=\(base) working=\(working)")
-
         // Stale cache.db from a previous killed start can stall reload.
         let cacheURL = workingURL.appendingPathComponent("cache.db")
         try? FileManager.default.removeItem(at: cacheURL)
 
         let platform = TunnelPlatformInterface(provider: self)
         self.platform = platform
-
-        var serverError: NSError?
-        guard let server = LibboxNewCommandServer(platform, platform, &serverError) else {
-            throw serverError ?? NSError(domain: "zay", code: 21, userInfo: [NSLocalizedDescriptionKey: "LibboxNewCommandServer failed"])
-        }
-        try server.start()
-        self.commandServer = server
-        ZayLog.info("CommandServer started")
-
-        ZayLog.info("startOrReloadService begin stage0 (\(singboxJSON.count) bytes)")
-        do {
-            try server.startOrReloadService(singboxJSON, options: LibboxOverrideOptions())
-        } catch {
-            ZayLog.error("startOrReloadService failed: \(error.localizedDescription)")
-            throw error
-        }
-        ZayLog.info("sing-box service started")
+        let context = Unmanaged.passUnretained(platform).toOpaque()
+        ZayLog.info("Rust singbox start begin stage0 (\(singboxJSON.count) bytes)")
+        try ZayNative.startSingbox(
+            json: singboxJSON,
+            basePath: working,
+            openTun: zayOpenTunCallback,
+            context: context
+        )
+        ZayLog.info("Rust singbox library started")
 
         let bridge = ProxyCommandBridge()
         self.proxyBridge = bridge
@@ -540,7 +512,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     private func reloadRules(to stage: Int) {
-        guard let server = commandServer, !workingDirPath.isEmpty else { return }
+        guard !workingDirPath.isEmpty else { return }
         let probing = stage > RulesProgress.maxOk
         if probing {
             RulesProgress.attempting = stage
@@ -555,7 +527,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 rulesProfile: RulesProgress.profileString(stage),
                 preferCache: true
             )
-            try server.startOrReloadService(json, options: LibboxOverrideOptions())
+            try ZayNative.reloadSingbox(json: json, basePath: workingDirPath)
             currentRulesStage = stage
             ZayLog.info("rules stage \(stage) reload ok (\(json.count) bytes)")
 
@@ -581,7 +553,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         }
     }
 
-    /// Stop Libbox / EasyTier / monitors. Safe to call repeatedly.
+    /// Stop Rust singbox / EasyTier / monitors. Safe to call repeatedly.
     /// - Parameter finalStop: user/system tear-down; blocks `wake` from resurrecting Mesh.
     ///   Bootstrap reset passes `false` so Mesh can start immediately after.
     private func teardownRuntime(reason: String, finalStop: Bool) {
@@ -593,13 +565,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         rulesReloadWorkItem = nil
         proxyBridge?.stop()
         proxyBridge = nil
-        do {
-            try commandServer?.closeService()
-        } catch {
-            ZayLog.warn("closeService: \(error.localizedDescription)")
-        }
-        commandServer?.close()
-        commandServer = nil
+        ZayNative.stopSingbox()
         platform?.reset()
         platform = nil
         withMeshQueue {
@@ -643,386 +609,193 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 }
 
-// MARK: - Libbox platform (aligned with official SFI openTun)
+// MARK: - Rust singbox TUN host
 
-final class TunnelPlatformInterface: NSObject, LibboxPlatformInterfaceProtocol, LibboxCommandServerHandlerProtocol {
-    weak var provider: NEPacketTunnelProvider?
-    private var networkSettings: NEPacketTunnelNetworkSettings?
-    private var defaultInterfaceMonitor: NWPathMonitor?
-    private weak var interfaceListener: LibboxInterfaceUpdateListenerProtocol?
-    /// Own Packet Tunnel utun name — never report as the default outbound interface.
-    private var myTunName: String?
-    private var lastDefaultIfaceName: String?
-    private var lastGetInterfacesLog = Date.distantPast
+private struct RustTunRequest: Decodable {
+    let tag: String
+    let mtu: UInt16
+    let addresses: [String]
+    let routes: [String]
+    let dnsServers: [String]
 
-    init(provider: NEPacketTunnelProvider) {
-        self.provider = provider
-        super.init()
-    }
-
-    func reset() {
-        defaultInterfaceMonitor?.cancel()
-        defaultInterfaceMonitor = nil
-        interfaceListener = nil
-        networkSettings = nil
-        myTunName = nil
-        lastDefaultIfaceName = nil
-    }
-
-    // MARK: CommandServerHandler
-
-    func serviceStop() throws { ZayLog.info("serviceStop") }
-    func serviceReload() throws { ZayLog.info("serviceReload") }
-
-    func getSystemProxyStatus() throws -> LibboxSystemProxyStatus {
-        let status = LibboxSystemProxyStatus()
-        status.available = false
-        status.enabled = false
-        return status
-    }
-
-    func setSystemProxyEnabled(_ enabled: Bool) throws {
-        ZayLog.debug("setSystemProxyEnabled=\(enabled)")
-    }
-
-    func triggerNativeCrash() throws {
-        fatalError("triggerNativeCrash")
-    }
-
-    func writeDebugMessage(_ message: String?) {
-        // sing-box may still push TRACE/DEBUG here even when log.level=info.
-        // Drop entirely inside Packet Tunnel — rate-limited file writes still cost CPU/RAM.
-        _ = message
-    }
-
-    func connectSSHAgent(_ ret0_: UnsafeMutablePointer<Int32>?) throws {
-        throw NSError(domain: "zay", code: 30, userInfo: [NSLocalizedDescriptionKey: "ssh agent unsupported"])
-    }
-
-    // MARK: PlatformInterface
-
-    func localDNSTransport() -> (any LibboxLocalDNSTransportProtocol)? { nil }
-    func usePlatformAutoDetectControl() -> Bool { false }
-
-    func autoDetectControl(_ fd: Int32) throws {
-        ZayLog.debug("autoDetectControl fd=\(fd)")
-    }
-
-    func openTun(_ options: (any LibboxTunOptionsProtocol)?, ret0_: UnsafeMutablePointer<Int32>?) throws {
-        ZayLog.info("openTun invoked")
-        guard let provider, let options, let ret0_ else {
-            throw NSError(domain: "zay", code: 40, userInfo: [NSLocalizedDescriptionKey: "openTun missing args"])
-        }
-        ZayLog.info("openTun begin (real utun FD)")
-
-        try applyTunnelSettings(options: options, provider: provider)
-
-        if let fd = provider.packetFlow.value(forKeyPath: "socket.fileDescriptor") as? Int32, fd >= 0 {
-            ret0_.pointee = fd
-            ZayLog.info("openTun → packetFlow fd=\(fd)")
-            return
-        }
-
-        let libboxFd = LibboxGetTunnelFileDescriptor()
-        if libboxFd >= 0 {
-            ret0_.pointee = libboxFd
-            ZayLog.info("openTun → LibboxGetTunnelFileDescriptor=\(libboxFd)")
-            return
-        }
-
-        throw NSError(domain: "zay", code: 41, userInfo: [NSLocalizedDescriptionKey: "Missing tunnel file descriptor"])
-    }
-
-    private func applyTunnelSettings(
-        options: any LibboxTunOptionsProtocol,
-        provider: NEPacketTunnelProvider
-    ) throws {
-        let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: "127.0.0.1")
-        settings.mtu = NSNumber(value: options.getMTU())
-
-        var v4Addrs: [String] = []
-        var v4Masks: [String] = []
-        if let inet4 = options.getInet4Address() {
-            while inet4.hasNext() {
-                if let p = inet4.next() {
-                    v4Addrs.append(p.address())
-                    v4Masks.append(p.mask())
-                }
-            }
-        }
-        if !v4Addrs.isEmpty {
-            let ipv4 = NEIPv4Settings(addresses: v4Addrs, subnetMasks: v4Masks)
-            var included: [NEIPv4Route] = []
-            if options.getAutoRoute() {
-                var hasRange = false
-                if let ranges = options.getInet4RouteRange() {
-                    while ranges.hasNext() {
-                        if let p = ranges.next() {
-                            included.append(NEIPv4Route(destinationAddress: p.address(), subnetMask: p.mask()))
-                            hasRange = true
-                        }
-                    }
-                }
-                if !hasRange { included.append(.default()) }
-            }
-            ipv4.includedRoutes = included
-
-            var excluded: [NEIPv4Route] = []
-            if let excl = options.getInet4RouteExcludeAddress() {
-                while excl.hasNext() {
-                    if let p = excl.next() {
-                        excluded.append(NEIPv4Route(destinationAddress: p.address(), subnetMask: p.mask()))
-                    }
-                }
-            }
-            ipv4.excludedRoutes = excluded
-            settings.ipv4Settings = ipv4
-        }
-
-        var v6Addrs: [String] = []
-        var v6Prefixes: [NSNumber] = []
-        if let inet6 = options.getInet6Address() {
-            while inet6.hasNext() {
-                if let p = inet6.next() {
-                    v6Addrs.append(p.address())
-                    v6Prefixes.append(NSNumber(value: p.prefix()))
-                }
-            }
-        }
-        if !v6Addrs.isEmpty {
-            let ipv6 = NEIPv6Settings(addresses: v6Addrs, networkPrefixLengths: v6Prefixes)
-            if options.getAutoRoute() { ipv6.includedRoutes = [.default()] }
-            settings.ipv6Settings = ipv6
-        }
-
-        var dnsServers: [String] = []
-        if let dnsIt = try? options.getDNSServerAddress() {
-            while dnsIt.hasNext() { dnsServers.append(dnsIt.next()) }
-        }
-        let dns = NEDNSSettings(servers: dnsServers.isEmpty ? ["1.1.1.1", "8.8.8.8"] : dnsServers)
-        dns.matchDomains = [""]
-        settings.dnsSettings = dns
-
-        networkSettings = settings
-
-        let sema = DispatchSemaphore(value: 0)
-        var applyError: Error?
-        provider.setTunnelNetworkSettings(settings) { err in
-            applyError = err
-            sema.signal()
-        }
-        _ = sema.wait(timeout: .now() + 15)
-        if let applyError { throw applyError }
-        ZayLog.info("tunnel network settings applied")
-    }
-
-    func useProcFS() -> Bool { false }
-
-    func findConnectionOwner(
-        _ ipProtocol: Int32,
-        sourceAddress: String?,
-        sourcePort: Int32,
-        destinationAddress: String?,
-        destinationPort: Int32
-    ) throws -> LibboxConnectionOwner {
-        throw NSError(domain: "zay", code: 42, userInfo: [NSLocalizedDescriptionKey: "findConnectionOwner unsupported"])
-    }
-
-    func startDefaultInterfaceMonitor(_ listener: (any LibboxInterfaceUpdateListenerProtocol)?) throws {
-        ZayLog.info("startDefaultInterfaceMonitor begin")
-        interfaceListener = listener
-        let monitor = NWPathMonitor()
-        let sema = DispatchSemaphore(value: 0)
-        monitor.pathUpdateHandler = { [weak self] path in
-            guard let self, let listener = self.interfaceListener else { return }
-            self.emitDefaultInterface(listener, path: path)
-            sema.signal()
-            monitor.pathUpdateHandler = { [weak self] path in
-                guard let self, let listener = self.interfaceListener else { return }
-                self.emitDefaultInterface(listener, path: path)
-            }
-        }
-        monitor.start(queue: DispatchQueue.global(qos: .utility))
-        _ = sema.wait(timeout: .now() + 2)
-        defaultInterfaceMonitor = monitor
-        ZayLog.info("default interface monitor started")
-    }
-
-    private func emitDefaultInterface(_ listener: LibboxInterfaceUpdateListenerProtocol, path: Network.NWPath) {
-        // Prefer getifaddrs underlay — NWPath often only lists our utun once the
-        // full tunnel is up, which Libbox then excludes → empty dial set.
-        if let underlay = PhysicalNetworkInterfaces.preferredUnderlay(excluding: myTunName) {
-            if lastDefaultIfaceName != underlay.name {
-                lastDefaultIfaceName = underlay.name
-                ZayLog.info(
-                    "default interface: \(underlay.name) idx=\(underlay.index) (getifaddrs) pathStatus=\(path.status)"
-                )
-            }
-            listener.updateDefaultInterface(
-                underlay.name,
-                interfaceIndex: underlay.index,
-                isExpensive: path.isExpensive,
-                isConstrained: path.isConstrained
-            )
-            return
-        }
-
-        guard path.status != .unsatisfied, let iface = preferredPhysicalInterface(on: path) else {
-            if lastDefaultIfaceName != nil {
-                lastDefaultIfaceName = nil
-                ZayLog.warn("default interface: none (path=\(path.status))")
-            }
-            listener.updateDefaultInterface("", interfaceIndex: -1, isExpensive: false, isConstrained: false)
-            return
-        }
-        if lastDefaultIfaceName != iface.name {
-            lastDefaultIfaceName = iface.name
-            ZayLog.info(
-                "default interface: \(iface.name) idx=\(iface.index) type=\(iface.type) (NWPath fallback)"
-            )
-        }
-        listener.updateDefaultInterface(
-            iface.name,
-            interfaceIndex: Int32(iface.index),
-            isExpensive: path.isExpensive,
-            isConstrained: path.isConstrained
-        )
-    }
-
-    /// Physical underlay for outbound sockets; never prefer our own utun.
-    private func preferredPhysicalInterface(on path: Network.NWPath) -> NWInterface? {
-        let candidates = path.availableInterfaces.filter { iface in
-            if let myTunName, iface.name == myTunName { return false }
-            return true
-        }
-        let preferredOrder: [NWInterface.InterfaceType] = [.wifi, .cellular, .wiredEthernet]
-        for type in preferredOrder {
-            if let iface = candidates.first(where: { $0.type == type }) {
-                return iface
-            }
-        }
-        if let iface = candidates.first(where: { $0.type != .other }) {
-            return iface
-        }
-        return candidates.first
-    }
-
-    func closeDefaultInterfaceMonitor(_ listener: (any LibboxInterfaceUpdateListenerProtocol)?) throws {
-        defaultInterfaceMonitor?.cancel()
-        defaultInterfaceMonitor = nil
-        interfaceListener = nil
-    }
-
-    func getInterfaces() throws -> any LibboxNetworkInterfaceIteratorProtocol {
-        // Source of truth: getifaddrs (includes en0/pdp_ip even when NWPath is utun-only).
-        var byName: [String: LibboxNetworkInterface] = [:]
-        for entry in PhysicalNetworkInterfaces.enumerate() {
-            let iface = LibboxNetworkInterface()
-            iface.name = entry.name
-            iface.index = entry.index
-            iface.flags = entry.flags
-            iface.type = entry.libboxType
-            byName[entry.name] = iface
-        }
-
-        // Enrich / merge types from NWPath when available.
-        if let monitor = defaultInterfaceMonitor {
-            let path = monitor.currentPath
-            if path.status != .unsatisfied {
-                let upFlags = Int32(IFF_UP | IFF_RUNNING)
-                for it in path.availableInterfaces {
-                    if byName[it.name] != nil { continue }
-                    let iface = LibboxNetworkInterface()
-                    iface.name = it.name
-                    iface.index = Int32(it.index)
-                    iface.flags = upFlags
-                    switch it.type {
-                    case .wifi: iface.type = LibboxInterfaceTypeWIFI
-                    case .cellular: iface.type = LibboxInterfaceTypeCellular
-                    case .wiredEthernet: iface.type = LibboxInterfaceTypeEthernet
-                    default: iface.type = LibboxInterfaceTypeOther
-                    }
-                    byName[it.name] = iface
-                }
-            }
-        }
-
-        let interfaces = Array(byName.values)
-        let now = Date()
-        if now.timeIntervalSince(lastGetInterfacesLog) > 30 {
-            lastGetInterfacesLog = now
-            let summary = interfaces.map { "\($0.name ?? "?")#\($0.index)" }.joined(separator: ", ")
-            ZayLog.debug("getInterfaces: [\(summary)] myTun=\(myTunName ?? "-")")
-        }
-        return NetworkInterfaceArray(interfaces)
-    }
-
-    func underNetworkExtension() -> Bool { true }
-    func includeAllNetworks() -> Bool { false }
-    func readWIFIState() -> LibboxWIFIState? { nil }
-    func clearDNSCache() { ZayLog.debug("clearDNSCache") }
-
-    func send(_ notification: LibboxNotification?) throws {
-        ZayLog.info("notification: \(notification?.title ?? "") \(notification?.body ?? "")")
-    }
-
-    func startNeighborMonitor(_ listener: (any LibboxNeighborUpdateListenerProtocol)?) throws {}
-    func closeNeighborMonitor(_ listener: (any LibboxNeighborUpdateListenerProtocol)?) throws {}
-    func registerMyInterface(_ name: String?) {
-        myTunName = name
-        ZayLog.info("registerMyInterface: \(name ?? "")")
-        // Re-emit default interface now that we know which name to exclude.
-        if let monitor = defaultInterfaceMonitor, let listener = interfaceListener {
-            emitDefaultInterface(listener, path: monitor.currentPath)
-        }
-    }
-
-    func usePlatformShell() -> Bool { false }
-    func checkPlatformShell() throws {}
-
-    func openShellSession(
-        _ user: LibboxPlatformUser?,
-        command: String?,
-        environ: (any LibboxStringIteratorProtocol)?,
-        term: String?,
-        rows: Int32,
-        cols: Int32
-    ) throws -> any LibboxShellSessionProtocol {
-        throw NSError(domain: "zay", code: 43, userInfo: [NSLocalizedDescriptionKey: "shell unsupported"])
-    }
-
-    func lookupUser(_ username: String?) throws -> LibboxPlatformUser {
-        throw NSError(domain: "zay", code: 47, userInfo: [NSLocalizedDescriptionKey: "lookupUser unsupported"])
-    }
-
-    func lookupSFTPServer(_ error: NSErrorPointer) -> String {
-        error?.pointee = NSError(domain: "zay", code: 44, userInfo: [NSLocalizedDescriptionKey: "sftp unsupported"])
-        return ""
-    }
-
-    func readSystemSSHHostKey(_ error: NSErrorPointer) -> String { "" }
-    func tailscaleHostname() -> String { "" }
-    func usePlatformBridge() -> Bool { false }
-
-    func createBridge(_ options: LibboxBridgeOptions?) throws -> any LibboxBridgeSessionProtocol {
-        throw NSError(domain: "zay", code: 45, userInfo: [NSLocalizedDescriptionKey: "bridge unsupported"])
+    enum CodingKeys: String, CodingKey {
+        case tag, mtu, addresses, routes
+        case dnsServers = "dns_servers"
     }
 }
 
-private final class NetworkInterfaceArray: NSObject, LibboxNetworkInterfaceIteratorProtocol {
-    private var iterator: IndexingIterator<[LibboxNetworkInterface]>
-    private var nextValue: LibboxNetworkInterface?
+@_cdecl("zayOpenTunCallback")
+private func zayOpenTunCallback(
+    context: UnsafeMutableRawPointer?,
+    requestJSON: UnsafePointer<CChar>?
+) -> Int32 {
+    guard let context, let requestJSON else { return -1 }
+    let platform = Unmanaged<TunnelPlatformInterface>
+        .fromOpaque(context)
+        .takeUnretainedValue()
+    return platform.openTun(requestJSON: String(cString: requestJSON))
+}
 
-    init(_ array: [LibboxNetworkInterface]) {
-        iterator = array.makeIterator()
+/// Applies Network Extension settings requested by the Rust library and
+/// transfers a dup(2)'d utun descriptor back to Rust.
+final class TunnelPlatformInterface {
+    private weak var provider: NEPacketTunnelProvider?
+    private var networkSettings: NEPacketTunnelNetworkSettings?
+
+    init(provider: NEPacketTunnelProvider) {
+        self.provider = provider
     }
 
-    func hasNext() -> Bool {
-        nextValue = iterator.next()
-        return nextValue != nil
+    func reset() {
+        networkSettings = nil
+        provider = nil
     }
 
-    func next() -> LibboxNetworkInterface? {
-        nextValue
+    func openTun(requestJSON: String) -> Int32 {
+        guard let provider else {
+            ZayLog.error("Rust openTun: provider released")
+            return -1
+        }
+        do {
+            let request = try JSONDecoder().decode(
+                RustTunRequest.self,
+                from: Data(requestJSON.utf8)
+            )
+            try applyTunnelSettings(request: request, provider: provider)
+            guard let fd = provider.packetFlow.value(
+                forKeyPath: "socket.fileDescriptor"
+            ) as? Int32, fd >= 0 else {
+                throw NSError(
+                    domain: "zay",
+                    code: 41,
+                    userInfo: [NSLocalizedDescriptionKey: "Missing tunnel file descriptor"]
+                )
+            }
+            let ownedFD = Darwin.dup(fd)
+            guard ownedFD >= 0 else {
+                throw NSError(
+                    domain: NSPOSIXErrorDomain,
+                    code: Int(errno),
+                    userInfo: [NSLocalizedDescriptionKey: "dup(utun) failed"]
+                )
+            }
+            ZayLog.info(
+                "Rust openTun tag=\(request.tag) mtu=\(request.mtu) fd=\(ownedFD)"
+            )
+            return ownedFD
+        } catch {
+            ZayLog.error("Rust openTun failed: \(error.localizedDescription)")
+            return -1
+        }
+    }
+
+    private func applyTunnelSettings(
+        request: RustTunRequest,
+        provider: NEPacketTunnelProvider
+    ) throws {
+        let settings = NEPacketTunnelNetworkSettings(
+            tunnelRemoteAddress: "127.0.0.1"
+        )
+        settings.mtu = NSNumber(value: request.mtu)
+
+        let v4Addresses = request.addresses.compactMap(Self.ipv4Prefix)
+        if !v4Addresses.isEmpty {
+            let ipv4 = NEIPv4Settings(
+                addresses: v4Addresses.map(\.address),
+                subnetMasks: v4Addresses.map(\.mask)
+            )
+            ipv4.includedRoutes = request.routes
+                .compactMap(Self.ipv4Prefix)
+                .map {
+                    NEIPv4Route(
+                        destinationAddress: $0.address,
+                        subnetMask: $0.mask
+                    )
+                }
+            settings.ipv4Settings = ipv4
+        }
+
+        let v6Addresses = request.addresses.compactMap(Self.ipv6Prefix)
+        if !v6Addresses.isEmpty {
+            let ipv6 = NEIPv6Settings(
+                addresses: v6Addresses.map(\.address),
+                networkPrefixLengths: v6Addresses.map {
+                    NSNumber(value: $0.prefix)
+                }
+            )
+            ipv6.includedRoutes = request.routes
+                .compactMap(Self.ipv6Prefix)
+                .map {
+                    NEIPv6Route(
+                        destinationAddress: $0.address,
+                        networkPrefixLength: NSNumber(value: $0.prefix)
+                    )
+                }
+            settings.ipv6Settings = ipv6
+        }
+
+        if !request.dnsServers.isEmpty {
+            let dns = NEDNSSettings(servers: request.dnsServers)
+            dns.matchDomains = [""]
+            settings.dnsSettings = dns
+        }
+        networkSettings = settings
+
+        let semaphore = DispatchSemaphore(value: 0)
+        let lock = NSLock()
+        var applyError: Error?
+        provider.setTunnelNetworkSettings(settings) { error in
+            lock.lock()
+            applyError = error
+            lock.unlock()
+            semaphore.signal()
+        }
+        guard semaphore.wait(timeout: .now() + 15) == .success else {
+            throw NSError(
+                domain: "zay",
+                code: 42,
+                userInfo: [NSLocalizedDescriptionKey: "Applying tunnel settings timed out"]
+            )
+        }
+        lock.lock()
+        let result = applyError
+        lock.unlock()
+        if let result { throw result }
+        ZayLog.info("Rust tunnel network settings applied")
+    }
+
+    private static func ipv4Prefix(_ value: String) -> (
+        address: String,
+        mask: String
+    )? {
+        let parts = value.split(separator: "/", maxSplits: 1).map(String.init)
+        guard parts.count == 2,
+              parts[0].contains("."),
+              let prefix = Int(parts[1]),
+              (0...32).contains(prefix)
+        else { return nil }
+        let mask = prefix == 0 ? UInt32(0) : UInt32.max << (32 - prefix)
+        return (
+            parts[0],
+            [
+                String((mask >> 24) & 0xff),
+                String((mask >> 16) & 0xff),
+                String((mask >> 8) & 0xff),
+                String(mask & 0xff),
+            ].joined(separator: ".")
+        )
+    }
+
+    private static func ipv6Prefix(_ value: String) -> (
+        address: String,
+        prefix: Int
+    )? {
+        let parts = value.split(separator: "/", maxSplits: 1).map(String.init)
+        guard parts.count == 2,
+              parts[0].contains(":"),
+              let prefix = Int(parts[1]),
+              (0...128).contains(prefix)
+        else { return nil }
+        return (parts[0], prefix)
     }
 }

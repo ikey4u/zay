@@ -19,6 +19,13 @@ include = [
     "zay_ios_stop_mesh",
     "zay_ios_mesh_status_json",
     "zay_ios_set_tun_fd",
+    "ZayIosOpenTunCallback",
+    "zay_ios_start_singbox",
+    "zay_ios_reload_singbox",
+    "zay_ios_stop_singbox",
+    "zay_ios_singbox_groups_json",
+    "zay_ios_select_singbox_outbound",
+    "zay_ios_url_test_singbox",
 ]
 
 [parse]

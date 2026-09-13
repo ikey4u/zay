@@ -26,7 +26,7 @@ equivalent component should persist.
 
 # PREBUILT FILES NOTICE
 
-**sing-box** is built from the pinned `vendor/sing-box` git submodule (requires Go on the build machine). See `vendor/README.md`.
+**sing-box** is implemented as the native Rust library in `crates/singbox` and linked into zay; no Go toolchain or sing-box executable is required at build or runtime. `inner/sing-box` remains only as the pinned upstream reference used for migration and differential tests.
 
 **EasyTier** is a Cargo path dependency on `vendor/Easytier` (same submodule pin).
 

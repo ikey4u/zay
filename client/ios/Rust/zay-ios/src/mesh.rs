@@ -3,10 +3,12 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use easytier::common::config::{ConfigFileControl, ConfigLoader as _, TomlConfigLoader};
+use easytier::common::config::{
+    ConfigFileControl, ConfigLoader as _, TomlConfigLoader,
+};
 use easytier::instance::factory::{
-    NativeInstanceManager, NativeProcessManagement, native_instance_manager_with_runtime,
-    native_process_management,
+    NativeInstanceManager, NativeProcessManagement,
+    native_instance_manager_with_runtime, native_process_management,
 };
 use once_cell::sync::Lazy;
 use serde_json::json;
@@ -70,14 +72,17 @@ pub fn start_mesh(toml: &str) -> Result<()> {
     tracing::info!("parsing EasyTier config ({} bytes)", toml.len());
     tracing::debug!("easytier toml:\n{toml}");
 
-    let cfg = TomlConfigLoader::new_from_str(toml).context("parse EasyTier TOML")?;
+    let cfg =
+        TomlConfigLoader::new_from_str(toml).context("parse EasyTier TOML")?;
     let name = cfg.get_inst_name();
     tracing::info!("starting EasyTier instance name={name}");
 
     outside_tokio(|| {
         CTX.runtime.block_on(
-            CTX.process_management
-                .run_owned_network_instance(cfg, ConfigFileControl::STATIC_CONFIG),
+            CTX.process_management.run_owned_network_instance(
+                cfg,
+                ConfigFileControl::STATIC_CONFIG,
+            ),
         )
     })
     .context("run EasyTier instance")?;
@@ -95,7 +100,9 @@ pub fn stop_mesh() -> Result<()> {
             return Ok::<bool, anyhow::Error>(false);
         }
         CTX.runtime
-            .block_on(CTX.process_management.delete_owned_network_instances(ids))
+            .block_on(
+                CTX.process_management.delete_owned_network_instances(ids),
+            )
             .context("stop EasyTier")?;
         Ok(true)
     })?;
@@ -117,9 +124,7 @@ pub fn set_tun_fd(inst_name: &str, fd: i32) -> Result<()> {
     .map(|i| i.instance_id())
     .with_context(|| format!("instance not found: {inst_name}"))?;
 
-    CTX.manager
-        .attach_tun_fd(id, fd)
-        .context("attach_tun_fd")?;
+    CTX.manager.attach_tun_fd(id, fd).context("attach_tun_fd")?;
     Ok(())
 }
 
@@ -157,9 +162,7 @@ pub fn mesh_status_json() -> Result<String> {
                 .insert("virtual_ipv4".into(), json!(vip));
         }
         let ui = build_ui_summary(item);
-        item.as_object_mut()
-            .unwrap()
-            .insert("ui".into(), ui);
+        item.as_object_mut().unwrap().insert("ui".into(), ui);
     }
 
     Ok(serde_json::to_string_pretty(&arr)?)
@@ -183,8 +186,11 @@ fn build_ui_summary(item: &serde_json::Value) -> serde_json::Value {
         .unwrap_or("")
         .to_string();
     let my_peer_id = json_u64(my.get("peer_id"));
-    let my_vip = format_ipv4_prefix(my.get("virtual_ipv4"))
-        .or_else(|| item.get("virtual_ipv4").and_then(|v| v.as_str()).map(str::to_string));
+    let my_vip = format_ipv4_prefix(my.get("virtual_ipv4")).or_else(|| {
+        item.get("virtual_ipv4")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    });
     let mesh_cidr = item
         .get("mesh_cidr")
         .and_then(|v| v.as_str())
@@ -234,8 +240,7 @@ fn build_ui_summary(item: &serde_json::Value) -> serde_json::Value {
     if let Some(peers) = info.get("peers").and_then(|p| p.as_array()) {
         for peer in peers {
             let pid = json_u64(peer.get("peer_id")).or_else(|| {
-                peer.pointer("/peer/peer_id")
-                    .and_then(json_u64_value)
+                peer.pointer("/peer/peer_id").and_then(json_u64_value)
             });
             let Some(pid) = pid else { continue };
             let conns = peer
@@ -253,16 +258,16 @@ fn build_ui_summary(item: &serde_json::Value) -> serde_json::Value {
                     .get("network_name")
                     .and_then(|v| v.as_str())
                     .filter(|s| !s.is_empty())
+                    && network_name.is_empty()
                 {
-                    if network_name.is_empty() {
-                        network_name = nn.to_string();
-                    }
+                    network_name = nn.to_string();
                 }
                 if let Some(stats) = c.get("stats") {
                     rx += json_u64(stats.get("rx_bytes")).unwrap_or(0);
                     tx += json_u64(stats.get("tx_bytes")).unwrap_or(0);
                     if let Some(lat) = json_u64(stats.get("latency_us")) {
-                        best_lat_us = Some(best_lat_us.map_or(lat, |b| b.min(lat)));
+                        best_lat_us =
+                            Some(best_lat_us.map_or(lat, |b| b.min(lat)));
                     }
                 }
                 let local = c
@@ -306,7 +311,8 @@ fn build_ui_summary(item: &serde_json::Value) -> serde_json::Value {
                 .and_then(|v| v.as_str())
                 .unwrap_or("(unnamed)")
                 .to_string();
-            let ipv4 = format_ipv4_prefix(route.get("ipv4_addr")).unwrap_or_default();
+            let ipv4 =
+                format_ipv4_prefix(route.get("ipv4_addr")).unwrap_or_default();
             let cost = json_u64(route.get("cost")).unwrap_or(0);
             let latency_ms = json_u64(route.get("path_latency"))
                 .or_else(|| json_u64(route.get("path_latency_latency_first")));
@@ -341,15 +347,18 @@ fn build_ui_summary(item: &serde_json::Value) -> serde_json::Value {
             let is_self = peer_id.is_some() && peer_id == my_peer_id;
             if is_self {
                 // Enrich self entry if route has better fields.
-                if let Some(self_node) = nodes.first_mut() {
-                    if self_node.get("ipv4").and_then(|v| v.as_str()).unwrap_or("").is_empty()
-                        && !ipv4.is_empty()
-                    {
-                        self_node
-                            .as_object_mut()
-                            .unwrap()
-                            .insert("ipv4".into(), json!(ipv4));
-                    }
+                if let Some(self_node) = nodes.first_mut()
+                    && self_node
+                        .get("ipv4")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .is_empty()
+                    && !ipv4.is_empty()
+                {
+                    self_node
+                        .as_object_mut()
+                        .unwrap()
+                        .insert("ipv4".into(), json!(ipv4));
                 }
                 continue;
             }
@@ -372,26 +381,28 @@ fn build_ui_summary(item: &serde_json::Value) -> serde_json::Value {
                 "tunnels": []
             });
 
-            if let Some(pid) = peer_id {
-                if let Some(stats) = peer_stats.get(&pid) {
-                    if let Some(obj) = node.as_object_mut() {
-                        obj.insert("rx_bytes".into(), stats["rx_bytes"].clone());
-                        obj.insert("tx_bytes".into(), stats["tx_bytes"].clone());
-                        obj.insert("conn_count".into(), stats["conn_count"].clone());
-                        obj.insert("tunnels".into(), stats["tunnels"].clone());
-                        if obj.get("latency_ms").and_then(|v| v.as_u64()).is_none() {
-                            if let Some(us) = json_u64(stats.get("latency_us")) {
-                                obj.insert("latency_ms".into(), json!(us / 1000));
-                            }
-                        }
-                    }
+            if let Some(pid) = peer_id
+                && let Some(stats) = peer_stats.get(&pid)
+                && let Some(obj) = node.as_object_mut()
+            {
+                obj.insert("rx_bytes".into(), stats["rx_bytes"].clone());
+                obj.insert("tx_bytes".into(), stats["tx_bytes"].clone());
+                obj.insert("conn_count".into(), stats["conn_count"].clone());
+                obj.insert("tunnels".into(), stats["tunnels"].clone());
+                if obj.get("latency_ms").and_then(|v| v.as_u64()).is_none()
+                    && let Some(us) = json_u64(stats.get("latency_us"))
+                {
+                    obj.insert("latency_ms".into(), json!(us / 1000));
                 }
             }
             nodes.push(node);
         }
     }
 
-    let peer_count = nodes.iter().filter(|n| n.get("is_self") != Some(&json!(true))).count();
+    let peer_count = nodes
+        .iter()
+        .filter(|n| n.get("is_self") != Some(&json!(true)))
+        .count();
 
     json!({
         "running": running,
@@ -435,15 +446,17 @@ fn json_u64_value(v: &serde_json::Value) -> Option<u64> {
 
 fn extract_vip_string(item: &serde_json::Value) -> Option<String> {
     let info = item.get("info")?;
-    if let Some(s) = format_ipv4_prefix(info.pointer("/my_node_info/virtual_ipv4")) {
+    if let Some(s) =
+        format_ipv4_prefix(info.pointer("/my_node_info/virtual_ipv4"))
+    {
         return Some(s);
     }
     // Best-effort walk of known shapes from EasyTier network infos.
     for key in ["ipv4", "virtual_ipv4", "my_ipv4", "addr"] {
-        if let Some(s) = info.get(key).and_then(|v| v.as_str()) {
-            if !s.is_empty() {
-                return Some(s.to_string());
-            }
+        if let Some(s) = info.get(key).and_then(|v| v.as_str())
+            && !s.is_empty()
+        {
+            return Some(s.to_string());
         }
     }
     if let Some(s) = info
@@ -471,7 +484,9 @@ fn find_ipv4_cidr(text: &str) -> Option<String> {
             let start = i;
             let mut dots = 0;
             while i < bytes.len()
-                && (bytes[i].is_ascii_digit() || bytes[i] == b'.' || bytes[i] == b'/')
+                && (bytes[i].is_ascii_digit()
+                    || bytes[i] == b'.'
+                    || bytes[i] == b'/')
             {
                 if bytes[i] == b'.' {
                     dots += 1;
@@ -494,10 +509,8 @@ fn find_ipv4_cidr(text: &str) -> Option<String> {
 pub fn guess_mesh_cidr_from_vip(vip: &str) -> Option<String> {
     let (addr, prefix) = vip.split_once('/')?;
     let prefix: u8 = prefix.parse().ok()?;
-    let octets: Vec<u8> = addr
-        .split('.')
-        .filter_map(|o| o.parse().ok())
-        .collect();
+    let octets: Vec<u8> =
+        addr.split('.').filter_map(|o| o.parse().ok()).collect();
     if octets.len() != 4 {
         return None;
     }

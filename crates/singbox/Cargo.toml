@@ -1,0 +1,177 @@
+[package]
+name = "singbox"
+version = "0.1.0"
+edition = "2024"
+description = "Native Rust migration of sing-box, designed as an embeddable library"
+license = "GPL-3.0-or-later"
+publish = false
+
+[lib]
+name = "singbox"
+path = "src/lib.rs"
+
+[dependencies]
+base64 = "0.22"
+capnp = "0.27.2"
+capnp-futures = "0.27.0"
+capnp-rpc = "0.27.0"
+boringtun = { package = "boringtun-easytier", version = "0.6.1" }
+blake3 = "1"
+blake2 = "0.10"
+aes = "0.9"
+aes-gcm = "0.11.1"
+am-lzo1x = "0.2.0"
+aria = "0.2.0"
+argon2 = "0.5.3"
+arti-client = { version = "0.42.0", default-features = false, features = ["compression", "onion-service-client", "rustls", "tokio"] }
+async-trait = "0.1"
+async-compression = { version = "0.4.44", features = ["gzip", "tokio"] }
+aws-lc-rs = { version = "1.18", default-features = false }
+bytes = "1"
+blowfish = "0.10.0"
+camellia = "0.2.1"
+cast5 = "0.12.0"
+cbc = { version = "0.2.1", features = ["alloc"] }
+cbc01 = { package = "cbc", version = "0.1.2", features = ["alloc"] }
+ccm = "0.6.1"
+cfb-mode = "0.9.1"
+cfb08 = { package = "cfb-mode", version = "0.8.2" }
+crab_nat = "0.8.1"
+chacha20poly1305 = "0.11.0"
+getrandom = "0.3"
+crc32fast = "1"
+ctr = "0.10.1"
+cookie_store = "0.22.1"
+crypto_box = { version = "0.9.1", features = ["salsa20"] }
+data-encoding = "2"
+des = "0.9.0"
+dtls = { version = "0.17.2", features = ["pem"] }
+ed25519-dalek = "2.2.0"
+futures-util = "0.3"
+futures = "0.3"
+flate2 = { version = "1", features = ["zlib-rs"] }
+fslock = "0.2.1"
+hex = "0.4"
+hickory-proto = { version = "0.26.1", features = ["mdns"] }
+hickory-resolver = "0.26.1"
+resolv-conf = "0.7.6"
+hkdf = "0.13"
+hmac = "0.12"
+hmac13 = { package = "hmac", version = "0.13" }
+h3 = "0.0.8"
+h3-quinn = "0.0.10"
+hashlink = "0.11.1"
+http = "1"
+http-body-util = { version = "0.1.5", features = ["channel"] }
+httparse = "1"
+hyper = { version = "1.11.1", features = ["client", "server", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+instant-acme = { version = "0.8.5", default-features = false, features = ["aws-lc-rs", "time", "x509-parser"] }
+ipnet = { version = "2", features = ["serde"] }
+kisaseed = "0.1.3"
+lz4_flex = { version = "0.14.0", default-features = false, features = ["std", "safe-encode", "safe-decode", "checked-decode"] }
+igd-next = { version = "0.17.1", features = ["aio_tokio"] }
+jsonschema = { version = "0.52.1", default-features = false }
+md-5 = "0.11"
+minicbor = { version = "2.3.0", features = ["std"] }
+network-interface = "2"
+netdev = { version = "0.46.2", default-features = false, features = ["gateway"] }
+netwatch = "0.19.3"
+n0-watcher = "1.0.0"
+ofb = "0.7.1"
+ofb06 = { package = "ofb", version = "0.6.1" }
+parking_lot = "0.12"
+p256 = "0.14.0-rc.7"
+pem = "3.0.6"
+percent-encoding = "2"
+portable-pty = "0.9"
+prost = "0.14.4"
+quinn = { version = "0.11.9", features = ["ring"] }
+quinn-proto = "0.11.14"
+quick-xml = "0.41.0"
+rand = "0.8"
+rcgen = { version = "0.13.2", default-features = false, features = ["pem", "aws_lc_rs"] }
+regex = "1"
+ripemd = "0.2.0"
+reqwest = { version = "0.12", default-features = false, features = ["http2", "rustls-tls", "stream"] }
+rustls = { version = "0.23", default-features = false, features = ["brotli", "prefer-post-quantum", "ring", "std", "zlib"] }
+rustls-acme = { version = "0.15.4", default-features = false, features = ["aws-lc-rs", "tokio", "webpki-roots"] }
+rustls-native-certs = "0.8.4"
+rustls-pemfile = "2"
+rusqlite = "0.39"
+russh = "0.60"
+scraper = "0.18.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.11"
+sha3 = "0.11"
+sha1 = "0.10"
+sha1_11 = { package = "sha1", version = "0.11" }
+shadowsocks = { path = "vendor/shadowsocks", version = "1.25.0", default-features = false, features = ["aead-cipher-extra", "aead-cipher-2022", "security-replay-attack-detect"] }
+smux = "0.2.0"
+sm4 = "0.6.0"
+smoltcp = { git = "https://github.com/smoltcp-rs/smoltcp.git", rev = "0a926767a68bc88d5512afefa7529c5ecdade4ea", default-features = false, features = ["std", "medium-ip", "socket-tcp", "socket-udp", "socket-icmp", "proto-ipv4", "proto-ipv6", "async", "proto-ipv4-fragmentation", "fragmentation-buffer-size-8192", "assembler-max-segment-count-16", "reassembly-buffer-size-8192", "reassembly-buffer-count-16"] }
+snow = "0.10.0"
+socket2 = { version = "0.6", features = ["all"] }
+sysinfo = "0.38.4"
+tempfile = "3"
+thiserror = "2"
+time = { version = "0.3.47", features = ["formatting", "local-offset", "macros", "parsing"] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt", "signal", "sync", "time"] }
+tokio-openssl = "0.6.5"
+tokio-stream = { version = "0.1.18", features = ["net", "sync"] }
+tokio-util = { version = "0.7", features = ["compat", "io", "rt"] }
+tokio-rustls = "0.26.4"
+tokio-tungstenite = "0.28"
+tonic = { version = "0.14.6", features = ["transport", "tls-ring", "tls-native-roots"] }
+tonic-health = "0.14.6"
+tonic-prost = "0.14.6"
+tonic-reflection = "0.14.6"
+tracing = "0.1"
+tor-rtcompat = { version = "0.42.0", default-features = false, features = ["rustls", "tokio"] }
+tun = { package = "tun-easytier", git = "https://github.com/EasyTier/rust-tun", features = ["async", "wintun-dns"] }
+url = "2.5"
+uuid = { version = "1", features = ["v4", "v5"] }
+webpki-roots = "1.0.9"
+webrtc-util = { version = "0.17.2", default-features = false, features = ["conn"] }
+x25519-dalek = "2.0.1"
+x509-parser = "0.18.1"
+yamux = "0.14.0"
+zeroize = { version = "1.8.2", features = ["derive"] }
+zstd = { version = "0.13.3", default-features = false }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_vendor = "apple")'.dependencies]
+system-configuration = "0.7.0"
+
+[target.'cfg(not(windows))'.dependencies]
+openssl = { version = "0.10.81", features = ["vendored"] }
+
+[target.'cfg(any(target_os = "android", target_os = "ios", target_os = "tvos", target_os = "visionos", target_os = "watchos"))'.dependencies]
+openssl = { version = "0.10.81", features = ["vendored"] }
+
+[target.'cfg(windows)'.dependencies]
+openssl = { version = "0.10.81", features = ["vendored"] }
+schannel = "0.1.29"
+windows-sys = { version = "0.61.2", features = ["Wdk_System_SystemServices", "Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_NetworkManagement_WindowsFilteringPlatform", "Win32_Networking_WinInet", "Win32_Networking_WinSock", "Win32_Security", "Win32_System_IO", "Win32_System_Rpc", "Win32_System_SystemInformation", "Win32_System_Threading"] }
+
+[target.'cfg(all(windows, any(target_arch = "x86_64", target_arch = "x86")))'.dependencies]
+windivert = { git = "https://github.com/EasyTier/windivert-rust.git", rev = "adcc56d1550f7b5377ec2b3429f413ee24a77375", features = ["static"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+netlink-bindings = { version = "0.3.3", default-features = false, features = ["nftables"] }
+netlink-socket2 = { version = "0.3.3", default-features = false }
+nfq = "0.2.5"
+nix = { version = "0.28", features = ["socket"] }
+rtnetlink = "0.23"
+zbus = { version = "5.19.0", default-features = false, features = ["async-io", "blocking-api"] }
+
+[build-dependencies]
+capnpc = "0.27.0"
+capnpc-embedded = "0.2.0"
+cc = "1"
+protoc-bin-vendored = "3"
+tonic-prost-build = "0.14.6"

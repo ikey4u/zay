@@ -23,13 +23,14 @@ struct LogWriter;
 
 impl Write for LogWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        if let Some(guard) = LOG_PATH.get() {
-            if let Some(path) = guard.lock().ok().as_ref().and_then(|p| p.as_ref()) {
-                if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(path) {
-                    let _ = f.write_all(buf);
-                    let _ = f.flush();
-                }
-            }
+        if let Some(guard) = LOG_PATH.get()
+            && let Some(path) =
+                guard.lock().ok().as_ref().and_then(|p| p.as_ref())
+            && let Ok(mut file) =
+                OpenOptions::new().create(true).append(true).open(path)
+        {
+            let _ = file.write_all(buf);
+            let _ = file.flush();
         }
         // Also mirror to stderr for Xcode console / Console.app.
         let _ = std::io::stderr().write_all(buf);
@@ -44,8 +45,9 @@ impl Write for LogWriter {
 pub fn init_logging() {
     static INIT: OnceCell<()> = OnceCell::new();
     INIT.get_or_init(|| {
-        let filter = EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| EnvFilter::new("warn,easytier=warn,zay_ios=info"));
+        let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            EnvFilter::new("warn,easytier=warn,zay_ios=info")
+        });
         let _ = tracing_subscriber::fmt()
             .with_env_filter(filter)
             .with_ansi(false)

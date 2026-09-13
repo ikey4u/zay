@@ -7,6 +7,8 @@ mod daemon;
 mod fwd;
 mod http;
 mod logging;
+#[cfg(unix)]
+mod native_tun_worker;
 mod runtime;
 mod settings;
 mod singbox;
@@ -74,17 +76,11 @@ pub struct Cli {
     #[arg(long, hide = true)]
     run_daemon: bool,
 
-    /// Internal elevated sing-box TUN worker.
-    #[cfg(windows)]
+    /// Internal elevated TUN worker owned by zay.
     #[arg(long, hide = true)]
     run_tun_worker: bool,
-    #[cfg(windows)]
-    #[arg(long, hide = true)]
-    tun_worker_binary: Option<std::path::PathBuf>,
-    #[cfg(windows)]
     #[arg(long, hide = true)]
     tun_worker_runtime_dir: Option<std::path::PathBuf>,
-    #[cfg(windows)]
     #[arg(long, hide = true)]
     tun_worker_config: Option<std::path::PathBuf>,
     #[cfg(windows)]
@@ -235,12 +231,18 @@ pub struct ProxyOpts {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    #[cfg(windows)]
     if cli.run_tun_worker {
+        #[cfg(unix)]
+        return native_tun_worker::run(native_tun_worker::Args {
+            runtime_dir: cli
+                .tun_worker_runtime_dir
+                .context("missing TUN worker runtime directory")?,
+            config_path: cli
+                .tun_worker_config
+                .context("missing TUN worker config")?,
+        });
+        #[cfg(windows)]
         return windows_tun_worker::run(windows_tun_worker::Args {
-            binary: cli
-                .tun_worker_binary
-                .context("missing TUN worker binary")?,
             runtime_dir: cli
                 .tun_worker_runtime_dir
                 .context("missing TUN worker runtime directory")?,
@@ -640,10 +642,9 @@ impl LogFilters {
         self.domain
             .as_ref()
             .is_none_or(|filter| filter.is_match(direct_domain))
-            && self
-                .app
-                .as_ref()
-                .is_none_or(|filter| filter.is_match(field("app")))
+            && self.app.as_ref().is_none_or(|filter| {
+                event_name == "dns" || filter.is_match(field("app"))
+            })
             && self.ip.as_ref().is_none_or(|filter| {
                 is_ip_destination
                     && host.is_some_and(|host| filter.is_match(host))

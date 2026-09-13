@@ -43,40 +43,44 @@ pub fn resolve_proxy(
         return Ok(OutboundSpec::Single(parse_socks_or_http(raw, false)?));
     }
     if lower.starts_with("http://") || lower.starts_with("https://") {
-        if prefer_cache {
-            if let Some(dir) = cache_dir {
-                if let Ok(nodes) = load_subscription_cache(dir, raw) {
-                    if !nodes.is_empty() {
-                        tracing::info!(
-                            "subscription: prefer_cache hit ({} node(s))",
-                            nodes.len()
-                        );
-                        return Ok(OutboundSpec::Many(nodes));
-                    }
-                }
-            }
+        if prefer_cache
+            && let Some(dir) = cache_dir
+            && let Ok(nodes) = load_subscription_cache(dir, raw)
+            && !nodes.is_empty()
+        {
+            tracing::info!(
+                "subscription: prefer_cache hit ({} node(s))",
+                nodes.len()
+            );
+            return Ok(OutboundSpec::Many(nodes));
         }
         match fetch_clash_subscription(raw, cache_dir) {
-            Ok(nodes) if !nodes.is_empty() => return Ok(OutboundSpec::Many(nodes)),
+            Ok(nodes) if !nodes.is_empty() => {
+                return Ok(OutboundSpec::Many(nodes));
+            }
             Ok(_) => {
                 if looks_like_subscription_url(raw) {
-                    bail!("subscription URL returned no proxies (empty proxies list)");
+                    bail!(
+                        "subscription URL returned no proxies (empty proxies list)"
+                    );
                 }
             }
             Err(e) => {
                 if looks_like_subscription_url(raw) {
-                    if let Some(dir) = cache_dir {
-                        if let Ok(nodes) = load_subscription_cache(dir, raw) {
-                            tracing::warn!(
-                                "subscription fetch failed ({e:#}); using cached {} node(s)",
-                                nodes.len()
-                            );
-                            return Ok(OutboundSpec::Many(nodes));
-                        }
+                    if let Some(dir) = cache_dir
+                        && let Ok(nodes) = load_subscription_cache(dir, raw)
+                    {
+                        tracing::warn!(
+                            "subscription fetch failed ({e:#}); using cached {} node(s)",
+                            nodes.len()
+                        );
+                        return Ok(OutboundSpec::Many(nodes));
                     }
                     bail!("subscription fetch failed: {e:#}");
                 }
-                tracing::warn!("subscription fetch failed ({e:#}); treating as HTTP proxy URI");
+                tracing::warn!(
+                    "subscription fetch failed ({e:#}); treating as HTTP proxy URI"
+                );
             }
         }
         return Ok(OutboundSpec::Single(parse_socks_or_http(raw, true)?));
@@ -150,8 +154,12 @@ fn parse_socks_or_http(raw: &str, http: bool) -> Result<Value> {
     Ok(ob)
 }
 
-fn fetch_clash_subscription(url: &str, cache_dir: Option<&Path>) -> Result<Vec<Value>> {
-    const SUBSCRIPTION_UA: &str = concat!("clash-verge/v", env!("CARGO_PKG_VERSION"));
+fn fetch_clash_subscription(
+    url: &str,
+    cache_dir: Option<&Path>,
+) -> Result<Vec<Value>> {
+    const SUBSCRIPTION_UA: &str =
+        concat!("clash-verge/v", env!("CARGO_PKG_VERSION"));
 
     tracing::info!("fetching Clash subscription: {url}");
     let agent = ureq::AgentBuilder::new()
@@ -170,10 +178,10 @@ fn fetch_clash_subscription(url: &str, cache_dir: Option<&Path>) -> Result<Vec<V
         bail!("subscription returned HTML or empty body");
     }
     let nodes = convert_clash_yaml(&body)?;
-    if let Some(dir) = cache_dir {
-        if let Err(e) = save_subscription_cache(dir, url, &body) {
-            tracing::warn!("failed to write subscription cache: {e:#}");
-        }
+    if let Some(dir) = cache_dir
+        && let Err(error) = save_subscription_cache(dir, url, &body)
+    {
+        tracing::warn!("failed to write subscription cache: {error:#}");
     }
     Ok(nodes)
 }
@@ -183,10 +191,13 @@ fn cache_paths(dir: &Path) -> (PathBuf, PathBuf) {
 }
 
 fn save_subscription_cache(dir: &Path, url: &str, body: &str) -> Result<()> {
-    fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    fs::create_dir_all(dir)
+        .with_context(|| format!("creating {}", dir.display()))?;
     let (body_path, meta_path) = cache_paths(dir);
-    fs::write(&body_path, body).with_context(|| format!("writing {}", body_path.display()))?;
-    fs::write(&meta_path, url).with_context(|| format!("writing {}", meta_path.display()))?;
+    fs::write(&body_path, body)
+        .with_context(|| format!("writing {}", body_path.display()))?;
+    fs::write(&meta_path, url)
+        .with_context(|| format!("writing {}", meta_path.display()))?;
     tracing::info!(
         "subscription cache saved ({} bytes) under {}",
         body.len(),
@@ -231,7 +242,8 @@ fn looks_like_invalid_subscription_body(raw: &str) -> bool {
 }
 
 fn convert_clash_yaml(raw: &str) -> Result<Vec<Value>> {
-    let doc: YamlValue = serde_yaml::from_str(raw).context("parse Clash YAML")?;
+    let doc: YamlValue =
+        serde_yaml::from_str(raw).context("parse Clash YAML")?;
     let proxies = doc
         .get("proxies")
         .and_then(|p| p.as_sequence())
@@ -282,7 +294,9 @@ fn convert_clash_proxy(proxy: &YamlValue, idx: usize) -> Result<Option<Value>> {
 
     let outbound = match ty.as_str() {
         "ss" | "shadowsocks" => {
-            let method = get("cipher").or_else(|| get("method")).unwrap_or("aes-128-gcm");
+            let method = get("cipher")
+                .or_else(|| get("method"))
+                .unwrap_or("aes-128-gcm");
             let password = get("password").unwrap_or("");
             json!({
                 "type": "shadowsocks",
@@ -350,9 +364,10 @@ fn convert_clash_proxy(proxy: &YamlValue, idx: usize) -> Result<Option<Value>> {
             }
             let tls_mode = get("tls").unwrap_or("");
             if tls_mode == "tls" || tls_mode == "reality" || get_b("tls") {
-                ob.as_object_mut()
-                    .unwrap()
-                    .insert("tls".into(), build_clash_tls(map, &server, tls_mode == "reality"));
+                ob.as_object_mut().unwrap().insert(
+                    "tls".into(),
+                    build_clash_tls(map, &server, tls_mode == "reality"),
+                );
             }
             ob
         }
@@ -425,7 +440,11 @@ fn apply_transport(
 /// Align with desktop `src/singbox/clash/convert.rs` TLS mapping.
 /// Reality + Vision almost always needs uTLS fingerprint; missing it yields
 /// `unknown version: 72` (HTTP `H`) from the edge.
-fn build_clash_tls(map: &serde_yaml::Mapping, server: &str, force_reality: bool) -> Value {
+fn build_clash_tls(
+    map: &serde_yaml::Mapping,
+    server: &str,
+    force_reality: bool,
+) -> Value {
     let sni = map
         .get(YamlValue::String("sni".into()))
         .and_then(|v| v.as_str())
@@ -475,33 +494,32 @@ fn build_clash_tls(map: &serde_yaml::Mapping, server: &str, force_reality: bool)
         );
     }
 
-    if use_reality {
-        if let Some(opts) = map
+    if use_reality
+        && let Some(opts) = map
             .get(YamlValue::String("reality-opts".into()))
             .and_then(|v| v.as_mapping())
-        {
-            let pub_key = opts
-                .get(YamlValue::String("public-key".into()))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let short_id = opts
-                .get(YamlValue::String("short-id".into()))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let mut reality = json!({
-                "enabled": true,
-                "public_key": pub_key
-            });
-            if !short_id.is_empty() {
-                reality
-                    .as_object_mut()
-                    .unwrap()
-                    .insert("short_id".into(), json!(short_id));
-            }
-            tls.as_object_mut()
+    {
+        let pub_key = opts
+            .get(YamlValue::String("public-key".into()))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let short_id = opts
+            .get(YamlValue::String("short-id".into()))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let mut reality = json!({
+            "enabled": true,
+            "public_key": pub_key
+        });
+        if !short_id.is_empty() {
+            reality
+                .as_object_mut()
                 .unwrap()
-                .insert("reality".into(), reality);
+                .insert("short_id".into(), json!(short_id));
         }
+        tls.as_object_mut()
+            .unwrap()
+            .insert("reality".into(), reality);
     }
 
     tls
@@ -532,8 +550,10 @@ fn parse_shadowsocks(raw: &str) -> Result<Value> {
         } else {
             let decoded = decode_b64(encoded)?;
             // method:password@host:port
-            let (cred, _) = decoded.split_once('@').context("ss legacy format")?;
-            let (method, password) = cred.split_once(':').context("ss method:password")?;
+            let (cred, _) =
+                decoded.split_once('@').context("ss legacy format")?;
+            let (method, password) =
+                cred.split_once(':').context("ss method:password")?;
             return Ok(json!({
                 "type": "shadowsocks",
                 "tag": "proxy-node",

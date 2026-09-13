@@ -1,6 +1,6 @@
 //! Build sing-box JSON for iOS Packet Tunnel.
 //!
-//! sing-box owns the real utun FD (Libbox). Mesh CIDRs are routed to the
+//! The Rust singbox library owns a duplicate of the real utun FD. Mesh CIDRs are routed to the
 //! local EasyTier SOCKS5 portal (`127.0.0.1:socks_port`).
 //!
 //! Routing matches desktop Loyalsoldier **blacklist** when embedded rules are
@@ -25,7 +25,7 @@ pub struct SingboxInput {
     /// EasyTier local SOCKS portal port.
     pub socks_port: Option<u16>,
     pub log_level: Option<String>,
-    /// Libbox working directory (contains `ruleset-embedded/`). Required for rules.
+    /// singbox working directory (contains `ruleset-embedded/`). Required for rules.
     pub working_dir: Option<String>,
     /// Preferred `Proxy` selector member: `Auto` or a node tag. Empty → Auto / sole node.
     #[serde(default)]
@@ -42,11 +42,7 @@ pub struct SingboxInput {
 }
 
 pub fn build_singbox_json(input: &SingboxInput) -> Result<String> {
-    let log_level = input
-        .log_level
-        .as_deref()
-        .unwrap_or("warn")
-        .to_string();
+    let log_level = input.log_level.as_deref().unwrap_or("warn").to_string();
     let socks_port = input.socks_port.unwrap_or(18080);
 
     let working_dir = input
@@ -75,7 +71,9 @@ pub fn build_singbox_json(input: &SingboxInput) -> Result<String> {
 
     let prefer_cache = input.prefer_cache.unwrap_or(false);
     let resolved = resolve_proxy(&input.proxy_url, working_dir, prefer_cache)
-        .with_context(|| format!("resolving proxy_url {}", input.proxy_url))?;
+        .with_context(|| {
+        format!("resolving proxy_url {}", input.proxy_url)
+    })?;
 
     let mut outbounds = vec![json!({ "type": "direct", "tag": "direct" })];
 

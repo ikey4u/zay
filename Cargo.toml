@@ -59,6 +59,28 @@ easytier = { path = "vendor/Easytier/easytier", default-features = false, featur
 easytier-core = { path = "vendor/Easytier/easytier-core", default-features = false }
 async-trait = "0.1"
 toml_edit = "0.25.12"
+singbox-core = { package = "singbox", path = "crates/singbox" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[workspace]
+members = [
+    "crates/singbox",
+    "client/ios/Rust/zay-ios",
+]
+exclude = [
+    "vendor/Easytier",
+    "crates/singbox/vendor/shadowsocks",
+    "crates/singbox/vendor/quinn-proto-chrome",
+]
+resolver = "3"
+
+[patch.crates-io]
+rustls = { path = "crates/singbox/vendor/rustls-shadowtls" }
+quinn-proto = { path = "crates/singbox/vendor/quinn-proto-chrome" }
+
+[profile.release.package.zay-ios]
+codegen-units = 1
+opt-level = "s"
+strip = true

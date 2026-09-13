@@ -1,6 +1,6 @@
 import Foundation
 
-/// Persist converted custom rule-sets under Libbox `ruleset-custom/`.
+/// Persist converted custom rule-sets under the singbox working directory.
 enum CustomRulesStore {
     static let directoryName = "ruleset-custom"
 

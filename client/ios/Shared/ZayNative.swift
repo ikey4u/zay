@@ -13,10 +13,6 @@ enum ZayLog {
     /// Soft cap for shared log file (bytes). Rotated when exceeded.
     private static let maxLogFileBytes: UInt64 = 1_500_000
 
-    private static var libboxDropCount: Int = 0
-    private static var libboxLastEmit = Date.distantPast
-    private static let libboxMinInterval: TimeInterval = 0.25
-
     /// Shows in Xcode console when the corresponding process is being debugged.
     private static let logger = Logger(subsystem: "dev.zay.ios", category: "zay")
 
@@ -33,34 +29,6 @@ enum ZayLog {
     static func warn(_ message: String) { write(level: "warn", message) }
     static func error(_ message: String) { write(level: "error", message) }
     static func debug(_ message: String) { write(level: "debug", message, console: false) }
-
-    /// High-volume Libbox platform debug sink — file/memory only, heavily rate-limited.
-    static func libboxDebug(_ message: String) {
-        let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-
-        lock.lock()
-        let now = Date()
-        let elapsed = now.timeIntervalSince(libboxLastEmit)
-        if elapsed < libboxMinInterval {
-            libboxDropCount += 1
-            lock.unlock()
-            return
-        }
-        let dropped = libboxDropCount
-        libboxDropCount = 0
-        libboxLastEmit = now
-        lock.unlock()
-
-        let body: String
-        if dropped > 0 {
-            body = "(dropped \(dropped) libbox lines) \(trimmed)"
-        } else {
-            body = trimmed
-        }
-        // No NSLog / print — those alone can kill Packet Tunnel under traffic.
-        write(level: "debug", body, console: false, rustMirror: false)
-    }
 
     static func write(level: String, _ message: String, console: Bool = true, rustMirror: Bool = true) {
         let line = "[\(timestamp())] [\(level)] \(message)"
@@ -273,7 +241,7 @@ enum ZayLog {
         if FileManager.default.fileExists(atPath: url.path) {
             if let handle = try? FileHandle(forWritingTo: url) {
                 defer { try? handle.close() }
-                try? handle.seekToEnd()
+                _ = try? handle.seekToEnd()
                 try? handle.write(contentsOf: data)
             }
         } else {
@@ -380,7 +348,7 @@ enum ZayNative {
         return out
     }
 
-    /// Materialize embedded Loyalsoldier rule-sets into Libbox working dir.
+    /// Materialize embedded Loyalsoldier rule-sets into the singbox working dir.
     static func ensureEmbeddedRules(workingDir: String) throws {
         let rc = workingDir.withCString { zay_ios_ensure_embedded_rules($0) }
         guard rc == 0 else {
@@ -470,5 +438,59 @@ enum ZayNative {
 
     static func relayHost(from relayURL: String) -> String? {
         takeCString(relayURL.withCString { zay_ios_relay_host($0) })
+    }
+
+    static func startSingbox(
+        json: String,
+        basePath: String,
+        openTun: ZayIosOpenTunCallback,
+        context: UnsafeMutableRawPointer
+    ) throws {
+        let rc = json.withCString { jsonPtr in
+            basePath.withCString { basePtr in
+                zay_ios_start_singbox(jsonPtr, basePtr, openTun, context)
+            }
+        }
+        guard rc == 0 else {
+            throw NSError(domain: "zay", code: 20, userInfo: [NSLocalizedDescriptionKey: lastError()])
+        }
+    }
+
+    static func reloadSingbox(json: String, basePath: String) throws {
+        let rc = json.withCString { jsonPtr in
+            basePath.withCString { basePtr in
+                zay_ios_reload_singbox(jsonPtr, basePtr)
+            }
+        }
+        guard rc == 0 else {
+            throw NSError(domain: "zay", code: 21, userInfo: [NSLocalizedDescriptionKey: lastError()])
+        }
+    }
+
+    static func stopSingbox() {
+        let rc = zay_ios_stop_singbox()
+        if rc != 0 { ZayLog.warn("stopSingbox failed: \(lastError())") }
+    }
+
+    static func singboxGroupsJSON() -> String {
+        takeCString(zay_ios_singbox_groups_json()) ?? #"{"groups":[]}"#
+    }
+
+    static func selectSingboxOutbound(group: String, outbound: String) throws {
+        let rc = group.withCString { groupPtr in
+            outbound.withCString { outboundPtr in
+                zay_ios_select_singbox_outbound(groupPtr, outboundPtr)
+            }
+        }
+        guard rc == 0 else {
+            throw NSError(domain: "zay", code: 60, userInfo: [NSLocalizedDescriptionKey: lastError()])
+        }
+    }
+
+    static func urlTestSingbox(group: String) throws {
+        let rc = group.withCString { zay_ios_url_test_singbox($0) }
+        guard rc == 0 else {
+            throw NSError(domain: "zay", code: 61, userInfo: [NSLocalizedDescriptionKey: lastError()])
+        }
     }
 }

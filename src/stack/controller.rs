@@ -20,8 +20,8 @@ use crate::{
     singbox::{self, assets, rules},
     stack::{
         StackCli, easytier, ensure_mesh_config_from_stack,
-        ensure_stack_config_exists, log_mesh_effective_config, spawn_singbox,
-        validate_mesh_cli,
+        ensure_stack_config_exists, log_mesh_effective_config,
+        spawn_tun_worker, validate_mesh_cli,
     },
 };
 
@@ -63,7 +63,9 @@ impl Default for StackStatus {
 pub struct StackController {
     status: Arc<Mutex<StackStatus>>,
     pid: Arc<AtomicU32>,
+    native: Arc<Mutex<Option<singbox_core::RuntimeHandle>>>,
     running: Arc<AtomicBool>,
+    stop_requested: Arc<AtomicBool>,
     join: Mutex<Option<JoinHandle<()>>>,
     logs: LogBuffer,
 }
@@ -73,7 +75,9 @@ impl StackController {
         Self {
             status: Arc::new(Mutex::new(StackStatus::default())),
             pid: Arc::new(AtomicU32::new(0)),
+            native: Arc::new(Mutex::new(None)),
             running: Arc::new(AtomicBool::new(false)),
+            stop_requested: Arc::new(AtomicBool::new(false)),
             join: Mutex::new(None),
             logs,
         }
@@ -107,11 +111,14 @@ impl StackController {
                 ..Default::default()
             };
         }
+        self.stop_requested.store(false, Ordering::SeqCst);
         self.running.store(true, Ordering::SeqCst);
 
         let status = self.status.clone();
         let pid_atom = self.pid.clone();
+        let native = self.native.clone();
         let running = self.running.clone();
+        let stop_requested = self.stop_requested.clone();
         let logs = self.logs.clone();
         let failure_logs = logs.clone();
 
@@ -120,6 +127,8 @@ impl StackController {
                 cli,
                 logs,
                 pid_atom.clone(),
+                native.clone(),
+                stop_requested,
                 status.clone(),
                 sudo_password,
             );
@@ -162,9 +171,14 @@ impl StackController {
             let mut st = self.status.lock().expect("stack status");
             st.state = StackRunState::Stopping;
         }
+        self.stop_requested.store(true, Ordering::SeqCst);
         let pid = self.pid.load(Ordering::SeqCst);
         if pid != 0 {
-            assets::terminate_process(pid);
+            assets::terminate_worker_process(pid);
+        }
+        if let Some(handle) = self.native.lock().expect("native runtime").take()
+        {
+            handle.cancel();
         }
         let _ = easytier::stop_all();
         if let Some(handle) = self.join.lock().expect("stack join").take() {
@@ -183,6 +197,8 @@ fn run_stack_managed(
     cli: StackCli,
     logs: LogBuffer,
     pid_atom: Arc<AtomicU32>,
+    native_handle: Arc<Mutex<Option<singbox_core::RuntimeHandle>>>,
+    stop_requested: Arc<AtomicBool>,
     status: Arc<Mutex<StackStatus>>,
     sudo_password: Option<String>,
 ) -> Result<()> {
@@ -218,7 +234,6 @@ fn run_stack_managed(
         st.error = None;
     }
 
-    let engine = singbox::resolve_binary()?;
     let config_path = state.settings.config_path();
 
     if state.tun_enabled {
@@ -226,11 +241,45 @@ fn run_stack_managed(
         *state.config_json.write().expect("config lock") = refreshed;
     }
 
-    let spawn_result = spawn_singbox(
-        &engine,
+    if !state.tun_enabled {
+        assets::ensure_mixed_port_free(state.settings.mixed_port)?;
+        let mut runtime = match singbox::native::NativeRuntime::start(
+            &config_path,
+            &state.settings.singbox_dir(),
+        ) {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                if mesh_started {
+                    let _ = easytier::stop_all();
+                }
+                return Err(error);
+            }
+        };
+        *native_handle.lock().expect("native runtime") = Some(runtime.handle());
+        if stop_requested.load(Ordering::SeqCst) {
+            runtime.handle().cancel();
+        }
+        logs.push("sing-box started in-process (Rust library)".to_string());
+        drop(sudo_password);
+
+        if !flags.no_rules {
+            rules::spawn_background_download(
+                state.settings.clone(),
+                state.config_json.clone(),
+            );
+        }
+
+        let result = runtime.wait();
+        native_handle.lock().expect("native runtime").take();
+        if mesh_started {
+            easytier::stop_all()?;
+        }
+        return result;
+    }
+
+    let spawn_result = spawn_tun_worker(
         &state.settings,
         &config_path,
-        state.tun_enabled,
         sudo_password.as_deref(),
     );
     let mut child = spawn_result?;
@@ -242,7 +291,7 @@ fn run_stack_managed(
         let mut st = status.lock().expect("stack status");
         st.pid = Some(pid);
     }
-    logs.push(format!("sing-box started pid={pid}"));
+    logs.push(format!("native TUN worker started pid={pid}"));
     let singbox_logs =
         SingboxLogWriter::new(state.settings.data_dir.join("logs"));
 
@@ -253,14 +302,6 @@ fn run_stack_managed(
         pipe_singbox_to_buffer(stderr, logs.clone(), singbox_logs);
     }
 
-    if state.tun_enabled {
-        let settings = state.settings.clone();
-        thread::spawn(move || {
-            thread::sleep(Duration::from_secs(3));
-            singbox::tun_route::linux_register_tun_dns(&settings);
-        });
-    }
-
     if !flags.no_rules {
         rules::spawn_background_download(
             state.settings.clone(),
@@ -269,10 +310,10 @@ fn run_stack_managed(
     }
 
     let status_wait = loop {
-        match child.try_wait().context("waiting for sing-box")? {
+        match child.try_wait().context("waiting for native TUN worker")? {
             Some(s) => break s,
             None => {
-                if pid_atom.load(Ordering::SeqCst) == 0 {
+                if stop_requested.load(Ordering::SeqCst) {
                     let _ = child.kill();
                     break child.wait().context("wait after kill")?;
                 }
@@ -289,7 +330,7 @@ fn run_stack_managed(
     if code != 0 {
         // Let the stderr pipe copy FATAL lines into the log buffer first.
         thread::sleep(Duration::from_millis(150));
-        bail!("sing-box exited with status {code}");
+        bail!("native TUN worker exited with status {code}");
     }
     Ok(())
 }
@@ -319,4 +360,91 @@ fn start_mesh_if_needed(
     }
     easytier::spawn_mesh_peer_watch(cfg.clone());
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, net::TcpStream, path::PathBuf, time::Instant};
+
+    use super::*;
+    use crate::{ProxyOpts, stack::StackCli};
+
+    fn temporary_directory() -> PathBuf {
+        let directory = std::env::temp_dir().join(format!(
+            "zay-native-controller-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        directory
+    }
+
+    #[test]
+    fn no_tun_stack_uses_in_process_runtime_and_stops_without_a_pid() {
+        let directory = temporary_directory();
+        let reservation =
+            std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = reservation.local_addr().unwrap().port();
+        drop(reservation);
+        let config_path = directory.join("zay.toml");
+        fs::write(
+            &config_path,
+            format!(
+                r#"[proxy]
+enabled = true
+subscriptions = []
+gateway = false
+mixed_port = {port}
+log_level = "error"
+
+[proxy.tun]
+enabled = false
+"#
+            ),
+        )
+        .unwrap();
+
+        let controller =
+            StackController::new(LogBuffer::with_default_capacity());
+        controller
+            .start_cli(
+                StackCli {
+                    dump_config: false,
+                    common: ProxyOpts {
+                        data_dir: Some(directory.clone()),
+                        config: Some(config_path),
+                        mixed_port: Some(port),
+                        no_tun: true,
+                        ..Default::default()
+                    },
+                    mesh: None,
+                    gateway: false,
+                    mesh_auth: None,
+                    mesh_ip: None,
+                },
+                None,
+            )
+            .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while TcpStream::connect(("127.0.0.1", port)).is_err() {
+            assert!(
+                Instant::now() < deadline,
+                "native mixed inbound did not start"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+        let status = controller.status();
+        assert_eq!(status.state, StackRunState::Running);
+        assert_eq!(status.pid, None);
+
+        controller.stop().unwrap();
+        assert_eq!(controller.status().state, StackRunState::Stopped);
+        assert!(std::net::TcpListener::bind(("127.0.0.1", port)).is_ok());
+
+        fs::remove_dir_all(directory).unwrap();
+    }
 }

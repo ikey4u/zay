@@ -55,10 +55,10 @@ pub fn rule_text_to_singbox_source(raw: &str) -> Result<String> {
     }
 
     // Clash payload YAML
-    if trimmed.contains("payload:") {
-        if let Ok(json) = loyalsoldier_yaml_to_singbox_source(trimmed) {
-            return Ok(json);
-        }
+    if trimmed.contains("payload:")
+        && let Ok(json) = loyalsoldier_yaml_to_singbox_source(trimmed)
+    {
+        return Ok(json);
     }
 
     let lines: Vec<String> = trimmed
@@ -134,11 +134,11 @@ pub fn strip_leading_dots_in_ruleset_json(raw: &str) -> Option<String> {
         };
         for item in arr.iter_mut() {
             let Some(s) = item.as_str() else { continue };
-            if let Some(stripped) = s.strip_prefix('.') {
-                if !stripped.is_empty() {
-                    *item = Value::String(stripped.to_string());
-                    changed = true;
-                }
+            if let Some(stripped) = s.strip_prefix('.')
+                && !stripped.is_empty()
+            {
+                *item = Value::String(stripped.to_string());
+                changed = true;
             }
         }
     }

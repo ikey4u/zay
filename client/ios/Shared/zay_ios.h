@@ -2,6 +2,7 @@
 #define ZAY_IOS_H
 
 #include <stdint.h>
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -23,6 +24,19 @@ int32_t zay_ios_stop_mesh(void);
 char *zay_ios_mesh_status_json(void);
 int32_t zay_ios_set_tun_fd(const char *inst_name, int32_t fd);
 char *zay_ios_relay_host(const char *relay_url);
+
+/** Configure the Network Extension and return a dup(2)'d, Rust-owned utun FD. */
+typedef int32_t (*ZayIosOpenTunCallback)(void *context, const char *request_json);
+
+int32_t zay_ios_start_singbox(const char *config_json,
+                              const char *base_path,
+                              ZayIosOpenTunCallback open_tun,
+                              void *context);
+int32_t zay_ios_reload_singbox(const char *config_json, const char *base_path);
+int32_t zay_ios_stop_singbox(void);
+char *zay_ios_singbox_groups_json(void);
+int32_t zay_ios_select_singbox_outbound(const char *group, const char *outbound);
+int32_t zay_ios_url_test_singbox(const char *group);
 
 #ifdef __cplusplus
 }

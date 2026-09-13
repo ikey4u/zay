@@ -1,4 +1,4 @@
-//! Extract compile-time embedded clash-rules into the Libbox working directory.
+//! Extract compile-time embedded clash-rules into the singbox working directory.
 
 include!(env!("ZAY_EMBEDDED_RULES_RS"));
 
@@ -8,11 +8,13 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde_json::json;
 
-use crate::rules::{EMBEDDED_RULESET_DIR, RULE_SETS, never_on_ios, rule_file_valid};
+use crate::rules::{
+    EMBEDDED_RULESET_DIR, RULE_SETS, never_on_ios, rule_file_valid,
+};
 
 const EMBEDDED_VERSION: &str = env!("ZAY_EMBEDDED_RULES_VERSION");
 
-/// Write `ruleset-embedded/` under `working_dir` (Libbox `-D` / workingPath).
+/// Write `ruleset-embedded/` under the embedded runtime's `working_dir`.
 pub fn ensure_installed(working_dir: &Path) -> Result<()> {
     let dir = working_dir.join(EMBEDDED_RULESET_DIR);
     fs::create_dir_all(&dir)
@@ -28,12 +30,11 @@ pub fn ensure_installed(working_dir: &Path) -> Result<()> {
     let version_changed = installed.as_deref() != Some(stamp.as_str());
 
     // Packet Tunnel cannot match by process — drop leftover applications sets.
-    for id in ["applications"] {
-        let path = dir.join(format!("{id}.json"));
-        if path.is_file() {
-            let _ = fs::remove_file(&path);
-            tracing::info!("clash-rules: removed unused set {id}");
-        }
+    let unused_id = "applications";
+    let unused_path = dir.join(format!("{unused_id}.json"));
+    if unused_path.is_file() {
+        let _ = fs::remove_file(&unused_path);
+        tracing::info!("clash-rules: removed unused set {unused_id}");
     }
 
     let mut written = 0usize;
@@ -77,7 +78,9 @@ pub fn ensure_installed(working_dir: &Path) -> Result<()> {
             "clash-rules: filled {written} missing embedded rule-set(s) ({stamp})"
         );
     } else {
-        tracing::info!("clash-rules: {EMBEDDED_RULESET_DIR} up to date ({stamp})");
+        tracing::info!(
+            "clash-rules: {EMBEDDED_RULESET_DIR} up to date ({stamp})"
+        );
     }
 
     Ok(())

@@ -1,6 +1,6 @@
 //! Build EasyTier TOML for an iOS mesh **node**.
 //!
-//! iOS has a single Packet Tunnel FD owned by sing-box/Libbox. EasyTier
+//! iOS has a single Packet Tunnel FD owned by the Rust singbox runtime. EasyTier
 //! therefore runs with `no_tun=true` and exposes a local SOCKS5 portal;
 //! sing-box routes mesh CIDRs to that portal.
 
@@ -102,7 +102,8 @@ pub fn build_easytier_toml(input: &MeshInput) -> Result<String> {
 fn normalize_peer_uri(raw: &str) -> Result<String> {
     let t = raw.trim();
     if t.contains("://") {
-        let u = url::Url::parse(t).map_err(|e| anyhow::anyhow!("invalid relay_url: {e}"))?;
+        let u = url::Url::parse(t)
+            .map_err(|e| anyhow::anyhow!("invalid relay_url: {e}"))?;
         match u.scheme() {
             "tcp" | "udp" | "ws" | "wss" | "quic" | "wg" => Ok(t.to_string()),
             other => bail!("unsupported relay scheme: {other}"),

@@ -2,7 +2,7 @@ use std::{
     fs,
     io::{BufRead, BufReader},
     net::TcpListener,
-    path::{Path, PathBuf},
+    path::Path,
     process::{Child, ChildStderr, ChildStdout, Command, ExitStatus, Stdio},
     thread,
     time::{Duration, Instant},
@@ -10,14 +10,13 @@ use std::{
 
 use anyhow::{Context, bail};
 
-use crate::settings;
+#[cfg(windows)]
+use std::path::PathBuf;
 
-const EMBEDDED_SINGBOX: &[u8] = include_bytes!(env!("SINGBOX_EMBED"));
-const EMBEDDED_SINGBOX_VERSION: &str = env!("SINGBOX_VERSION");
-
-/// A sing-box process. On Windows an unelevated Zay cannot directly own the
-/// UAC-launched child, so PowerShell remains as a small waiting proxy.
-pub struct ManagedChild {
+/// A zay-owned process that hosts the native Rust library with TUN privileges.
+/// On Windows an unelevated Zay cannot directly own the UAC-launched worker,
+/// so PowerShell remains as a small waiting proxy.
+pub struct NativeTunWorker {
     #[cfg(unix)]
     child: Child,
     #[cfg(windows)]
@@ -27,17 +26,17 @@ pub struct ManagedChild {
 }
 
 #[cfg(unix)]
-pub fn terminate_process(pid: u32) {
+pub fn terminate_worker_process(pid: u32) {
     unsafe {
         // Workers are spawned as their own process group so this also stops
-        // the sing-box child behind sudo, rather than leaving it orphaned.
+        // the zay child behind sudo, rather than leaving it orphaned.
         let _ = libc::kill(-(pid as i32), libc::SIGTERM);
         let _ = libc::kill(pid as libc::pid_t, libc::SIGTERM);
     }
 }
 
 #[cfg(windows)]
-pub fn terminate_process(pid: u32) {
+pub fn terminate_worker_process(pid: u32) {
     let _ = Command::new("taskkill")
         .args(["/PID", &pid.to_string(), "/T", "/F"])
         .stdin(Stdio::null())
@@ -110,7 +109,7 @@ fn kill_pid(pid: u32) {
 
 #[cfg(windows)]
 fn kill_pid(pid: u32) {
-    terminate_process(pid);
+    terminate_worker_process(pid);
 }
 
 fn mixed_port_occupants(port: u16) -> Vec<(u32, String)> {
@@ -243,7 +242,7 @@ fn windows_image_name(pid: u32) -> String {
         .unwrap_or_else(|| "unknown".into())
 }
 
-pub fn pipe_logs(stream: impl std::io::Read + Send + 'static) {
+pub fn pipe_worker_logs(stream: impl std::io::Read + Send + 'static) {
     thread::spawn(move || {
         let reader = BufReader::new(stream);
         for line in reader.lines() {
@@ -255,18 +254,10 @@ pub fn pipe_logs(stream: impl std::io::Read + Send + 'static) {
     });
 }
 
-impl ManagedChild {
+impl NativeTunWorker {
     #[cfg(unix)]
     fn direct(child: Child) -> Self {
         Self { child }
-    }
-
-    #[cfg(windows)]
-    fn direct(shell: Child) -> Self {
-        Self {
-            shell,
-            elevated_pid: PathBuf::new(),
-        }
     }
 
     #[cfg(windows)]
@@ -344,7 +335,7 @@ impl ManagedChild {
         {
             let pid = self.child.id();
             if unsafe { libc::kill(-(pid as i32), libc::SIGTERM) } != 0 {
-                self.child.kill().context("stopping sing-box")?;
+                self.child.kill().context("stopping native TUN worker")?;
             }
         }
         #[cfg(windows)]
@@ -366,174 +357,96 @@ impl ManagedChild {
     }
 }
 
-fn exe_name() -> &'static str {
-    if cfg!(windows) {
-        "sing-box.exe"
-    } else {
-        "sing-box"
-    }
-}
-
-fn embedded_cache_dir() -> PathBuf {
-    settings::default_cache_dir()
-        .join("sing-box")
-        .join(EMBEDDED_SINGBOX_VERSION)
-}
-
-fn materialize_embedded() -> anyhow::Result<PathBuf> {
-    let path = embedded_cache_dir().join(exe_name());
-    if path.is_file() {
-        return Ok(path);
-    }
-
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
-    }
-
-    fs::write(&path, EMBEDDED_SINGBOX).with_context(|| {
-        format!("writing embedded sing-box to {}", path.display())
-    })?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&path)
-            .with_context(|| format!("metadata for {}", path.display()))?
-            .permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&path, perms)
-            .with_context(|| format!("chmod {}", path.display()))?;
-    }
-
-    eprintln!(
-        "materialized sing-box {} → {}",
-        EMBEDDED_SINGBOX_VERSION,
-        path.display()
-    );
-    Ok(path)
-}
-
-pub fn resolve_binary() -> anyhow::Result<PathBuf> {
-    if let Ok(path) = std::env::var("ZAY_SINGBOX_BIN") {
-        let path = PathBuf::from(path);
-        if path.is_file() {
-            return Ok(path);
-        }
-        bail!(
-            "ZAY_SINGBOX_BIN points to a missing file: {}",
-            path.display()
-        );
-    }
-    materialize_embedded()
-}
-
-pub fn spawn(
-    binary: &Path,
+/// Start an elevated zay-owned worker that hosts the Rust singbox library.
+///
+/// This is the Unix privilege boundary for native TUN.  The worker receives
+/// only the generated configuration and runtime directory; it does not
+/// materialize or execute the embedded Go sing-box binary.
+#[cfg(unix)]
+pub fn spawn_native_tun_worker(
     runtime_dir: &Path,
     config_path: &Path,
     quiet: bool,
-    privileged: bool,
     sudo_password: Option<&str>,
-) -> anyhow::Result<ManagedChild> {
+) -> anyhow::Result<NativeTunWorker> {
     let config_path = config_path.canonicalize().with_context(|| {
         format!("canonicalizing config {}", config_path.display())
     })?;
     let runtime_dir = runtime_dir.canonicalize().with_context(|| {
         format!("canonicalizing runtime dir {}", runtime_dir.display())
     })?;
-
-    #[cfg(unix)]
-    let needs_elevation = privileged && !crate::privilege::is_root();
-
-    #[cfg(unix)]
-    let (mut cmd, write_password) =
+    let executable =
+        std::env::current_exe().context("locating zay TUN worker")?;
+    let needs_elevation = !crate::privilege::is_root();
+    let (mut command, write_password) =
         crate::privilege::command_for_program_with_password(
-            binary,
-            privileged,
+            &executable,
+            true,
             sudo_password,
         )?;
-
-    #[cfg(windows)]
-    if privileged {
-        return spawn_elevated_windows(binary, &runtime_dir, &config_path);
-    }
-
-    #[cfg(not(unix))]
-    let mut cmd = Command::new(binary);
-
-    cmd.arg("run")
-        .arg("-c")
-        .arg(&config_path)
-        .arg("-D")
+    command
+        .arg("--run-tun-worker")
+        .arg("--tun-worker-runtime-dir")
         .arg(&runtime_dir)
+        .arg("--tun-worker-config")
+        .arg(&config_path)
         .current_dir(&runtime_dir);
 
-    #[cfg(unix)]
-    if needs_elevation {
-        if write_password {
-            // sudo -S: password written after spawn for non-interactive startup.
-        } else {
-            // sudo/doas reads the password from the terminal (CLI).
-            cmd.stdin(Stdio::inherit());
-        }
+    if needs_elevation && !write_password {
+        command.stdin(Stdio::inherit());
     } else if !write_password {
-        cmd.stdin(Stdio::null());
+        command.stdin(Stdio::null());
     }
 
-    #[cfg(not(unix))]
-    cmd.stdin(Stdio::null());
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-
-        unsafe {
-            cmd.pre_exec(|| {
-                if libc::setpgid(0, 0) == 0 {
-                    Ok(())
-                } else {
-                    Err(std::io::Error::last_os_error())
-                }
-            });
-        }
+    use std::os::unix::process::CommandExt as _;
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setpgid(0, 0) == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        });
     }
 
     if quiet {
-        cmd.stdout(Stdio::null()).stderr(Stdio::null());
+        command.stdout(Stdio::null()).stderr(Stdio::null());
+    } else if needs_elevation && !write_password {
+        command.stdout(Stdio::piped()).stderr(Stdio::inherit());
     } else {
-        #[cfg(unix)]
-        if needs_elevation && !write_password {
-            // sudo's password prompt has no trailing newline. It must go directly
-            // to the terminal instead of through the line-based sing-box log pipe.
-            cmd.stdout(Stdio::piped()).stderr(Stdio::inherit());
-        } else {
-            cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-        }
-        #[cfg(not(unix))]
-        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
     }
 
-    let mut child = cmd.spawn().with_context(|| {
-        format!("starting sing-box at {}", binary.display())
+    let mut child = command
+        .spawn()
+        .context("starting elevated native TUN worker")?;
+    if write_password && let Some(password) = sudo_password {
+        crate::privilege::write_password_stdin(&mut child, password)?;
+    }
+    Ok(NativeTunWorker::direct(child))
+}
+
+#[cfg(windows)]
+pub fn spawn_native_tun_worker(
+    runtime_dir: &Path,
+    config_path: &Path,
+    _quiet: bool,
+    _sudo_password: Option<&str>,
+) -> anyhow::Result<NativeTunWorker> {
+    let config_path = config_path.canonicalize().with_context(|| {
+        format!("canonicalizing config {}", config_path.display())
     })?;
-
-    #[cfg(unix)]
-    if write_password {
-        if let Some(password) = sudo_password {
-            crate::privilege::write_password_stdin(&mut child, password)?;
-        }
-    }
-
-    Ok(ManagedChild::direct(child))
+    let runtime_dir = runtime_dir.canonicalize().with_context(|| {
+        format!("canonicalizing runtime dir {}", runtime_dir.display())
+    })?;
+    spawn_elevated_windows(&runtime_dir, &config_path)
 }
 
 #[cfg(windows)]
 fn spawn_elevated_windows(
-    binary: &Path,
     runtime_dir: &Path,
     config_path: &Path,
-) -> anyhow::Result<ManagedChild> {
+) -> anyhow::Result<NativeTunWorker> {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
 
     let worker_file = runtime_dir.join("sing-box-worker.json");
@@ -546,9 +459,8 @@ fn spawn_elevated_windows(
     };
     let quote_text = |value: &str| format!("'{}'", value.replace('\'', "''"));
     let script = format!(
-        "$p=Start-Process -FilePath {} -ArgumentList @('--run-tun-worker','--tun-worker-binary',{},'--tun-worker-runtime-dir',{},'--tun-worker-config',{},'--tun-worker-pipe',{},'--tun-worker-token',{}) -WorkingDirectory {} -Verb RunAs -PassThru; Wait-Process -Id $p.Id; exit $p.ExitCode",
+        "$p=Start-Process -FilePath {} -ArgumentList @('--run-tun-worker','--tun-worker-runtime-dir',{},'--tun-worker-config',{},'--tun-worker-pipe',{},'--tun-worker-token',{}) -WorkingDirectory {} -Verb RunAs -PassThru; Wait-Process -Id $p.Id; exit $p.ExitCode",
         quote(&zay),
-        quote(binary),
         quote(runtime_dir),
         quote(config_path),
         quote_text(&pipe),
@@ -574,8 +486,8 @@ fn spawn_elevated_windows(
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .context("requesting UAC elevation for sing-box TUN worker")?;
-    Ok(ManagedChild::elevated(shell, worker_file))
+        .context("requesting UAC elevation for native TUN worker")?;
+    Ok(NativeTunWorker::elevated(shell, worker_file))
 }
 
 #[cfg(windows)]

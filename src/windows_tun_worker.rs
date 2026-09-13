@@ -1,15 +1,10 @@
-//! Elevated Windows host for the sing-box TUN process.
+//! Elevated Windows host for the embeddable Rust sing-box TUN runtime.
 //!
 //! The unprivileged Zay supervisor talks to this process over a randomly
 //! named local pipe.  The pipe token prevents unrelated local processes from
 //! issuing lifecycle commands.
 
-use std::{
-    fs,
-    path::PathBuf,
-    process::{Command, Stdio},
-    time::Duration,
-};
+use std::{fs, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use tokio::{
@@ -18,12 +13,21 @@ use tokio::{
     time::sleep,
 };
 
+use crate::singbox::native::NativeRuntime;
+
 pub struct Args {
-    pub binary: PathBuf,
     pub runtime_dir: PathBuf,
     pub config_path: PathBuf,
     pub pipe_name: String,
     pub token: String,
+}
+
+struct MetadataGuard(PathBuf);
+
+impl Drop for MetadataGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
 }
 
 pub fn run(args: Args) -> Result<()> {
@@ -42,19 +46,8 @@ async fn run_inner(args: Args) -> Result<()> {
         .create(&pipe)
         .with_context(|| format!("creating TUN worker pipe {pipe}"))?;
 
-    let mut child = Command::new(&args.binary)
-        .args(["run", "-c"])
-        .arg(&args.config_path)
-        .arg("-D")
-        .arg(&args.runtime_dir)
-        .current_dir(&args.runtime_dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .with_context(|| {
-            format!("starting sing-box at {}", args.binary.display())
-        })?;
+    let mut runtime =
+        NativeRuntime::start(&args.config_path, &args.runtime_dir)?;
 
     fs::write(
         &metadata_path,
@@ -66,6 +59,7 @@ async fn run_inner(args: Args) -> Result<()> {
         .to_string(),
     )
     .with_context(|| format!("writing {}", metadata_path.display()))?;
+    let _metadata_guard = MetadataGuard(metadata_path);
 
     let received_stop = {
         let connected = server.connect();
@@ -75,8 +69,7 @@ async fn run_inner(args: Args) -> Result<()> {
                 result.context("accepting TUN worker command")?;
                 true
             }
-            result = wait_for_child(&mut child) => {
-                result?;
+            () = wait_for_runtime(&runtime) => {
                 false
             }
         }
@@ -90,16 +83,14 @@ async fn run_inner(args: Args) -> Result<()> {
         if !valid_stop_request(&request, &args.token) {
             bail!("rejected unauthenticated TUN worker command");
         }
-        // sing-box for Windows does not expose a shutdown API.  Keeping its
-        // Child handle here confines termination to this one worker.
-        child.kill().context("stopping sing-box")?;
-        child.wait().context("waiting for sing-box shutdown")?;
+        runtime.stop().context("stopping native sing-box runtime")?;
         server.write_all(b"stopped\n").await.ok();
         Ok(())
     } else {
-        Ok(())
+        runtime
+            .wait()
+            .context("waiting for native sing-box runtime")
     };
-    let _ = fs::remove_file(&metadata_path);
     result
 }
 
@@ -107,10 +98,10 @@ fn valid_stop_request(request: &str, token: &str) -> bool {
     request.trim() == format!("{token} stop")
 }
 
-async fn wait_for_child(child: &mut std::process::Child) -> Result<()> {
+async fn wait_for_runtime(runtime: &NativeRuntime) {
     loop {
-        if child.try_wait().context("checking sing-box")?.is_some() {
-            return Ok(());
+        if !runtime.is_running() {
+            return;
         }
         sleep(Duration::from_millis(200)).await;
     }

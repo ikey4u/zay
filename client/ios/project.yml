@@ -11,7 +11,6 @@ options:
 #   app:       dev.zay.ios
 #   extension: dev.zay.ios.tunnel
 #   ZayCore:   dev.zay.ios.ZayCore
-#   Libbox:    dev.zay.ios.Libbox
 #
 # Signing: put DEVELOPMENT_TEAM in gitignored project.local.yml
 # (see project.local.yml.example). Never set an empty team here — that
@@ -44,9 +43,6 @@ targets:
         embed: true
         codeSign: true
       # Embed dynamic frameworks in the app; the extension loads them via @rpath.
-      - framework: Vendor/Libbox.xcframework
-        embed: true
-        codeSign: true
       - framework: Vendor/ZayCore.framework
         embed: true
         codeSign: true
@@ -60,7 +56,7 @@ targets:
         HEADER_SEARCH_PATHS: "$(SRCROOT)/Shared"
         FRAMEWORK_SEARCH_PATHS: "$(SRCROOT)/Vendor"
         LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/Frameworks"
-        OTHER_LDFLAGS: "$(inherited) -framework ZayCore -framework SystemConfiguration -framework Network -framework UIKit -framework Security"
+        OTHER_LDFLAGS: "$(inherited) -framework ZayCore -framework SystemConfiguration -framework Network -framework Foundation -framework UIKit -framework Security -lsqlite3"
         ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES: YES
     scheme:
       testTargets: []
@@ -75,9 +71,6 @@ targets:
           - "zay_ios.h"
           - "Zay-Bridging-Header.h"
     dependencies:
-      - framework: Vendor/Libbox.xcframework
-        embed: false
-        link: true
       - framework: Vendor/ZayCore.framework
         embed: false
         link: true
@@ -91,5 +84,5 @@ targets:
         SWIFT_OBJC_BRIDGING_HEADER: Shared/Zay-Bridging-Header.h
         HEADER_SEARCH_PATHS: "$(SRCROOT)/Shared"
         FRAMEWORK_SEARCH_PATHS: "$(SRCROOT)/Vendor"
-        OTHER_LDFLAGS: "$(inherited) -framework Libbox -framework ZayCore -lc++ -framework SystemConfiguration -framework Network -framework UIKit -framework Security"
+        OTHER_LDFLAGS: "$(inherited) -framework ZayCore -lc++ -framework SystemConfiguration -framework Network -framework Foundation -framework UIKit -framework Security -lsqlite3"
         LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/Frameworks @executable_path/../../Frameworks"

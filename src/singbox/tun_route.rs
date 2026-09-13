@@ -1,9 +1,10 @@
 //! TUN `route_exclude_address` helpers — keep LAN/SSH and mesh control traffic off the tunnel.
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::process::Command;
 use std::{
     env,
     net::Ipv4Addr,
-    process::Command,
     time::{Duration, Instant},
 };
 
@@ -338,74 +339,6 @@ fn systemd_resolved_running() -> bool {
         .map(|s| s.success())
         .unwrap_or(false)
 }
-
-/// After sing-box brings up tun0: register TUN DNS on systemd-resolved when present (Mihomo does this in-core).
-#[cfg(target_os = "linux")]
-pub fn linux_register_tun_dns(settings: &Settings) {
-    if env::var("ZAY_NO_RESOLVECTL_DNS").is_ok() {
-        return;
-    }
-    if !singbox_tun_enabled(settings) || tun_selective_mesh_routes(settings) {
-        return;
-    }
-    let servers = tun_derived_dns_servers(settings);
-    if servers.is_empty() {
-        return;
-    }
-    if !systemd_resolved_running() {
-        log_glibc_dns_hint(&servers);
-        return;
-    }
-    let ifname = tun_interface_name();
-    let mut cmd = Command::new("resolvectl");
-    cmd.arg("dns").arg(&ifname);
-    for s in &servers {
-        cmd.arg(s);
-    }
-    match cmd.status() {
-        Ok(s) if s.success() => {
-            eprintln!(
-                "linux DNS: resolvectl dns {ifname} {} (systemd-resolved → sing-box FakeIP)",
-                servers.join(" ")
-            );
-        }
-        Ok(s) => {
-            eprintln!(
-                "warn: resolvectl dns {ifname} exited {}; check: resolvectl status {ifname}",
-                s
-            );
-        }
-        Err(e) => {
-            eprintln!("warn: resolvectl failed ({e})");
-            log_glibc_dns_hint(&servers);
-        }
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn log_glibc_dns_hint(tun_dns: &[String]) {
-    eprintln!(
-        "linux DNS: no systemd-resolved — glibc reads /etc/resolv.conf directly \
-         (resolvectl does not apply on this host)"
-    );
-    eprintln!(
-        "dns: FakeIP needs port-53 queries to reach sing-box (TUN hijack-dns). \
-         Avoid stub 127.0.0.53 with no resolver behind it; use routable nameservers \
-         (e.g. 223.5.5.5) or set ZAY_TUN_AUTO_REDIRECT=1 if nftables is clean. \
-         TUN DNS gateway: {}",
-        tun_dns.join(", ")
-    );
-    if let Ok(raw) = std::fs::read_to_string("/etc/resolv.conf") {
-        let preview: String =
-            raw.lines().take(4).collect::<Vec<_>>().join("; ");
-        if !preview.is_empty() {
-            eprintln!("dns: /etc/resolv.conf → {preview}");
-        }
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-pub fn linux_register_tun_dns(_settings: &Settings) {}
 
 pub fn log_fakeip_dns_hint(settings: &Settings, clash_dns: bool) {
     if !clash_dns || !singbox_tun_enabled(settings) {

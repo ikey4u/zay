@@ -10,6 +10,7 @@ mod proxy_url;
 mod rule_convert;
 mod rules;
 mod singbox_config;
+mod singbox_runtime;
 
 use std::ffi::c_char;
 use std::path::PathBuf;
@@ -19,8 +20,17 @@ use crate::mesh_config::MeshInput;
 use crate::singbox_config::SingboxInput;
 
 pub use error::{zay_ios_free_string, zay_ios_last_error};
+pub use singbox_runtime::{
+    ZayIosOpenTunCallback, zay_ios_reload_singbox,
+    zay_ios_select_singbox_outbound, zay_ios_singbox_groups_json,
+    zay_ios_start_singbox, zay_ios_stop_singbox, zay_ios_url_test_singbox,
+};
 
 /// Set the log file path (App Group container). Pass null to disable file logging.
+///
+/// # Safety
+///
+/// A non-null `path` must point to a valid NUL-terminated string for this call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zay_ios_set_log_path(path: *const c_char) {
     logging::init_logging();
@@ -39,8 +49,15 @@ pub unsafe extern "C" fn zay_ios_set_log_path(path: *const c_char) {
 }
 
 /// Append a log line from Swift (`level` = info/warn/error/debug).
+///
+/// # Safety
+///
+/// Non-null arguments must point to valid NUL-terminated strings for this call.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn zay_ios_log(level: *const c_char, message: *const c_char) {
+pub unsafe extern "C" fn zay_ios_log(
+    level: *const c_char,
+    message: *const c_char,
+) {
     let level = unsafe { cstr(level) }.unwrap_or("info");
     let message = unsafe { cstr(message) }.unwrap_or("");
     logging::log_line(level, message);
@@ -50,15 +67,22 @@ pub unsafe extern "C" fn zay_ios_log(level: *const c_char, message: *const c_cha
 /// `{ "network_name", "network_secret", "relay_url", "ipv4"?, "instance_name"?, "hostname"?, "socks_port"? }`
 ///
 /// Returns heap string (caller frees with `zay_ios_free_string`) or null on error.
+///
+/// # Safety
+///
+/// `input_json` must point to a valid NUL-terminated string for this call.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn zay_ios_build_easytier_toml(input_json: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn zay_ios_build_easytier_toml(
+    input_json: *const c_char,
+) -> *mut c_char {
     clear_error();
     logging::init_logging();
     let result = (|| {
         let raw = unsafe { cstr(input_json) }?;
-        let input: MeshInput =
-            serde_json::from_str(raw).map_err(|e| format!("invalid mesh input json: {e}"))?;
-        let toml = mesh_config::build_easytier_toml(&input).map_err(|e| e.to_string())?;
+        let input: MeshInput = serde_json::from_str(raw)
+            .map_err(|e| format!("invalid mesh input json: {e}"))?;
+        let toml = mesh_config::build_easytier_toml(&input)
+            .map_err(|e| e.to_string())?;
         tracing::info!("built EasyTier TOML ({} bytes)", toml.len());
         to_cstring(toml)
     })();
@@ -73,16 +97,26 @@ pub unsafe extern "C" fn zay_ios_build_easytier_toml(input_json: *const c_char) 
 
 /// Build sing-box JSON from:
 /// `{ "proxy_url", "mesh_cidrs": [], "bypass_ips": [], "working_dir"?, "log_level"?, "selected_proxy_tag"?, "custom_rules"? }`
+///
+/// # Safety
+///
+/// `input_json` must point to a valid NUL-terminated string for this call.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn zay_ios_build_singbox_json(input_json: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn zay_ios_build_singbox_json(
+    input_json: *const c_char,
+) -> *mut c_char {
     clear_error();
     logging::init_logging();
     let result = (|| {
         let raw = unsafe { cstr(input_json) }?;
-        let input: SingboxInput =
-            serde_json::from_str(raw).map_err(|e| format!("invalid singbox input json: {e}"))?;
-        tracing::info!("building sing-box config for proxy_url={}", input.proxy_url);
-        let json = singbox_config::build_singbox_json(&input).map_err(|e| format!("{e:#}"))?;
+        let input: SingboxInput = serde_json::from_str(raw)
+            .map_err(|e| format!("invalid singbox input json: {e}"))?;
+        tracing::info!(
+            "building sing-box config for proxy_url={}",
+            input.proxy_url
+        );
+        let json = singbox_config::build_singbox_json(&input)
+            .map_err(|e| format!("{e:#}"))?;
         tracing::info!("built sing-box JSON ({} bytes)", json.len());
         to_cstring(json)
     })();
@@ -96,8 +130,14 @@ pub unsafe extern "C" fn zay_ios_build_singbox_json(input_json: *const c_char) -
 }
 
 /// List proxy nodes for a subscription / URI (caller frees).
+///
+/// # Safety
+///
+/// `proxy_url` must point to a valid NUL-terminated string for this call.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn zay_ios_list_proxy_nodes(proxy_url: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn zay_ios_list_proxy_nodes(
+    proxy_url: *const c_char,
+) -> *mut c_char {
     clear_error();
     logging::init_logging();
     let result = (|| {
@@ -121,6 +161,10 @@ pub unsafe extern "C" fn zay_ios_list_proxy_nodes(proxy_url: *const c_char) -> *
 
 /// Prefetch Clash subscription into `working_dir` cache so tunnel start can work offline.
 /// Returns 0 on success, -1 on error.
+///
+/// # Safety
+///
+/// Both arguments must point to valid NUL-terminated strings for this call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zay_ios_prefetch_proxy(
     proxy_url: *const c_char,
@@ -150,6 +194,11 @@ pub unsafe extern "C" fn zay_ios_prefetch_proxy(
 
 /// Convert rule list text → `{ format, rule_count, json }`.
 /// `hint` may be `auto` / `clash` / `shadowrocket` / `singbox` / `plain` (or null).
+///
+/// # Safety
+///
+/// `raw` and a non-null `hint` must point to valid NUL-terminated strings for
+/// this call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zay_ios_convert_rule_text(
     raw: *const c_char,
@@ -182,6 +231,11 @@ pub unsafe extern "C" fn zay_ios_convert_rule_text(
 }
 
 /// Embedded Loyalsoldier rule-set overview. `working_dir` may be null.
+///
+/// # Safety
+///
+/// A non-null `working_dir` must point to a valid NUL-terminated string for
+/// this call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zay_ios_embedded_rules_info(
     working_dir: *const c_char,
@@ -207,8 +261,14 @@ pub unsafe extern "C" fn zay_ios_embedded_rules_info(
 
 /// Extract embedded Loyalsoldier clash-rules into `working_dir/ruleset-embedded/`.
 /// Call before building / starting sing-box. Returns 0 on success.
+///
+/// # Safety
+///
+/// `working_dir` must point to a valid NUL-terminated string for this call.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn zay_ios_ensure_embedded_rules(working_dir: *const c_char) -> i32 {
+pub unsafe extern "C" fn zay_ios_ensure_embedded_rules(
+    working_dir: *const c_char,
+) -> i32 {
     clear_error();
     logging::init_logging();
     match (|| {
@@ -216,7 +276,8 @@ pub unsafe extern "C" fn zay_ios_ensure_embedded_rules(working_dir: *const c_cha
         if dir.is_empty() {
             return Err("working_dir is empty".into());
         }
-        embedded_rules::ensure_installed(std::path::Path::new(dir)).map_err(|e| e.to_string())
+        embedded_rules::ensure_installed(std::path::Path::new(dir))
+            .map_err(|e| e.to_string())
     })() {
         Ok(()) => 0,
         Err(e) => {
@@ -227,6 +288,10 @@ pub unsafe extern "C" fn zay_ios_ensure_embedded_rules(working_dir: *const c_cha
 }
 
 /// Start EasyTier from a TOML config string.
+///
+/// # Safety
+///
+/// `toml` must point to a valid NUL-terminated string for this call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zay_ios_start_mesh(toml: *const c_char) -> i32 {
     clear_error();
@@ -245,7 +310,7 @@ pub unsafe extern "C" fn zay_ios_start_mesh(toml: *const c_char) -> i32 {
 
 /// Stop all EasyTier instances.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn zay_ios_stop_mesh() -> i32 {
+pub extern "C" fn zay_ios_stop_mesh() -> i32 {
     clear_error();
     match mesh::stop_mesh() {
         Ok(()) => 0,
@@ -258,7 +323,7 @@ pub unsafe extern "C" fn zay_ios_stop_mesh() -> i32 {
 
 /// JSON status of running mesh instances (caller frees).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn zay_ios_mesh_status_json() -> *mut c_char {
+pub extern "C" fn zay_ios_mesh_status_json() -> *mut c_char {
     clear_error();
     match mesh::mesh_status_json() {
         Ok(s) => match to_cstring(s) {
@@ -276,8 +341,16 @@ pub unsafe extern "C" fn zay_ios_mesh_status_json() -> *mut c_char {
 }
 
 /// Attach a TUN fd to a named instance (optional; SOCKS-bridge mode usually skips this).
+///
+/// # Safety
+///
+/// `inst_name` must point to a valid NUL-terminated string for this call, and
+/// `fd` must be a descriptor the caller is allowed to transfer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn zay_ios_set_tun_fd(inst_name: *const c_char, fd: i32) -> i32 {
+pub unsafe extern "C" fn zay_ios_set_tun_fd(
+    inst_name: *const c_char,
+    fd: i32,
+) -> i32 {
     clear_error();
     match (|| {
         let name = unsafe { cstr(inst_name) }?;
@@ -292,8 +365,14 @@ pub unsafe extern "C" fn zay_ios_set_tun_fd(inst_name: *const c_char, fd: i32) -
 }
 
 /// Extract relay host + suggested default mesh CIDR helpers for Swift.
+///
+/// # Safety
+///
+/// `relay_url` must point to a valid NUL-terminated string for this call.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn zay_ios_relay_host(relay_url: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn zay_ios_relay_host(
+    relay_url: *const c_char,
+) -> *mut c_char {
     clear_error();
     match unsafe { cstr(relay_url) } {
         Ok(u) => match mesh::parse_relay_host(u) {
