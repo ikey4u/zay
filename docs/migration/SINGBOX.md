@@ -12,10 +12,10 @@
 | --- | --- |
 | 总体 | **99.9%**；本轮继续收敛 Naive/QUIC BBRv2 的逐事件模型，完成度不因内部算法校准或单纯增加回归而上调 |
 | 交付 | `crates/singbox` 为可嵌入 Rust library；binary/CLI 由 zay 实现；上游 CLI、daemon/service 与 experimental 应用控制 API 不计入分母 |
-| 最新实现 | BBRv2 继续按 Chromium/sing-quic 状态机校准：初始 RTT 与 2.885 pacing gain、首个 ACK pacing、整轮 loss event/`bandwidth_lo`/`inflight_lo`、按模式应用 `inflight_hi` headroom、ProbeBW Up 动态斜率及 queue/risk/loss 退出、ProbeRTT 与 quiescence 返回路径均已落地。delivery sampler 现向控制器传递精确 send-time inflight、delivered inflight 与 app-limited 状态，loss 比例和 `inflight_hi/lo` 不再依赖事件总在途量近似 |
-| 最新验证 | 1636 项 unit 注册：1627 通过、9 默认忽略；50 项 crate 外 public-library integration 通过，稳定默认基线 **1677 项零失败**；9 个固定 Go/macOS 现场项均已实际执行通过，本轮合计 **1686 项零失败**；Rust client→固定 Go sing-box 的 2 MiB 有损 H3 BBRv2 复验、全特性全目标严格 Clippy 与格式检查通过 |
+| 最新实现 | BBRv2 继续按 Chromium/sing-quic 状态机校准：初始 RTT 与 2.885 pacing gain、首个 ACK pacing、整轮 loss event/`bandwidth_lo`/`inflight_lo`、按模式应用 `inflight_hi` headroom、ProbeBW Up 动态斜率及 queue/risk/loss 退出、ProbeRTT 与 quiescence 返回路径均已落地。delivery sampler 现向控制器传递精确 send-time inflight、delivered inflight 与 app-limited 状态；ProbeBW 还会按 `min(63, target_inflight / 1460)` 的 Reno coexistence 轮次阈值或严格超过随机时间窗口触发 Refill，并从 ProbeDown 直接进入新探测周期 |
+| 最新验证 | 1637 项 unit 注册：1628 通过、9 默认忽略；50 项 crate 外 public-library integration 通过，稳定默认基线 **1678 项零失败**；9 个固定 Go/macOS 现场项均已实际执行通过，本轮合计 **1687 项零失败**；23 项 BBR 定向回归、Rust client→固定 Go sing-box 的 2 MiB 有损 H3 BBRv2 复验、全特性全目标严格 Clippy 与格式检查通过 |
 | 仍需外部验证 | 三桌面特权 TUN/系统 VPN/路由与休眠恢复、Linux kTLS 内核矩阵、Windows Schannel/WinDivert/IP Helper 真机、Android/iOS 真机切网、外部 C Tor、多项生产服务与公网长时/高损耗互通 |
-| 当前重点 | 固定 Cronet 与 Rust BBRv2 的逐事件数值 oracle，继续核对 ACK/loss 同批排序、Reno coexistence 与 cwnd 上限边界；之后压缩可在本机确定性复现的 wire/error-timing 长尾 |
+| 当前重点 | 固定 Cronet 与 Rust BBRv2 的逐事件数值 oracle，继续核对 ACK/loss 同批排序、persistent-queue 与 cwnd 全局上限边界；之后压缩可在本机确定性复现的 wire/error-timing 长尾 |
 
 <details>
 <summary>详细模块矩阵与上一基线（展开查看）</summary>
@@ -949,6 +949,7 @@ sing-box 使用 GPL-3.0-or-later。直接移植及其派生实现放在独立 `s
 
 ### 2026-09-13
 
+- ProbeBW 补齐 Reno coexistence 探测调度：独立保存整个 probe cycle 的起点，按 `min(63, target_inflight / 1460)` 个 round 或严格超过随机 wait duration 进入 Refill；判断同时覆盖 Cruise 和 ProbeDown，后者可直接开始下一次探测并仍保留同事件的 ProbeRTT 到期判断。Down/Refill/Up 进入时会像上游一样重启 round 边界，避免把旧 flight 错计入新 phase。新增轮次与纳秒级时间边界回归；23 项 BBR 定向测试、2 MiB 有损 Go 互操作、1637 unit（1628 通过、9 忽略）、50 library integration 和严格 Clippy 全部通过，默认 1678 项、合计实际 1687 项零失败。总体估算保持 99.9%。
 - 继续校准 Naive QUIC BBRv2 的 Chromium/sing-quic 状态机：初始 RTT/2.885 pacing gain 与首 ACK pacing、整轮 loss 聚合和持久 `bandwidth_lo`/`inflight_lo`、Startup/Drain/Cruise/ProbeRTT 的不同 `inflight_hi` 限制、ProbeUp 动态增长斜率与 queue/risk/loss 退出、ProbeRTT 到期及 quiescence 返回均已逐项实现。delivery sampler 新增精确 send-time state、sample inflight 与 delivered-in-round 传递，loss 阈值及 `inflight_hi/lo` 不再使用 event prior-inflight 近似。22 项 BBR 定向测试、Rust→固定 Go 2 MiB 有损 H3、1636 unit（1627 通过、9 忽略）、50 library integration 和严格 Clippy 全部通过；默认 1677 项、连同已实际执行的 9 个现场项合计 1686 项零失败。总体估算保持 99.9%。
 - BBRv2 补齐 ACK aggregation 数值模型：复用 sing-quic 对齐的 10-round ACK-height filter，在同批 ACK 事件中维护 epoch/带宽增长，startup 使用当前 excess、full-bandwidth 使用窗口最大值，并将有界 `extra_acked` 叠加到 BDP 目标后再受 `inflight_lo/hi` 限制；没有新 ACK 的 loss-timer 事件保持 epoch 与预算不变。精确 1 ms burst/纯 loss 数值向量及 Rust→固定 Go 2 MiB 有损 H3 复验通过；稳定基线为 1632 unit 中 1623 通过、9 忽略，加 50 library integration 共 1673 项默认零失败，合计实际执行 1682 项零失败，严格 Clippy 通过。总体估算保持 99.9%。
 - 新增固定 Go sing-box Naive/H3 server fixture，Rust Naive BBRv2 client 通过约 3.2% 双向丢包、周期性乱序与中段限速完成 2 MiB 双向 CONNECT；与上一项 Cronet `B2ON`→Rust server 组成双向有损互操作证据。测试暴露并修复 `h3 0.0.8` 标准 CONNECT 非法携带 `:scheme`/`:path` 的 wire 差异：本地固定依赖回移官方 `hyperium/h3#322`，quic-go 不再返回 `H3_MESSAGE_ERROR`。稳定基线为 1630 unit 中 1621 通过、9 忽略，加 50 library integration 共 1671 项默认零失败；9 个固定 Go/macOS 现场项全部实际通过，合计 1680 项零失败；h3 10 项 header 定向回归和严格 Clippy 通过，总体估算保持 99.9%。

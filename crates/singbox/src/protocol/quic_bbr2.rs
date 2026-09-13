@@ -47,6 +47,7 @@ const PROBE_RTT_PERIOD: Duration = Duration::from_secs(10);
 const PROBE_RTT_DURATION: Duration = Duration::from_millis(200);
 const PROBE_BASE_DURATION: Duration = Duration::from_secs(2);
 const PROBE_MAX_ROUNDS: u8 = 63;
+const DEFAULT_TCP_MSS: u64 = 1_460;
 // Chromium QUIC's BBRv2 model starts from kInitialRttMs rather than Quinn's
 // RFC recovery default, which is intentionally a different value.
 const INITIAL_RTT: Duration = Duration::from_millis(100);
@@ -143,6 +144,7 @@ pub struct Bbr2 {
     last_event_time: Instant,
 
     phase_started: Instant,
+    cycle_started: Instant,
     phase_rounds: u8,
     rounds_since_probe: u8,
     probe_wait: Duration,
@@ -198,6 +200,7 @@ impl Bbr2 {
             last_send_state: None,
             last_event_time: now,
             phase_started: now,
+            cycle_started: now,
             phase_rounds: 0,
             rounds_since_probe: 0,
             probe_wait: PROBE_BASE_DURATION,
@@ -368,12 +371,7 @@ impl Bbr2 {
     }
 
     fn enter_probe_bw(&mut self, now: Instant) {
-        self.mode = Mode::ProbeBw(ProbePhase::Down);
-        self.phase_started = now;
-        self.phase_rounds = 0;
-        self.rounds_since_probe = 0;
-        self.probe_wait = PROBE_BASE_DURATION
-            + Duration::from_millis(self.rng.gen_range(0..=1000));
+        self.set_probe_phase(ProbePhase::Down, now);
     }
 
     fn set_probe_phase(&mut self, phase: ProbePhase, now: Instant) {
@@ -381,15 +379,40 @@ impl Bbr2 {
         self.phase_started = now;
         self.phase_rounds = 0;
         match phase {
+            ProbePhase::Down => {
+                self.cycle_started = now;
+                self.rounds_since_probe = 0;
+                self.probe_wait = PROBE_BASE_DURATION
+                    + Duration::from_millis(self.rng.gen_range(0..=1000));
+                self.round_end_packet = self.max_sent_packet;
+            }
             ProbePhase::Refill => {
                 self.probe_up_rounds = 0;
                 self.probe_up_acked = 0;
                 self.bandwidth_lo = None;
                 self.inflight_lo = None;
+                self.round_end_packet = self.max_sent_packet;
             }
-            ProbePhase::Up => self.raise_probe_up_slope(),
-            ProbePhase::Down | ProbePhase::Cruise => {}
+            ProbePhase::Up => {
+                self.raise_probe_up_slope();
+                self.round_end_packet = self.max_sent_packet;
+            }
+            ProbePhase::Cruise => {}
         }
+    }
+
+    fn target_bytes_inflight(&self) -> u64 {
+        self.bdp(1.0).min(self.cwnd)
+    }
+
+    fn reno_coexistence_probe_rounds(&self) -> u8 {
+        (self.target_bytes_inflight() / DEFAULT_TCP_MSS)
+            .min(u64::from(PROBE_MAX_ROUNDS)) as u8
+    }
+
+    fn is_time_to_probe_bandwidth(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.cycle_started) > self.probe_wait
+            || self.rounds_since_probe >= self.reno_coexistence_probe_rounds()
     }
 
     fn raise_probe_up_slope(&mut self) {
@@ -451,7 +474,9 @@ impl Bbr2 {
                 }
             }
             Mode::ProbeBw(ProbePhase::Down) => {
-                if in_flight <= self.bdp(1.0).max(self.min_cwnd)
+                if self.is_time_to_probe_bandwidth(now) {
+                    self.set_probe_phase(ProbePhase::Refill, now);
+                } else if in_flight <= self.bdp(1.0).max(self.min_cwnd)
                     || now.saturating_duration_since(self.phase_started)
                         >= self.min_rtt
                 {
@@ -469,10 +494,7 @@ impl Bbr2 {
                 }
             }
             Mode::ProbeBw(ProbePhase::Cruise) => {
-                if now.saturating_duration_since(self.phase_started)
-                    >= self.probe_wait
-                    || self.rounds_since_probe >= PROBE_MAX_ROUNDS
-                {
+                if self.is_time_to_probe_bandwidth(now) {
                     self.set_probe_phase(ProbePhase::Refill, now);
                 }
             }
@@ -1015,7 +1037,7 @@ mod tests {
             false,
             None,
         );
-        assert_eq!(controller.mode, Mode::ProbeBw(ProbePhase::Cruise));
+        assert_eq!(controller.mode, Mode::ProbeBw(ProbePhase::Refill));
     }
 
     #[test]
@@ -1160,6 +1182,55 @@ mod tests {
 
         assert_eq!(controller.mode, Mode::ProbeBw(ProbePhase::Up));
         assert_eq!(controller.phase_rounds, 4);
+    }
+
+    #[test]
+    fn reno_coexistence_and_time_boundaries_start_refill() {
+        let start = Instant::now();
+        let mut controller = controller(start);
+        controller
+            .sampler
+            .on_sent_packet(start, 14_600, 2, 1, 0, false);
+        let _ = controller.sampler.on_ack_packet(
+            start + Duration::from_millis(100),
+            2,
+            1,
+            1,
+        );
+        assert_eq!(controller.reno_coexistence_probe_rounds(), 10);
+
+        controller.mode = Mode::ProbeBw(ProbePhase::Cruise);
+        controller.cycle_started = start;
+        controller.probe_wait = Duration::from_secs(10);
+        controller.rounds_since_probe = 9;
+        controller.round_started = true;
+        controller.update_mode(
+            start + Duration::from_secs(1),
+            0,
+            controller.cwnd,
+            false,
+        );
+        assert_eq!(controller.mode, Mode::ProbeBw(ProbePhase::Refill));
+
+        controller.mode = Mode::ProbeBw(ProbePhase::Cruise);
+        controller.cycle_started = start;
+        controller.probe_wait = Duration::from_secs(2);
+        controller.rounds_since_probe = 0;
+        controller.round_started = false;
+        controller.update_mode(
+            start + Duration::from_secs(2),
+            0,
+            controller.cwnd,
+            false,
+        );
+        assert_eq!(controller.mode, Mode::ProbeBw(ProbePhase::Cruise));
+        controller.update_mode(
+            start + Duration::from_secs(2) + Duration::from_nanos(1),
+            0,
+            controller.cwnd,
+            false,
+        );
+        assert_eq!(controller.mode, Mode::ProbeBw(ProbePhase::Refill));
     }
 
     #[test]
