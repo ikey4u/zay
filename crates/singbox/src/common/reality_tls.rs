@@ -904,6 +904,12 @@ pub(crate) async fn spawn_reality_cover_stub_with_record_lens(
             .write_all(&response)
             .await
             .expect("write cover handshake shape");
+        // REALITY keeps the cover connection alive until the authenticated
+        // handshake has completed. Closing immediately lets the Go server's
+        // background cover probe race with the client Finished message and
+        // tear down an otherwise valid connection.
+        let mut probe = [0_u8; 1];
+        let _ = stream.read(&mut probe).await;
     });
     (address, task)
 }

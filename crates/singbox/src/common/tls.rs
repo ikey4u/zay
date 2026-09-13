@@ -6685,13 +6685,33 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires the pinned Go REALITY interoperability server"]
+    #[ignore = "requires the pinned Go sing-box toolchain"]
     async fn reality_client_interoperates_with_pinned_go_server() {
-        let address = std::env::var("SINGBOX_REALITY_GO_SERVER")
-            .expect("SINGBOX_REALITY_GO_SERVER must contain host:port");
+        let (cover_address, cover_task) = spawn_reality_cover_stub().await;
         let server_private_key = [0x31; 32];
         let server_public_key =
             x25519(server_private_key, x25519_dalek::X25519_BASEPOINT_BYTES);
+        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let workspace = manifest.join("../..");
+        let sing_box = workspace.join("inner/sing-box");
+        let fixture = manifest.join("tests/fixtures/reality-go-server/main.go");
+        let mut child = std::process::Command::new("go")
+            .args(["run", "-tags", "with_utls", fixture.to_str().unwrap()])
+            .current_dir(sing_box)
+            .env("SINGBOX_REALITY_COVER_SERVER", cover_address.to_string())
+            .env(
+                "SINGBOX_REALITY_PRIVATE_KEY",
+                URL_SAFE_NO_PAD.encode(server_private_key),
+            )
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut address = String::new();
+        std::io::BufRead::read_line(
+            &mut std::io::BufReader::new(child.stdout.take().unwrap()),
+            &mut address,
+        )
+        .unwrap();
         let client = build_client_config(
             "reality.example",
             &OutboundTlsOptions {
@@ -6709,7 +6729,7 @@ mod tests {
             &[],
         )
         .unwrap();
-        let io = TcpStream::connect(address).await.unwrap();
+        let io = TcpStream::connect(address.trim()).await.unwrap();
         let mut stream = TlsConnector::from(client.config)
             .connect(client.server_name, io)
             .await
@@ -6718,6 +6738,9 @@ mod tests {
         let mut response = [0; 15];
         stream.read_exact(&mut response).await.unwrap();
         assert_eq!(&response, b"rust-reality-go");
+        drop(stream);
+        assert!(child.wait().unwrap().success());
+        cover_task.await.unwrap();
     }
 
     #[test]
