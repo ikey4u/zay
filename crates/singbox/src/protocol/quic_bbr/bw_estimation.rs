@@ -69,6 +69,33 @@ struct SentPacketState {
     last_acked_packet_sent_time: Option<Instant>,
     last_acked_packet_ack_time: Option<Instant>,
     app_limited: bool,
+    bytes_in_flight: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SendTimeState {
+    pub(crate) app_limited: bool,
+    pub(crate) total_acked: u64,
+    pub(crate) bytes_in_flight: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct AckSample {
+    pub(crate) bandwidth_increased: bool,
+    pub(crate) non_app_limited: bool,
+    pub(crate) bandwidth: u64,
+    pub(crate) inflight: u64,
+    pub(crate) send_state: SendTimeState,
+}
+
+impl SentPacketState {
+    fn send_time_state(self) -> SendTimeState {
+        SendTimeState {
+            app_limited: self.app_limited,
+            total_acked: self.total_acked,
+            bytes_in_flight: self.bytes_in_flight,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -143,6 +170,7 @@ impl BandwidthEstimation {
                 last_acked_packet_sent_time: self.last_acked_packet_sent_time,
                 last_acked_packet_ack_time: self.last_acked_packet_ack_time,
                 app_limited: self.app_limited_phase,
+                bytes_in_flight: bytes_in_flight.saturating_add(bytes),
             },
         );
     }
@@ -153,14 +181,17 @@ impl BandwidthEstimation {
         packet_space: u8,
         packet_number: u64,
         round: u64,
-    ) -> (bool, bool) {
-        let Some(sent) =
-            self.sent_packets.remove(&(packet_space, packet_number))
-        else {
-            return (false, false);
-        };
+    ) -> Option<AckSample> {
+        let sent = self.sent_packets.remove(&(packet_space, packet_number))?;
 
         self.total_acked = self.total_acked.saturating_add(sent.size);
+        let mut sample = AckSample {
+            bandwidth_increased: false,
+            non_app_limited: !sent.app_limited,
+            bandwidth: 0,
+            inflight: self.total_acked.saturating_sub(sent.total_acked),
+            send_state: sent.send_time_state(),
+        };
         self.total_sent_at_last_acked_packet = sent.total_sent;
         self.last_acked_packet_sent_time = Some(sent.sent_time);
         self.last_acked_packet_ack_time = Some(now);
@@ -174,7 +205,7 @@ impl BandwidthEstimation {
         }
 
         let Some(previous_sent_time) = sent.last_acked_packet_sent_time else {
-            return (false, !sent.app_limited);
+            return Some(sample);
         };
 
         let send_rate = if sent.sent_time > previous_sent_time {
@@ -199,16 +230,16 @@ impl BandwidthEstimation {
             fallback_a0
         };
         let Some(a0) = a0 else {
-            return (false, !sent.app_limited);
+            return Some(sample);
         };
         let Some(delta) = now.checked_duration_since(a0.time) else {
-            return (false, !sent.app_limited);
+            return Some(sample);
         };
         let Some(ack_rate) = Self::bw_from_delta(
             self.total_acked.saturating_sub(a0.total_acked),
             delta,
         ) else {
-            return (false, !sent.app_limited);
+            return Some(sample);
         };
 
         let bandwidth = send_rate.min(ack_rate);
@@ -216,19 +247,27 @@ impl BandwidthEstimation {
         if !sent.app_limited || increased {
             self.max_filter.update_max(round, bandwidth);
         }
-        (increased, !sent.app_limited)
+        sample.bandwidth_increased = increased;
+        sample.bandwidth = bandwidth;
+        Some(sample)
     }
 
     pub(crate) fn retire_packet(
         &mut self,
         packet_space: u8,
         packet_number: u64,
-    ) {
-        self.sent_packets.remove(&(packet_space, packet_number));
+    ) -> Option<SendTimeState> {
+        self.sent_packets
+            .remove(&(packet_space, packet_number))
+            .map(SentPacketState::send_time_state)
     }
 
     pub(crate) fn bytes_acked_this_window(&self) -> u64 {
         self.total_acked - self.acked_at_last_window
+    }
+
+    pub(crate) const fn total_bytes_acked(&self) -> u64 {
+        self.total_acked
     }
 
     pub(crate) fn end_acks(&mut self, starts_new_aggregation_epoch: bool) {
@@ -313,10 +352,14 @@ mod tests {
         let start = Instant::now();
         let mut sampler = BandwidthEstimation::new(true);
         sampler.on_sent_packet(start, 1_000, 0, 1, 0, false);
-        let (increased, non_app_limited) =
-            sampler.on_ack_packet(start + Duration::from_millis(100), 0, 1, 1);
-        assert!(increased);
-        assert!(non_app_limited);
+        let sample = sampler
+            .on_ack_packet(start + Duration::from_millis(100), 0, 1, 1)
+            .unwrap();
+        assert!(sample.bandwidth_increased);
+        assert!(sample.non_app_limited);
+        assert_eq!(sample.bandwidth, 10_000);
+        assert_eq!(sample.inflight, 1_000);
+        assert_eq!(sample.send_state.bytes_in_flight, 1_000);
         assert_eq!(sampler.get_estimate(), 10_000);
     }
 
@@ -325,7 +368,8 @@ mod tests {
         let start = Instant::now();
         let mut sampler = BandwidthEstimation::default();
         sampler.on_sent_packet(start, 1_000, 0, 1, 0, false);
-        sampler.on_ack_packet(start + Duration::from_millis(100), 0, 1, 1);
+        let _ =
+            sampler.on_ack_packet(start + Duration::from_millis(100), 0, 1, 1);
         sampler.on_sent_packet(
             start + Duration::from_millis(200),
             1_000,
@@ -334,7 +378,8 @@ mod tests {
             0,
             true,
         );
-        sampler.on_ack_packet(start + Duration::from_millis(400), 0, 2, 2);
+        let _ =
+            sampler.on_ack_packet(start + Duration::from_millis(400), 0, 2, 2);
         assert_eq!(sampler.get_estimate(), 10_000);
     }
 
@@ -343,7 +388,8 @@ mod tests {
         let start = Instant::now();
         let mut sampler = BandwidthEstimation::default();
         sampler.on_sent_packet(start, 1_000, 2, 10, 0, false);
-        sampler.on_ack_packet(start + Duration::from_millis(10), 2, 10, 1);
+        let _ =
+            sampler.on_ack_packet(start + Duration::from_millis(10), 2, 10, 1);
 
         sampler.on_sent_packet(
             start + Duration::from_millis(20),
@@ -364,7 +410,8 @@ mod tests {
         assert!(sampler.sent_packets[&(2, 11)].app_limited);
         assert!(sampler.sent_packets[&(2, 12)].app_limited);
 
-        sampler.on_ack_packet(start + Duration::from_millis(30), 2, 11, 2);
+        let _ =
+            sampler.on_ack_packet(start + Duration::from_millis(30), 2, 11, 2);
         sampler.on_sent_packet(
             start + Duration::from_millis(31),
             1_000,
@@ -397,16 +444,22 @@ mod tests {
         }
         assert_eq!(sampler.sent_packets.len(), 512);
 
-        let (increased, non_app_limited) =
-            sampler.on_ack_packet(start + Duration::from_millis(100), 2, 1, 1);
-        assert!(increased);
-        assert!(non_app_limited);
+        let sample = sampler
+            .on_ack_packet(start + Duration::from_millis(100), 2, 1, 1)
+            .unwrap();
+        assert!(sample.bandwidth_increased);
+        assert!(sample.non_app_limited);
         assert_eq!(sampler.total_acked, 1_200);
         assert_eq!(sampler.sent_packets.len(), 511);
 
         // ACK the newest packet next to exercise the same state under extreme
         // packet reordering.  Both ends of the flight must remain resolvable.
-        sampler.on_ack_packet(start + Duration::from_millis(101), 2, 512, 1);
+        let _ = sampler.on_ack_packet(
+            start + Duration::from_millis(101),
+            2,
+            512,
+            1,
+        );
         assert_eq!(sampler.total_acked, 2_400);
         assert_eq!(sampler.sent_packets.len(), 510);
     }

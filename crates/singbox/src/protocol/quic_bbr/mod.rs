@@ -631,14 +631,16 @@ impl Controller for Bbr {
         packet_number: u64,
         _app_limited: bool,
     ) {
-        let (increased, non_app_limited) = self.max_bandwidth.on_ack_packet(
+        let sample = self.max_bandwidth.on_ack_packet(
             now,
             packet_space,
             packet_number,
             self.round_count,
         );
-        self.bandwidth_increased |= increased;
-        self.has_non_app_limited_sample |= non_app_limited;
+        if let Some(sample) = sample {
+            self.bandwidth_increased |= sample.bandwidth_increased;
+            self.has_non_app_limited_sample |= sample.non_app_limited;
+        }
     }
 
     fn on_lost_packet(
@@ -653,12 +655,14 @@ impl Controller for Bbr {
         // sing-quic removes lost/obsolete packet state from its growable
         // packet-number queue; Quinn has already retired the packet when this
         // callback runs, so it cannot produce a later bandwidth sample.
-        self.max_bandwidth
+        let _ = self
+            .max_bandwidth
             .retire_packet(packet_space, packet_number);
     }
 
     fn on_discarded_packet(&mut self, packet_space: u8, packet_number: u64) {
-        self.max_bandwidth
+        let _ = self
+            .max_bandwidth
             .retire_packet(packet_space, packet_number);
     }
 
