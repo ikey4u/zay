@@ -359,9 +359,8 @@ impl NativeTunWorker {
 
 /// Start an elevated zay-owned worker that hosts the Rust singbox library.
 ///
-/// This is the Unix privilege boundary for native TUN.  The worker receives
-/// only the generated configuration and runtime directory; it does not
-/// materialize or execute the embedded Go sing-box binary.
+/// This is the Unix privilege boundary for native TUN. The worker receives
+/// only the generated configuration and runtime directory.
 #[cfg(unix)]
 pub fn spawn_native_tun_worker(
     runtime_dir: &Path,

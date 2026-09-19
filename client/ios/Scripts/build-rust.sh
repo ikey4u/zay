@@ -26,7 +26,6 @@ echo "==> cargo build zay-ios (ios device / aarch64-apple-ios)"
 cargo build --manifest-path "$CRATE/Cargo.toml" --release --target aarch64-apple-ios
 
 DEVICE_LIB="$CRATE/target/aarch64-apple-ios/release/libzay_ios.a"
-cp "$DEVICE_LIB" "$OUT/libzay_ios-ios.a"
 cp "$DEVICE_LIB" "$OUT/libzay_ios.a"
 
 if [[ "${BUILD_IOS_SIM:-0}" == "1" ]]; then

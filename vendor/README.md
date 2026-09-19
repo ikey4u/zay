@@ -5,12 +5,11 @@ Pinned **commits** via gitlinks in the parent repo. There is no `branch =` in `.
 | Path | Upstream | Pinned commit |
 |------|----------|---------------|
 | `vendor/Easytier` | https://github.com/EasyTier/Easytier | `40c857748fc6ad5b07e2dafee10b516dc9df21cd` |
-| `vendor/sing-box` | https://github.com/sagernet/sing-box | `115dbec2cd676e13e9dba7f6e23b932608ace339` (v1.14.0-beta.5) |
 
 Verify:
 
 ```bash
-git ls-tree HEAD vendor/Easytier vendor/sing-box
+git ls-tree HEAD vendor/Easytier
 # 160000 commit <sha>  vendor/...
 ```
 
@@ -25,7 +24,7 @@ git submodule update --init --recursive
 Do **not** run `git submodule update --remote` for release builds. Bump a pin only after testing desktop + iOS:
 
 ```bash
-cd vendor/Easytier   # or vendor/sing-box
+cd vendor/Easytier
 git fetch
 git checkout --detach <commit>
 cd ../..
@@ -52,5 +51,10 @@ repository as a separate, intentional change.
 
 ## Consumers
 
-- **Desktop (`zay`)**: Cargo `easytier` / `easytier-core` path deps; `build.rs` compiles `sing-box` from `vendor/sing-box` (requires Go).
-- **iOS (`client/ios`)**: Rust path dep on EasyTier; `Scripts/build-libbox.sh` builds Libbox from `vendor/sing-box`.
+- **Desktop (`zay`)**: Cargo `easytier` / `easytier-core` path dependencies.
+- **iOS (`client/ios`)**: Rust path dependency on EasyTier.
+
+The native sing-box implementation lives in `crates/singbox`. The pinned Go
+source used only for migration reference and opt-in differential tests is kept
+outside the shipped dependency tree under `inner/sing-box`; it is not built or
+embedded by zay.
