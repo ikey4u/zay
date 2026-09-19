@@ -15,12 +15,12 @@ zay_packages=(
 
 case "${1:-}" in
     "")
-        exec cargo-fmt \
+        exec cargo +nightly fmt \
             --manifest-path "${zay_workspace_root}/Cargo.toml" \
             "${zay_packages[@]}"
         ;;
     --check)
-        exec cargo-fmt \
+        exec cargo +nightly fmt \
             --manifest-path "${zay_workspace_root}/Cargo.toml" \
             "${zay_packages[@]}" \
             --check
