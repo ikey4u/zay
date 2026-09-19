@@ -117,7 +117,7 @@ pub unsafe extern "C" fn zay_ios_build_singbox_json(
             .map_err(|e| format!("invalid singbox input json: {e}"))?;
         tracing::info!(
             "building sing-box config for proxy_url={}",
-            input.proxy_url
+            proxy_url::redacted_proxy_url(&input.proxy_url)
         );
         let json = singbox_config::build_singbox_json(&input)
             .map_err(|e| format!("{e:#}"))?;

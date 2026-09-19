@@ -15,7 +15,7 @@ use std::{
     path::Path,
 };
 
-use crate::proxy_url::{OutboundSpec, resolve_proxy};
+use crate::proxy_url::{OutboundSpec, redacted_proxy_url, resolve_proxy};
 use crate::rules::{self, CustomRuleSet, RulesStage};
 
 #[derive(Debug, Clone, Deserialize)]
@@ -76,7 +76,10 @@ pub fn build_singbox_json(input: &SingboxInput) -> Result<String> {
     let prefer_cache = input.prefer_cache.unwrap_or(false);
     let resolved = resolve_proxy(&input.proxy_url, working_dir, prefer_cache)
         .with_context(|| {
-        format!("resolving proxy_url {}", input.proxy_url)
+        format!(
+            "resolving proxy_url {}",
+            redacted_proxy_url(&input.proxy_url)
+        )
     })?;
     let mut bypass_networks = BTreeSet::new();
     let mut bypass_domains = BTreeSet::new();

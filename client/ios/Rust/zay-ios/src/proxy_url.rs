@@ -6,7 +6,7 @@
 //! - `ss://…` (Shadowsocks SIP002 / legacy)
 //! - Clash / Mihomo subscription (`http://` / `https://` returning YAML with `proxies:`)
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
 use serde_json::{Value, json};
 use serde_yaml::Value as YamlValue;
@@ -21,6 +21,45 @@ pub enum OutboundSpec {
 
 const SUB_CACHE_BODY: &str = "subscription-cache.yaml";
 const SUB_CACHE_META: &str = "subscription-cache.url";
+
+/// Render a proxy/subscription endpoint without credentials or token-bearing
+/// path/query data. This value is safe to persist in user diagnostics.
+pub(crate) fn redacted_proxy_url(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return "(empty)".into();
+    }
+    let Ok(parsed) = url::Url::parse(trimmed) else {
+        return format!("<redacted len={}>", trimmed.len());
+    };
+    let scheme = parsed.scheme();
+    if !matches!(
+        scheme,
+        "http"
+            | "https"
+            | "socks"
+            | "socks5"
+            | "tcp"
+            | "udp"
+            | "vless"
+            | "trojan"
+    ) {
+        return format!("{scheme}:<redacted>");
+    }
+    let Some(raw_host) = parsed.host_str().filter(|host| !host.is_empty())
+    else {
+        return format!("{scheme}:<redacted>");
+    };
+    let host = if raw_host.contains(':') {
+        format!("[{raw_host}]")
+    } else {
+        raw_host.to_owned()
+    };
+    match parsed.port() {
+        Some(port) => format!("{scheme}://{host}:{port}"),
+        None => format!("{scheme}://{host}"),
+    }
+}
 
 /// Resolve proxy URL into outbounds. When `cache_dir` is set, successful Clash
 /// subscription fetches are saved and reused if a later fetch fails (common when
@@ -161,7 +200,8 @@ fn fetch_clash_subscription(
     const SUBSCRIPTION_UA: &str =
         concat!("clash-verge/v", env!("CARGO_PKG_VERSION"));
 
-    tracing::info!("fetching Clash subscription: {url}");
+    let redacted_url = redacted_proxy_url(url);
+    tracing::info!("fetching Clash subscription: {redacted_url}");
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(8))
         .timeout_read(Duration::from_secs(20))
@@ -171,7 +211,9 @@ fn fetch_clash_subscription(
         .set("User-Agent", SUBSCRIPTION_UA)
         .set("Accept", "*/*")
         .call()
-        .context("HTTP GET subscription")?
+        .map_err(|_| {
+            anyhow!("HTTP GET subscription via {redacted_url} failed")
+        })?
         .into_string()
         .context("read subscription body")?;
     if looks_like_invalid_subscription_body(&body) {
@@ -737,4 +779,28 @@ fn urlencoding_decode(s: &str) -> String {
     urlencoding::decode(s)
         .map(|c| c.into_owned())
         .unwrap_or_else(|_| s.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::redacted_proxy_url;
+
+    #[test]
+    fn diagnostic_url_redaction_drops_all_credentials_and_resource_data() {
+        assert_eq!(
+            redacted_proxy_url(
+                "https://user:pass@example.com:8443/sub/token?token=secret#node"
+            ),
+            "https://example.com:8443"
+        );
+        assert_eq!(
+            redacted_proxy_url("vless://uuid@example.com:443?pbk=secret"),
+            "vless://example.com:443"
+        );
+        assert_eq!(redacted_proxy_url("ss://opaque-secret"), "ss:<redacted>");
+        assert_eq!(
+            redacted_proxy_url("not a URL or credential"),
+            "<redacted len=23>"
+        );
+    }
 }

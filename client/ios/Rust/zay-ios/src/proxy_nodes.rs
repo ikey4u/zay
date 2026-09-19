@@ -3,12 +3,14 @@
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
-use crate::proxy_url::{OutboundSpec, resolve_proxy};
+use crate::proxy_url::{OutboundSpec, redacted_proxy_url, resolve_proxy};
 
 /// JSON: `{ "mode": "single"|"many", "nodes": [...], "has_auto": bool }`
 pub fn list_proxy_nodes_json(proxy_url: &str) -> Result<String> {
-    let resolved = resolve_proxy(proxy_url, None, false)
-        .with_context(|| format!("resolving proxy_url {proxy_url}"))?;
+    let resolved =
+        resolve_proxy(proxy_url, None, false).with_context(|| {
+            format!("resolving proxy_url {}", redacted_proxy_url(proxy_url))
+        })?;
 
     let (mode, nodes, has_auto) = match resolved {
         OutboundSpec::Single(ob) => {

@@ -357,8 +357,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         clearLastFailure()
 
         ZayLog.info("bootstrap begin meshEnabled=\(config.meshEnabled)")
-        ZayLog.info("proxy=\(config.proxyURL)")
-        ZayLog.info("relay=\(config.relayURL)")
+        ZayLog.info("proxy=\(ZayLog.redactedEndpoint(config.proxyURL))")
+        ZayLog.info("relay=\(ZayLog.redactedEndpoint(config.relayURL))")
         ZayLog.info("network=\(config.networkName)")
         ZayLog.info("socks_port=\(config.socksPort)")
         ZayLog.info("selected_proxy=\(config.resolvedSelectedProxyTag)")
@@ -375,8 +375,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             ZayLog.info("Mesh disabled — proxy-only tunnel")
         }
 
-        let base = AppGroup.containerURL?.path ?? NSTemporaryDirectory()
-        let workingURL = AppGroup.workingDirectory ?? URL(fileURLWithPath: base)
+        let workingURL = AppGroup.workingDirectory
+            ?? URL(fileURLWithPath: NSTemporaryDirectory())
         let working = workingURL.path
         try? FileManager.default.createDirectory(atPath: working, withIntermediateDirectories: true)
 
@@ -399,7 +399,6 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             preferCache: false
         )
         ZayLog.info("sing-box stage0 config \(singboxJSON.count) bytes")
-        ZayLog.debug("sing-box json:\n\(singboxJSON)")
 
         let url = workingURL.appendingPathComponent("config.json")
         try? singboxJSON.write(to: url, atomically: true, encoding: .utf8)
@@ -447,7 +446,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 return []
             }
             let toml = try ZayNative.buildEasytierTOML(config: config)
-            ZayLog.debug("easytier toml:\n\(toml)")
+            ZayLog.debug("easytier config generated (\(toml.count) bytes)")
             try ZayNative.startMesh(toml: toml)
             guard meshAllowed else {
                 ZayNative.stopMesh()
@@ -607,13 +606,13 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     private func writeLastFailure(_ message: String) {
-        guard let url = AppGroup.containerURL?.appendingPathComponent("last-failure.txt") else { return }
+        guard let url = AppGroup.lastFailureFileURL else { return }
         let body = "[\(ISO8601DateFormatter().string(from: Date()))] \(message)\n"
         try? body.write(to: url, atomically: true, encoding: .utf8)
     }
 
     private func clearLastFailure() {
-        guard let url = AppGroup.containerURL?.appendingPathComponent("last-failure.txt") else { return }
+        guard let url = AppGroup.lastFailureFileURL else { return }
         try? FileManager.default.removeItem(at: url)
     }
 }

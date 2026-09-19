@@ -18,6 +18,7 @@ enum ZayLog {
 
     static func setupNativeLogPath() {
         let url = ensureLogFileURL()
+        removeLegacySensitiveLogIfNeeded(at: url)
         resolvedLogURL = url
         if let path = url?.path {
             path.withCString { zay_ios_set_log_path($0) }
@@ -29,6 +30,28 @@ enum ZayLog {
     static func warn(_ message: String) { write(level: "warn", message) }
     static func error(_ message: String) { write(level: "error", message) }
     static func debug(_ message: String) { write(level: "debug", message, console: false) }
+
+    /// Preserve enough endpoint shape for diagnostics without persisting
+    /// credentials, subscription tokens, paths, query items, or fragments.
+    static func redactedEndpoint(_ value: String) -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "(empty)" }
+        guard let components = URLComponents(string: trimmed),
+              let scheme = components.scheme?.lowercased()
+        else { return "<redacted len=\(trimmed.count)>" }
+        let hostSafeSchemes: Set<String> = [
+            "http", "https", "socks", "socks5", "tcp", "udp", "vless", "trojan",
+        ]
+        guard hostSafeSchemes.contains(scheme) else {
+            return "\(scheme):<redacted>"
+        }
+        guard let rawHost = components.host, !rawHost.isEmpty else {
+            return "\(scheme):<redacted>"
+        }
+        let host = rawHost.contains(":") ? "[\(rawHost)]" : rawHost
+        let port = components.port.map { ":\($0)" } ?? ""
+        return "\(scheme)://\(host)\(port)"
+    }
 
     static func write(level: String, _ message: String, console: Bool = true, rustMirror: Bool = true) {
         let line = "[\(timestamp())] [\(level)] \(message)"
@@ -127,7 +150,7 @@ enum ZayLog {
 
     static func readLastFailure() -> String? {
         let urls: [URL] = [
-            AppGroup.containerURL?.appendingPathComponent("last-failure.txt"),
+            AppGroup.lastFailureFileURL,
             FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?
                 .appendingPathComponent("zay-last-failure.txt"),
         ].compactMap { $0 }
@@ -149,6 +172,8 @@ enum ZayLog {
         parts.append("logFile: \(ensureLogFileURL()?.path ?? "(nil)")")
         if let cfg = config ?? Optional(ZayRuntimeConfig.load()) {
             var redacted = cfg
+            redacted.proxyURL = redactedEndpoint(cfg.proxyURL)
+            redacted.relayURL = redactedEndpoint(cfg.relayURL)
             if !redacted.networkSecret.isEmpty {
                 redacted.networkSecret = "<redacted len=\(cfg.networkSecret.count)>"
             }
@@ -160,7 +185,7 @@ enum ZayLog {
         if let fail = readLastFailure() {
             parts.append("lastFailure: \(fail)")
         }
-        if let ifaceURL = AppGroup.containerURL?.appendingPathComponent("iface-debug.txt"),
+        if let ifaceURL = AppGroup.interfaceDebugFileURL,
            let iface = try? String(contentsOf: ifaceURL, encoding: .utf8),
            !iface.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             parts.append("=== iface-debug ===")
@@ -215,8 +240,7 @@ enum ZayLog {
     /// Prefer App Group; fall back to Documents so the app always has a writable log.
     @discardableResult
     static func ensureLogFileURL() -> URL? {
-        if let groupURL = AppGroup.containerURL {
-            let url = groupURL.appendingPathComponent("logs/zay-ios.log")
+        if let url = AppGroup.logFileURL {
             AppGroup.ensureLogDirectory()
             if resolvedLogURL != url {
                 resolvedLogURL = url
@@ -257,6 +281,36 @@ enum ZayLog {
         let bak = url.deletingLastPathComponent().appendingPathComponent("zay-ios.log.1")
         try? FileManager.default.removeItem(at: bak)
         try? FileManager.default.moveItem(at: url, to: bak)
+    }
+
+    /// Builds before endpoint redaction could persist subscription URLs and
+    /// serialized runtime configuration. Remove only those legacy diagnostic
+    /// files once; runtime configuration, rules, and subscription cache stay
+    /// untouched.
+    private static func removeLegacySensitiveLogIfNeeded(at url: URL?) {
+        guard let url, let marker = AppGroup.diagnosticRedactionMarkerURL else {
+            return
+        }
+        let fileManager = FileManager.default
+        guard !fileManager.fileExists(atPath: marker.path) else { return }
+
+        let backup = url.deletingLastPathComponent()
+            .appendingPathComponent("zay-ios.log.1")
+        try? fileManager.removeItem(at: url)
+        try? fileManager.removeItem(at: backup)
+
+        // The pre-migration root log is no longer read by current builds but
+        // may contain the same sensitive diagnostics.
+        if let legacyDirectory = AppGroup.containerURL?
+            .appendingPathComponent("logs", isDirectory: true) {
+            try? fileManager.removeItem(
+                at: legacyDirectory.appendingPathComponent("zay-ios.log")
+            )
+            try? fileManager.removeItem(
+                at: legacyDirectory.appendingPathComponent("zay-ios.log.1")
+            )
+        }
+        _ = fileManager.createFile(atPath: marker.path, contents: Data())
     }
 
     private static func timestamp() -> String {
