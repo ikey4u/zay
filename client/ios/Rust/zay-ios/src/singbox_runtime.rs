@@ -255,6 +255,11 @@ mod platform {
 
     enum Command {
         Stop(mpsc::SyncSender<Result<(), String>>),
+        Preflight {
+            config: String,
+            base_path: PathBuf,
+            response: mpsc::SyncSender<Result<(), String>>,
+        },
         Groups(mpsc::SyncSender<String>),
         Select {
             group: String,
@@ -274,6 +279,23 @@ mod platform {
     }
 
     static ENGINE: Mutex<Option<EngineHandle>> = Mutex::new(None);
+
+    fn configure_runtime(
+        config: &str,
+        base_path: &Path,
+        provider: Arc<CallbackTunProvider>,
+    ) -> Result<Runtime, String> {
+        let options: Options = serde_json::from_str(config)
+            .map_err(|error| format!("decode sing-box config: {error}"))?;
+        Runtime::from_options_in_with_mobile_platform(
+            options,
+            base_path,
+            None,
+            provider,
+            Arc::new(IosNetworkProvider),
+        )
+        .map_err(|error| format!("configure sing-box runtime: {error}"))
+    }
 
     fn groups_json(runtime: &Runtime, tags: &[String]) -> String {
         let groups = tags
@@ -354,31 +376,17 @@ mod platform {
                         }
                     };
                 tokio_runtime.block_on(async move {
-                    let options: Options = match serde_json::from_str(&config) {
-                        Ok(options) => options,
+                    let mut runtime = match configure_runtime(
+                        &config,
+                        Path::new(&base_path),
+                        provider.clone(),
+                    ) {
+                        Ok(runtime) => runtime,
                         Err(error) => {
-                            let _ = startup_tx.send(Err(format!(
-                                "decode sing-box config: {error}"
-                            )));
+                            let _ = startup_tx.send(Err(error));
                             return;
                         }
                     };
-                    let mut runtime =
-                        match Runtime::from_options_in_with_mobile_platform(
-                            options,
-                            Path::new(&base_path),
-                            None,
-                            provider,
-                            Arc::new(IosNetworkProvider),
-                        ) {
-                            Ok(runtime) => runtime,
-                            Err(error) => {
-                                let _ = startup_tx.send(Err(format!(
-                                    "configure sing-box runtime: {error}"
-                                )));
-                                return;
-                            }
-                        };
                     if let Err(error) = runtime.start().await {
                         let _ = startup_tx.send(Err(format!(
                             "start sing-box runtime: {error}"
@@ -399,6 +407,19 @@ mod platform {
                                     .map_err(|e| e.to_string());
                                 let _ = response.send(result);
                                 return;
+                            }
+                            Command::Preflight {
+                                config,
+                                base_path,
+                                response,
+                            } => {
+                                let result = configure_runtime(
+                                    &config,
+                                    Path::new(&base_path),
+                                    provider.clone(),
+                                )
+                                .map(drop);
+                                let _ = response.send(result);
                             }
                             Command::Groups(response) => {
                                 let _ = response
@@ -465,13 +486,25 @@ mod platform {
         config: String,
         base_path: PathBuf,
     ) -> Result<(), String> {
-        let callback = {
+        let (callback, commands) = {
             let guard = ENGINE.lock().map_err(|_| "sing-box state poisoned")?;
-            guard
-                .as_ref()
-                .map(|engine| engine.callback)
-                .ok_or("sing-box runtime is not running")?
+            let engine =
+                guard.as_ref().ok_or("sing-box runtime is not running")?;
+            (engine.callback, engine.commands.clone())
         };
+        let (response_tx, response_rx) = mpsc::sync_channel(1);
+        commands
+            .send(Command::Preflight {
+                config: config.clone(),
+                base_path: base_path.clone(),
+                response: response_tx,
+            })
+            .map_err(|_| {
+                "sing-box runtime thread stopped unexpectedly".to_owned()
+            })?;
+        response_rx
+            .recv_timeout(CONTROL_TIMEOUT)
+            .map_err(|_| "timed out validating sing-box reload".to_owned())??;
         start(config, base_path, callback)
     }
 
