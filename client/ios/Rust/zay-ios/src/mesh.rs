@@ -1,6 +1,10 @@
 //! EasyTier lifecycle for iOS (userspace mesh + SOCKS portal).
 
-use std::sync::Arc;
+use std::{
+    collections::BTreeSet,
+    net::{IpAddr, ToSocketAddrs as _},
+    sync::Arc,
+};
 
 use anyhow::{Context, Result};
 use easytier::common::config::{
@@ -528,11 +532,134 @@ pub fn guess_mesh_cidr_from_vip(vip: &str) -> Option<String> {
 }
 
 pub fn parse_relay_host(relay_url: &str) -> Option<String> {
+    normalized_relay_host(&parse_relay_url(relay_url)?)
+}
+
+/// Build relay bypass targets before the packet tunnel installs its default
+/// routes.
+///
+/// EasyTier accepts host names, while sing-box's `route_exclude_address`
+/// requires concrete IP prefixes. Keep the domain as a route rule and add every
+/// current real A/AAAA result as a host route. During a hot enable the active
+/// tunnel resolver can return one of our FakeIP ranges; those addresses must
+/// never be excluded from the TUN or the synthetic destination would leak to
+/// the physical network.
+pub fn relay_bypass_targets(relay_url: &str) -> Result<Vec<String>> {
+    let url = parse_relay_url(relay_url)
+        .with_context(|| format!("invalid relay URL: {relay_url}"))?;
+    let host = normalized_relay_host(&url)
+        .filter(|host| !host.is_empty())
+        .with_context(|| format!("relay URL has no host: {relay_url}"))?;
+    if let Ok(address) = host.parse::<IpAddr>() {
+        return Ok(vec![address.to_string()]);
+    }
+
+    let mut targets = BTreeSet::from([host.clone()]);
+    let port = url.port().unwrap_or(0);
+    match (host.as_str(), port).to_socket_addrs() {
+        Ok(addresses) => {
+            targets.extend(
+                addresses
+                    .map(|address| address.ip())
+                    .filter(|address| !is_tunnel_fake_ip(*address))
+                    .map(|address| address.to_string()),
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                "resolve relay host {host} before tunnel route install: {error}; using domain bypass"
+            );
+        }
+    }
+    Ok(targets.into_iter().collect())
+}
+
+fn parse_relay_url(relay_url: &str) -> Option<url::Url> {
     let raw = if relay_url.contains("://") {
         relay_url.to_string()
     } else {
         format!("tcp://{relay_url}")
     };
-    let u = url::Url::parse(&raw).ok()?;
-    u.host_str().map(|h| h.to_string())
+    url::Url::parse(&raw).ok()
+}
+
+fn normalized_relay_host(url: &url::Url) -> Option<String> {
+    match url.host()? {
+        url::Host::Domain(host) => Some(host.to_owned()),
+        url::Host::Ipv4(address) => Some(address.to_string()),
+        url::Host::Ipv6(address) => Some(address.to_string()),
+    }
+}
+
+fn is_tunnel_fake_ip(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(address) => {
+            let bits = u32::from(address);
+            bits & 0xfffe_0000
+                == u32::from(std::net::Ipv4Addr::new(198, 18, 0, 0))
+        }
+        IpAddr::V6(address) => {
+            let bits = u128::from(address);
+            bits >> 110
+                == u128::from(std::net::Ipv6Addr::from([
+                    0xfc, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                ])) >> 110
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::IpAddr;
+
+    use super::{is_tunnel_fake_ip, parse_relay_host, relay_bypass_targets};
+
+    #[test]
+    fn parses_and_resolves_literal_relay_addresses() {
+        assert_eq!(
+            parse_relay_host("tcp://192.0.2.10:11010").as_deref(),
+            Some("192.0.2.10")
+        );
+        assert_eq!(
+            relay_bypass_targets("192.0.2.10:11010").unwrap(),
+            ["192.0.2.10"]
+        );
+        assert_eq!(
+            relay_bypass_targets("tcp://[2001:db8::10]:11010").unwrap(),
+            ["2001:db8::10"]
+        );
+    }
+
+    #[test]
+    fn resolves_all_unique_localhost_addresses() {
+        let targets = relay_bypass_targets("tcp://localhost:11010").unwrap();
+        assert!(targets.iter().any(|target| target == "localhost"));
+        let mut sorted = targets.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(targets.len(), sorted.len());
+    }
+
+    #[test]
+    fn identifies_configured_v4_and_v6_fake_ip_ranges() {
+        for address in
+            ["198.18.0.1", "198.19.255.254", "fc00::1", "fc00:3fff::1"]
+        {
+            assert!(is_tunnel_fake_ip(address.parse::<IpAddr>().unwrap()));
+        }
+        for address in [
+            "198.17.255.255",
+            "198.20.0.1",
+            "fc00:4000::1",
+            "2001:db8::1",
+        ] {
+            assert!(!is_tunnel_fake_ip(address.parse::<IpAddr>().unwrap()));
+        }
+    }
+
+    #[test]
+    fn rejects_relay_without_a_host() {
+        let error = relay_bypass_targets("tcp://").unwrap_err().to_string();
+        assert!(error.contains("relay URL"), "{error}");
+    }
 }

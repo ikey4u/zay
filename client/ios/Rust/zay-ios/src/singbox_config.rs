@@ -9,7 +9,11 @@
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use serde_json::json;
-use std::path::Path;
+use std::{
+    collections::BTreeSet,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    path::Path,
+};
 
 use crate::proxy_url::{OutboundSpec, resolve_proxy};
 use crate::rules::{self, CustomRuleSet, RulesStage};
@@ -20,7 +24,7 @@ pub struct SingboxInput {
     pub proxy_url: String,
     /// Mesh IPv4 CIDR(s) routed to EasyTier SOCKS.
     pub mesh_cidrs: Vec<String>,
-    /// Relay / peer public IPs that must bypass the TUN (direct).
+    /// Relay / peer public IPs, CIDRs, or domains that must bypass the TUN.
     pub bypass_ips: Vec<String>,
     /// EasyTier local SOCKS portal port.
     pub socks_port: Option<u16>,
@@ -74,6 +78,22 @@ pub fn build_singbox_json(input: &SingboxInput) -> Result<String> {
         .with_context(|| {
         format!("resolving proxy_url {}", input.proxy_url)
     })?;
+    let mut bypass_networks = BTreeSet::new();
+    let mut bypass_domains = BTreeSet::new();
+    for target in input
+        .bypass_ips
+        .iter()
+        .filter(|target| !target.trim().is_empty())
+    {
+        match normalize_bypass_target(target)? {
+            BypassTarget::Network(network) => {
+                bypass_networks.insert(network);
+            }
+            BypassTarget::Domain(domain) => {
+                bypass_domains.insert(domain);
+            }
+        }
+    }
 
     let mut outbounds = vec![json!({ "type": "direct", "tag": "direct" })];
 
@@ -181,18 +201,15 @@ pub fn build_singbox_json(input: &SingboxInput) -> Result<String> {
     }
 
     // Bypass relay / peer public IPs so EasyTier control plane is not hairpinned.
-    for ip in &input.bypass_ips {
-        let ip = ip.trim();
-        if ip.is_empty() {
-            continue;
-        }
-        let cidr = if ip.contains('/') {
-            ip.to_string()
-        } else {
-            format!("{ip}/32")
-        };
+    for cidr in &bypass_networks {
         route_rules.push(json!({
             "ip_cidr": [cidr],
+            "outbound": "direct"
+        }));
+    }
+    if !bypass_domains.is_empty() {
+        route_rules.push(json!({
+            "domain": bypass_domains,
             "outbound": "direct"
         }));
     }
@@ -236,17 +253,7 @@ pub fn build_singbox_json(input: &SingboxInput) -> Result<String> {
         "8.8.8.8/32".to_string(),
         "114.114.114.114/32".to_string(),
     ];
-    for ip in &input.bypass_ips {
-        let ip = ip.trim();
-        if ip.is_empty() {
-            continue;
-        }
-        if ip.contains('/') {
-            exclude.push(ip.to_string());
-        } else {
-            exclude.push(format!("{ip}/32"));
-        }
-    }
+    exclude.extend(bypass_networks);
 
     // Blacklist: final → direct once rule-sets loaded (same as desktop).
     let route_final = if has_rules {
@@ -351,4 +358,150 @@ pub fn build_singbox_json(input: &SingboxInput) -> Result<String> {
     });
 
     serde_json::to_string_pretty(&doc).context("serialize sing-box json")
+}
+
+fn normalize_bypass_network(value: &str) -> Result<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        bail!("bypass address is empty");
+    }
+    let (address, prefix) = match value.split_once('/') {
+        Some((address, prefix)) => {
+            let address = address
+                .parse::<IpAddr>()
+                .with_context(|| format!("invalid bypass address {value}"))?;
+            let prefix = prefix
+                .parse::<u8>()
+                .with_context(|| format!("invalid bypass prefix {value}"))?;
+            (address, prefix)
+        }
+        None => {
+            let address = value
+                .parse::<IpAddr>()
+                .with_context(|| format!("invalid bypass address {value}"))?;
+            let prefix = if address.is_ipv4() { 32 } else { 128 };
+            (address, prefix)
+        }
+    };
+
+    match address {
+        IpAddr::V4(address) if prefix <= 32 => {
+            let bits = u32::from(address);
+            let mask = if prefix == 0 {
+                0
+            } else {
+                u32::MAX << (32 - prefix)
+            };
+            Ok(format!("{}/{prefix}", Ipv4Addr::from(bits & mask)))
+        }
+        IpAddr::V6(address) if prefix <= 128 => {
+            let bits = u128::from(address);
+            let mask = if prefix == 0 {
+                0
+            } else {
+                u128::MAX << (128 - prefix)
+            };
+            Ok(format!("{}/{prefix}", Ipv6Addr::from(bits & mask)))
+        }
+        IpAddr::V4(_) => bail!("IPv4 bypass prefix exceeds 32: {value}"),
+        IpAddr::V6(_) => bail!("IPv6 bypass prefix exceeds 128: {value}"),
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum BypassTarget {
+    Network(String),
+    Domain(String),
+}
+
+fn normalize_bypass_target(value: &str) -> Result<BypassTarget> {
+    let value = value.trim();
+    if value.is_empty() {
+        bail!("bypass target is empty");
+    }
+    if value.contains('/') || value.parse::<IpAddr>().is_ok() {
+        return normalize_bypass_network(value).map(BypassTarget::Network);
+    }
+    match url::Host::parse(value)
+        .with_context(|| format!("invalid bypass domain {value}"))?
+    {
+        url::Host::Domain(domain) if !domain.is_empty() => {
+            Ok(BypassTarget::Domain(domain))
+        }
+        url::Host::Ipv4(address) => {
+            Ok(BypassTarget::Network(format!("{address}/32")))
+        }
+        url::Host::Ipv6(address) => {
+            Ok(BypassTarget::Network(format!("{address}/128")))
+        }
+        url::Host::Domain(_) => bail!("bypass domain is empty"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        BypassTarget, SingboxInput, build_singbox_json,
+        normalize_bypass_network, normalize_bypass_target,
+    };
+
+    #[test]
+    fn normalizes_ipv4_and_ipv6_bypass_routes() {
+        assert_eq!(
+            normalize_bypass_network("192.0.2.10").unwrap(),
+            "192.0.2.10/32"
+        );
+        assert_eq!(
+            normalize_bypass_network("2001:db8::10").unwrap(),
+            "2001:db8::10/128"
+        );
+        assert_eq!(
+            normalize_bypass_network("192.0.2.129/24").unwrap(),
+            "192.0.2.0/24"
+        );
+        assert_eq!(
+            normalize_bypass_network("2001:db8::1234/64").unwrap(),
+            "2001:db8::/64"
+        );
+    }
+
+    #[test]
+    fn accepts_domains_but_rejects_invalid_prefixes() {
+        assert_eq!(
+            normalize_bypass_target("Relay.Example.COM").unwrap(),
+            BypassTarget::Domain("relay.example.com".into())
+        );
+        assert!(normalize_bypass_network("192.0.2.1/33").is_err());
+        assert!(normalize_bypass_network("2001:db8::1/129").is_err());
+        assert!(normalize_bypass_network(" ").is_err());
+    }
+
+    #[test]
+    fn emits_domain_rules_but_only_ip_route_exclusions() {
+        let input: SingboxInput = serde_json::from_value(serde_json::json!({
+            "proxy_url": "socks5://127.0.0.1:1080",
+            "mesh_cidrs": [],
+            "bypass_ips": [
+                "relay.example.com",
+                "192.0.2.10",
+                "2001:db8::10"
+            ]
+        }))
+        .unwrap();
+        let document: serde_json::Value =
+            serde_json::from_str(&build_singbox_json(&input).unwrap()).unwrap();
+        let rules = document["route"]["rules"].as_array().unwrap();
+        assert!(rules.iter().any(|rule| {
+            rule["domain"].as_array().is_some_and(|domains| {
+                domains.iter().any(|domain| domain == "relay.example.com")
+            }) && rule["outbound"] == "direct"
+        }));
+
+        let exclusions = document["inbounds"][0]["route_exclude_address"]
+            .as_array()
+            .unwrap();
+        assert!(exclusions.iter().any(|value| value == "192.0.2.10/32"));
+        assert!(exclusions.iter().any(|value| value == "2001:db8::10/128"));
+        assert!(!exclusions.iter().any(|value| value == "relay.example.com"));
+    }
 }

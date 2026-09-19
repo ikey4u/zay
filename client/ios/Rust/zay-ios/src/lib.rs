@@ -388,3 +388,34 @@ pub unsafe extern "C" fn zay_ios_relay_host(
         }
     }
 }
+
+/// Return the domain and every current non-FakeIP A/AAAA address for an
+/// EasyTier relay URL.
+///
+/// The returned JSON array is used to construct concrete sing-box bypass
+/// prefixes before the Network Extension installs its default routes.
+///
+/// # Safety
+///
+/// `relay_url` must point to a valid NUL-terminated string for this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zay_ios_relay_bypass_targets(
+    relay_url: *const c_char,
+) -> *mut c_char {
+    clear_error();
+    let result = (|| {
+        let url = unsafe { cstr(relay_url) }?;
+        let targets =
+            mesh::relay_bypass_targets(url).map_err(|e| format!("{e:#}"))?;
+        let json = serde_json::to_string(&targets)
+            .map_err(|e| format!("serialize relay bypass targets: {e}"))?;
+        to_cstring(json)
+    })();
+    match result {
+        Ok(value) => value,
+        Err(error) => {
+            set_error(error);
+            std::ptr::null_mut()
+        }
+    }
+}

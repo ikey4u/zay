@@ -440,6 +440,29 @@ enum ZayNative {
         takeCString(relayURL.withCString { zay_ios_relay_host($0) })
     }
 
+    static func relayBypassTargets(from relayURL: String) throws -> [String] {
+        guard let json = takeCString(
+            relayURL.withCString { zay_ios_relay_bypass_targets($0) }
+        ) else {
+            throw NSError(
+                domain: "zay",
+                code: 5,
+                userInfo: [NSLocalizedDescriptionKey: lastError()]
+            )
+        }
+        do {
+            return try JSONDecoder().decode([String].self, from: Data(json.utf8))
+        } catch {
+            throw NSError(
+                domain: "zay",
+                code: 6,
+                userInfo: [
+                    NSLocalizedDescriptionKey: "Invalid relay bypass response: \(error.localizedDescription)"
+                ]
+            )
+        }
+    }
+
     static func startSingbox(
         json: String,
         basePath: String,

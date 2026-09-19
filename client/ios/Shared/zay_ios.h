@@ -24,6 +24,7 @@ int32_t zay_ios_stop_mesh(void);
 char *zay_ios_mesh_status_json(void);
 int32_t zay_ios_set_tun_fd(const char *inst_name, int32_t fd);
 char *zay_ios_relay_host(const char *relay_url);
+char *zay_ios_relay_bypass_targets(const char *relay_url);
 
 /** Configure the Network Extension and return a dup(2)'d, Rust-owned utun FD. */
 typedef int32_t (*ZayIosOpenTunCallback)(void *context, const char *request_json);

@@ -130,9 +130,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                         meshRunning = false
                     }
                     let cidrs = try startMeshRuntime(config: config, updateRoutes: false)
-                    if let host = ZayNative.relayHost(from: config.relayURL),
-                       !lastBypassIPs.contains(host) {
-                        lastBypassIPs.append(host)
+                    for target in try ZayNative.relayBypassTargets(from: config.relayURL)
+                    where !lastBypassIPs.contains(target) {
+                        lastBypassIPs.append(target)
                     }
                     lastMeshCIDRs = cidrs
                     try reloadSingboxMeshRoutes()
@@ -358,10 +358,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
         if config.meshEnabled {
             meshCIDRs = try startMeshRuntime(config: config, updateRoutes: false)
-            if let host = ZayNative.relayHost(from: config.relayURL) {
-                bypass.append(host)
-                ZayLog.info("bypass relay host: \(host)")
-            }
+            bypass = try ZayNative.relayBypassTargets(from: config.relayURL)
+            ZayLog.info("bypass relay targets: \(bypass)")
         } else {
             ZayLog.info("Mesh disabled — proxy-only tunnel")
         }
