@@ -38,7 +38,7 @@ easytier = { path = "../../../../vendor/Easytier/easytier", default-features = f
     "management-rpc",
 ] }
 easytier-core = { path = "../../../../vendor/Easytier/easytier-core", default-features = false }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
 async-trait = "0.1"
 log = "0.4"
 

@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <TargetConditionals.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -26,7 +27,7 @@ int32_t zay_ios_set_tun_fd(const char *inst_name, int32_t fd);
 char *zay_ios_relay_host(const char *relay_url);
 char *zay_ios_relay_bypass_targets(const char *relay_url);
 
-/** Configure the Network Extension and return a dup(2)'d, Rust-owned utun FD. */
+/** Configure the Network Extension and return a Rust-owned packet descriptor. */
 typedef int32_t (*ZayIosOpenTunCallback)(void *context, const char *request_json);
 
 int32_t zay_ios_start_singbox(const char *config_json,
@@ -38,6 +39,10 @@ int32_t zay_ios_stop_singbox(void);
 char *zay_ios_singbox_groups_json(void);
 int32_t zay_ios_select_singbox_outbound(const char *group, const char *outbound);
 int32_t zay_ios_url_test_singbox(const char *group);
+#if TARGET_OS_SIMULATOR
+/** Simulator-only end-to-end L3/DNS/SOCKS probe. */
+char *zay_ios_run_simulator_tun_probe(uint16_t socks_port);
+#endif
 
 #ifdef __cplusplus
 }

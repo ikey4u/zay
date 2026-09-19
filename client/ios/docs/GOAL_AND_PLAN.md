@@ -19,18 +19,25 @@ Detailed runtime logs are written to the App Group so the UI can tail / copy / e
 
 Desktop zay runs **two kernel TUNs** (EasyTier edge + sing-box) and lets the OS route table split mesh CIDRs vs the rest.
 
-iOS allows **one** `NEPacketTunnelProvider` and one packet flow. The Rust runtime receives a duplicated **real utun FD** from its narrow C callback; a userspace `socketpair` cannot replace it.
+iOS allows **one** `NEPacketTunnelProvider` and one packet flow. The extension uses
+the public `NEPacketTunnelFlow.readPackets` / `writePackets` API and bridges one
+bare IP packet per datagram through a Unix `SOCK_DGRAM` socketpair. The Rust
+runtime owns a duplicated engine-side descriptor; no private KVC access to the
+underlying utun socket is required.
 
 ## Architecture (SOCKS bridge)
 
 ```
-NEPacketTunnelFlow / utun  ──►  Rust singbox library (owns duplicated TUN FD)
-                                    │
-                                    ├─ default / public  → proxy outbound
-                                    └─ mesh CIDR         → socks://127.0.0.1:18080
-                                                              │
-                                                              ▼
-                                                         EasyTier (no_tun + SOCKS portal)
+NEPacketTunnelFlow
+       │ public readPackets/writePackets
+       ▼
+PacketDispatcher ── SOCK_DGRAM ──► Rust singbox library
+                                         │
+                                         ├─ default/public → proxy outbound
+                                         └─ mesh CIDR      → socks://127.0.0.1:18080
+                                                                  │
+                                                                  ▼
+                                                        EasyTier (no_tun + SOCKS portal)
 ```
 
 | Component | Role |
@@ -64,5 +71,6 @@ Set Development Team; run on a **physical device**.
 
 1. App persists `ZayRuntimeConfig` → App Group
 2. Extension: start EasyTier (SOCKS) → Rust singbox start
-3. `openTun`: apply NE settings → transfer a `dup(2)` of the real utun FD to Rust
+3. `openTun`: apply NE settings → start the public packet-flow bridge → transfer
+   a `dup(2)` of the engine-side datagram descriptor to Rust
 4. Stop: Rust singbox close → EasyTier stop

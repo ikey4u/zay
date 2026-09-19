@@ -9,6 +9,8 @@ mod proxy_nodes;
 mod proxy_url;
 mod rule_convert;
 mod rules;
+#[cfg(all(target_os = "ios", target_abi = "sim"))]
+mod simulator_probe;
 mod singbox_config;
 mod singbox_runtime;
 
@@ -20,6 +22,8 @@ use crate::mesh_config::MeshInput;
 use crate::singbox_config::SingboxInput;
 
 pub use error::{zay_ios_free_string, zay_ios_last_error};
+#[cfg(all(target_os = "ios", target_abi = "sim"))]
+pub use simulator_probe::zay_ios_run_simulator_tun_probe;
 pub use singbox_runtime::{
     ZayIosOpenTunCallback, zay_ios_reload_singbox,
     zay_ios_select_singbox_outbound, zay_ios_singbox_groups_json,

@@ -905,6 +905,14 @@ pub(crate) async fn create_tun_device(
         if !interface_name.is_empty() {
             device_config.tun_name(&interface_name);
         }
+        #[cfg(target_os = "ios")]
+        device_config.platform_config(|platform| {
+            // NEPacketTunnelFlow's public readPackets/writePackets API carries
+            // bare IP packets. The iOS host bridges it through a SOCK_DGRAM
+            // socketpair, so the private utun 4-byte packet-info prefix is not
+            // present and must not be synthesized by rust-tun.
+            platform.packet_information(false);
+        });
         #[cfg(any(target_os = "android", target_os = "ios"))]
         if let Some(raw_fd) = raw_fd {
             device_config

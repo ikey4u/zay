@@ -24,6 +24,7 @@ final class PacketDispatcher {
     private let lock = NSLock()
     private var meshRanges: [IPv4CIDR] = []
     private var running = false
+    private var closed = false
     private var meshIn: UInt64 = 0
     private var proxyIn: UInt64 = 0
     private var meshOut: UInt64 = 0
@@ -118,6 +119,11 @@ final class PacketDispatcher {
 
     func stop() {
         lock.lock()
+        guard !closed else {
+            lock.unlock()
+            return
+        }
+        closed = true
         running = false
         meshSource?.cancel()
         proxySource?.cancel()
@@ -140,8 +146,7 @@ final class PacketDispatcher {
 
     private func makeReadSource(fd: Int32, label: String, onPacket: @escaping (Data) -> Void) -> DispatchSourceRead {
         let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
-        source.setEventHandler { [weak self] in
-            guard let self else { return }
+        source.setEventHandler {
             var buffer = [UInt8](repeating: 0, count: 65535)
             while true {
                 let n = recv(fd, &buffer, buffer.count, 0)

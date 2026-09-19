@@ -646,16 +646,19 @@ private func zayOpenTunCallback(
 }
 
 /// Applies Network Extension settings requested by the Rust library and
-/// transfers a dup(2)'d utun descriptor back to Rust.
+/// transfers a dup(2)'d packet-flow bridge descriptor back to Rust.
 final class TunnelPlatformInterface {
     private weak var provider: NEPacketTunnelProvider?
     private var networkSettings: NEPacketTunnelNetworkSettings?
+    private var packetDispatcher: PacketDispatcher?
 
     init(provider: NEPacketTunnelProvider) {
         self.provider = provider
     }
 
     func reset() {
+        packetDispatcher?.stop()
+        packetDispatcher = nil
         networkSettings = nil
         provider = nil
     }
@@ -671,25 +674,29 @@ final class TunnelPlatformInterface {
                 from: Data(requestJSON.utf8)
             )
             try applyTunnelSettings(request: request, provider: provider)
-            guard let fd = provider.packetFlow.value(
-                forKeyPath: "socket.fileDescriptor"
-            ) as? Int32, fd >= 0 else {
-                throw NSError(
-                    domain: "zay",
-                    code: 41,
-                    userInfo: [NSLocalizedDescriptionKey: "Missing tunnel file descriptor"]
-                )
-            }
-            let ownedFD = Darwin.dup(fd)
+            // Use only NetworkExtension's public packetFlow API. The engine
+            // side of this datagram socketpair carries one bare IP packet per
+            // datagram; Rust configures rust-tun with packet_information=false.
+            // Mesh CIDRs are intentionally empty here because singbox itself
+            // routes them to EasyTier's local SOCKS portal.
+            packetDispatcher?.stop()
+            let dispatcher = try PacketDispatcher.create(
+                packetFlow: provider.packetFlow,
+                meshCIDRs: []
+            )
+            dispatcher.start()
+            let ownedFD = Darwin.dup(dispatcher.singboxEngineFD)
             guard ownedFD >= 0 else {
+                dispatcher.stop()
                 throw NSError(
                     domain: NSPOSIXErrorDomain,
                     code: Int(errno),
-                    userInfo: [NSLocalizedDescriptionKey: "dup(utun) failed"]
+                    userInfo: [NSLocalizedDescriptionKey: "dup(packetFlow bridge) failed"]
                 )
             }
+            packetDispatcher = dispatcher
             ZayLog.info(
-                "Rust openTun tag=\(request.tag) mtu=\(request.mtu) fd=\(ownedFD)"
+                "Rust openTun packetFlow bridge tag=\(request.tag) mtu=\(request.mtu) fd=\(ownedFD)"
             )
             return ownedFD
         } catch {

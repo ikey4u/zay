@@ -3,6 +3,7 @@ import SwiftUI
 struct HomeView: View {
     @EnvironmentObject private var configStore: ConfigStore
     @StateObject private var vpn = VPNManager.shared
+    @State private var didRunSimulatorNetworkProbe = false
 
     var body: some View {
         ZStack {
@@ -34,8 +35,33 @@ struct HomeView: View {
             .padding(.horizontal, 24)
         }
         .onAppear {
-            Task { await vpn.refreshInstallState() }
+            Task { await refreshAndMaybeStartSimulatorNetworkProbe() }
         }
+    }
+
+    @MainActor
+    private func refreshAndMaybeStartSimulatorNetworkProbe() async {
+        await vpn.refreshInstallState()
+#if targetEnvironment(simulator)
+        guard !didRunSimulatorNetworkProbe,
+              ProcessInfo.processInfo.arguments.contains("--zay-network-probe")
+        else { return }
+        didRunSimulatorNetworkProbe = true
+        ZayLog.info("simulator network probe: auto-start requested")
+        configStore.saveNow()
+        await vpn.start(config: configStore.config)
+        let result = await Task.detached(priority: .userInitiated) {
+            Result {
+                try ZayNative.runSimulatorTunProbe(socksPort: 19_080)
+            }
+        }.value
+        switch result {
+        case .success(let json):
+            ZayLog.info("simulator TUN probe passed: \(json)")
+        case .failure(let error):
+            ZayLog.error("simulator TUN probe failed: \(error.localizedDescription)")
+        }
+#endif
     }
 
     private var brand: some View {

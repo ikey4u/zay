@@ -10,6 +10,12 @@ pub mod openconnect;
 pub mod openvpn;
 pub mod openvpn_server;
 pub mod tailscale;
-pub(crate) mod tokio_smoltcp;
+/// Userspace IP stack primitives used by mobile embedding diagnostics.
+///
+/// This is public so an embedding host can exercise the exact L3 boundary
+/// without requiring a kernel TUN (for example, in iOS Simulator where the
+/// Network Extension preference service is unavailable).
+#[doc(hidden)]
+pub mod tokio_smoltcp;
 pub(crate) mod userspace_router;
 pub mod wireguard;

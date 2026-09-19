@@ -277,11 +277,11 @@ fn build_snapshot(
                     native.errors
                 )));
             }
-            add_der_certificates(
+            add_system_der_certificates(
                 &mut roots,
                 &mut apple_anchors,
                 native.certs,
-                "system store",
+                cfg!(target_vendor = "apple").then_some(MOZILLA_ROOTS),
             )?;
         }
         CertificateStoreKind::Mozilla => add_pem_source(
@@ -401,16 +401,54 @@ fn add_der_certificates(
     anchors: &mut Vec<CertificateDer<'static>>,
     certificates: Vec<CertificateDer<'static>>,
     source_name: &str,
+    strict: bool,
 ) -> Result<(), CertificateStoreError> {
-    let (accepted, rejected) =
-        roots.add_parsable_certificates(certificates.iter().cloned());
-    if accepted == 0 || rejected != 0 {
+    let mut accepted = 0;
+    let mut rejected = 0;
+    for certificate in certificates {
+        let (certificate_accepted, certificate_rejected) = roots
+            .add_parsable_certificates(std::iter::once(certificate.clone()));
+        accepted += certificate_accepted;
+        rejected += certificate_rejected;
+        if certificate_accepted != 0 {
+            anchors.push(certificate);
+        }
+    }
+    if accepted == 0 || (strict && rejected != 0) {
         return Err(CertificateStoreError::InvalidPem {
             source_name: source_name.into(),
         });
     }
-    anchors.extend(certificates);
     Ok(())
+}
+
+fn add_system_der_certificates(
+    roots: &mut RootCertStore,
+    anchors: &mut Vec<CertificateDer<'static>>,
+    certificates: Vec<CertificateDer<'static>>,
+    fallback_pem: Option<&[u8]>,
+) -> Result<(), CertificateStoreError> {
+    match add_der_certificates(
+        roots,
+        anchors,
+        certificates,
+        "system store",
+        false,
+    ) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let Some(fallback_pem) = fallback_pem else {
+                return Err(error);
+            };
+            add_pem_source(
+                roots,
+                anchors,
+                fallback_pem,
+                "included Mozilla fallback roots",
+                true,
+            )
+        }
+    }
 }
 
 fn same_directory_symlink(path: &Path) -> bool {
@@ -518,5 +556,48 @@ mod tests {
         assert!(mozilla.exclusive_anchors());
         assert!(!mozilla.root_store().unwrap().is_empty());
         assert!(!mozilla.apple_anchors().unwrap().is_empty());
+    }
+
+    #[test]
+    fn lenient_der_store_skips_bad_system_entries() {
+        let certificate =
+            generate_simple_self_signed(vec!["system-root.test".into()])
+                .unwrap();
+        let valid = CertificateDer::from(certificate.cert.der().to_vec());
+        let invalid = CertificateDer::from(vec![0xde, 0xad, 0xbe, 0xef]);
+        let mut roots = RootCertStore::empty();
+        let mut anchors = Vec::new();
+
+        add_der_certificates(
+            &mut roots,
+            &mut anchors,
+            vec![invalid, valid.clone()],
+            "system store",
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(roots.subjects().len(), 1);
+        assert_eq!(anchors.as_slice(), &[valid]);
+    }
+
+    #[test]
+    fn system_store_can_fall_back_when_platform_has_no_usable_roots() {
+        let fallback =
+            generate_simple_self_signed(vec!["fallback-root.test".into()])
+                .unwrap();
+        let mut roots = RootCertStore::empty();
+        let mut anchors = Vec::new();
+
+        add_system_der_certificates(
+            &mut roots,
+            &mut anchors,
+            vec![CertificateDer::from(vec![0xde, 0xad, 0xbe, 0xef])],
+            Some(fallback.cert.pem().as_bytes()),
+        )
+        .unwrap();
+
+        assert_eq!(roots.subjects().len(), 1);
+        assert_eq!(anchors.len(), 1);
     }
 }

@@ -82,6 +82,12 @@ rustls = { path = "crates/singbox/vendor/rustls-shadowtls" }
 quinn-proto = { path = "crates/singbox/vendor/quinn-proto-chrome" }
 h3 = { path = "crates/singbox/vendor/h3-standard-connect" }
 
+# EasyTier pins this Git dependency.  The upstream build script forwards the
+# Rust simulator triple (`aarch64-apple-ios-sim`) to Clang verbatim, but Apple
+# Clang requires its simulator spelling (`arm64-apple-ios*-simulator`).
+[patch."https://github.com/EasyTier/kcp-sys"]
+kcp-sys = { path = "crates/singbox/vendor/kcp-sys" }
+
 [profile.release.package.zay-ios]
 codegen-units = 1
 opt-level = "s"

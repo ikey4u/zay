@@ -516,4 +516,17 @@ enum ZayNative {
             throw NSError(domain: "zay", code: 61, userInfo: [NSLocalizedDescriptionKey: lastError()])
         }
     }
+
+#if targetEnvironment(simulator)
+    static func runSimulatorTunProbe(socksPort: UInt16) throws -> String {
+        guard let json = takeCString(zay_ios_run_simulator_tun_probe(socksPort)) else {
+            throw NSError(
+                domain: "zay",
+                code: 62,
+                userInfo: [NSLocalizedDescriptionKey: lastError()]
+            )
+        }
+        return json
+    }
+#endif
 }

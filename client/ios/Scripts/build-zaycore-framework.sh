@@ -23,6 +23,7 @@ xcrun --sdk iphoneos clang++ -dynamiclib \
   -isysroot "$SDK" \
   -miphoneos-version-min="$MIN" \
   -Wl,-force_load,"$LIB" \
+  -Wl,-dead_strip \
   -framework Security \
   -framework SystemConfiguration \
   -framework Network \
@@ -33,6 +34,11 @@ xcrun --sdk iphoneos clang++ -dynamiclib \
   -compatibility_version 1 \
   -current_version 1 \
   -o "$FW/ZayCore"
+
+# Rust static archives retain local symbols that are useful while linking but
+# are not needed in the distributable framework.  Keep the public C ABI while
+# removing those symbols from the shipped Mach-O.
+xcrun strip -S -x "$FW/ZayCore"
 
 cp "$ROOT/Shared/zay_ios.h" "$FW/Headers/zay_ios.h"
 cat > "$FW/Headers/ZayCore.h" <<'EOF'

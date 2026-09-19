@@ -1,5 +1,6 @@
 Zay.xcodeproj/
 DerivedData/
+build/
 Vendor/libzay_ios*.a
 Vendor/Libbox.xcframework/
 Vendor/ZayCore.framework/
