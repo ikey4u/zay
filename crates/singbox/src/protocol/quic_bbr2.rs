@@ -69,6 +69,32 @@ enum ProbePhase {
     Up,
 }
 
+/// Chromium BBRv2 keeps the maximum bandwidth from the current probe cycle
+/// and the immediately preceding cycle. Unlike BBRv1's round-windowed max
+/// filter, the buckets only rotate at the ProbeDown boundary.
+#[derive(Clone, Copy, Debug, Default)]
+struct MaxBandwidthFilter {
+    buckets: [u64; 2],
+}
+
+impl MaxBandwidthFilter {
+    fn update(&mut self, sample: u64) {
+        self.buckets[1] = self.buckets[1].max(sample);
+    }
+
+    fn advance(&mut self) {
+        if self.buckets[1] == 0 {
+            return;
+        }
+        self.buckets[0] = self.buckets[1];
+        self.buckets[1] = 0;
+    }
+
+    fn get(&self) -> u64 {
+        self.buckets[0].max(self.buckets[1])
+    }
+}
+
 /// Factory for the Naive QUIC BBRv2 controller.
 #[derive(Clone, Debug)]
 pub struct Bbr2Config {
@@ -106,6 +132,7 @@ impl ControllerFactory for Bbr2Config {
 pub struct Bbr2 {
     config: Arc<Bbr2Config>,
     sampler: BandwidthEstimation,
+    max_bandwidth: MaxBandwidthFilter,
     ack_aggregation: AckAggregationState,
     rng: StdRng,
     mode: Mode,
@@ -149,6 +176,7 @@ pub struct Bbr2 {
     phase_rounds: u8,
     rounds_since_probe: u8,
     probe_wait: Duration,
+    probe_cycle_advanced_max_bandwidth: bool,
     last_cycle_probed_too_high: bool,
     last_cycle_stopped_risky_probe: bool,
     probe_rtt_done_stamp: Option<Instant>,
@@ -164,6 +192,7 @@ impl Bbr2 {
         Self {
             config,
             sampler: BandwidthEstimation::new(false),
+            max_bandwidth: MaxBandwidthFilter::default(),
             rng: StdRng::from_entropy(),
             mode: Mode::Startup,
             mtu,
@@ -203,6 +232,7 @@ impl Bbr2 {
             phase_rounds: 0,
             rounds_since_probe: 0,
             probe_wait: PROBE_BASE_DURATION,
+            probe_cycle_advanced_max_bandwidth: false,
             last_cycle_probed_too_high: false,
             last_cycle_stopped_risky_probe: false,
             probe_rtt_done_stamp: None,
@@ -214,8 +244,8 @@ impl Bbr2 {
 
     fn bandwidth_estimate(&self) -> u64 {
         match self.bandwidth_lo {
-            Some(lower) => self.sampler.get_estimate().min(lower),
-            None => self.sampler.get_estimate(),
+            Some(lower) => self.max_bandwidth.get().min(lower),
+            None => self.max_bandwidth.get(),
         }
     }
 
@@ -274,7 +304,7 @@ impl Bbr2 {
         if self.full_bandwidth_reached || app_limited {
             return false;
         }
-        let estimate = self.sampler.get_estimate();
+        let estimate = self.max_bandwidth.get();
         if self.full_bw == 0
             || estimate >= self.full_bw.saturating_mul_float(FULL_BW_THRESHOLD)
         {
@@ -309,7 +339,7 @@ impl Bbr2 {
         }
         let bandwidth_lo = self
             .bandwidth_lo
-            .unwrap_or_else(|| self.sampler.get_estimate());
+            .unwrap_or_else(|| self.max_bandwidth.get());
         self.bandwidth_lo = Some(
             self.bandwidth_latest
                 .max(bandwidth_lo.saturating_mul_float(1.0 - BETA))
@@ -376,12 +406,20 @@ impl Bbr2 {
     }
 
     fn set_probe_phase(&mut self, phase: ProbePhase, now: Instant) {
+        if matches!(self.mode, Mode::ProbeBw(ProbePhase::Down))
+            && phase != ProbePhase::Down
+            && !self.probe_cycle_advanced_max_bandwidth
+        {
+            self.max_bandwidth.advance();
+            self.probe_cycle_advanced_max_bandwidth = true;
+        }
         self.mode = Mode::ProbeBw(phase);
         self.phase_started = now;
         self.phase_rounds = 0;
         match phase {
             ProbePhase::Down => {
                 self.cycle_started = now;
+                self.probe_cycle_advanced_max_bandwidth = false;
                 self.rounds_since_probe =
                     self.rng.gen_range(0..PROBE_MAX_RANDOM_ROUNDS);
                 self.probe_wait = PROBE_BASE_DURATION
@@ -467,6 +505,15 @@ impl Bbr2 {
                 }
             }
             Mode::ProbeBw(ProbePhase::Down) => {
+                if self.round_started && self.phase_rounds == 1 {
+                    let sample_is_app_limited = self
+                        .last_send_state
+                        .is_none_or(|state| state.app_limited);
+                    if !sample_is_app_limited {
+                        self.max_bandwidth.advance();
+                        self.probe_cycle_advanced_max_bandwidth = true;
+                    }
+                }
                 let restart_risky_probe = self.round_started
                     && self.phase_rounds == 1
                     && self.last_cycle_stopped_risky_probe
@@ -537,7 +584,7 @@ impl Bbr2 {
 
     fn probe_rtt_target(&self) -> u64 {
         bandwidth_bytes(
-            self.sampler.get_estimate(),
+            self.bandwidth_estimate(),
             self.min_rtt,
             PROBE_RTT_BDP_FRACTION,
         )
@@ -622,7 +669,7 @@ impl Bbr2 {
                     newly_acked,
                     now,
                     self.round_count,
-                    self.sampler.get_estimate(),
+                    self.max_bandwidth.get(),
                     self.bandwidth_increased,
                 );
             self.sampler.end_acks(excess_acked == 0);
@@ -738,7 +785,12 @@ impl Controller for Bbr2 {
             packet_number,
             self.round_count,
         ) {
-            self.bandwidth_increased |= sample.bandwidth_increased;
+            let bandwidth_increased =
+                sample.bandwidth > self.max_bandwidth.get();
+            if sample.non_app_limited || bandwidth_increased {
+                self.max_bandwidth.update(sample.bandwidth);
+            }
+            self.bandwidth_increased |= bandwidth_increased;
             self.bandwidth_latest = self.bandwidth_latest.max(sample.bandwidth);
             self.inflight_latest = self.inflight_latest.max(sample.inflight);
             self.record_send_state(
@@ -1034,17 +1086,17 @@ mod tests {
         let start = Instant::now();
         let mut controller = controller(start);
         controller.min_rtt = Duration::from_millis(100);
-        controller
-            .sampler
-            .on_sent_packet(start, 6_000, 2, 1, 0, false);
-        let _ = controller.sampler.on_ack_packet(
+        controller.on_sent_packet(start, 6_000, 2, 1, 0, false);
+        controller.on_ack_packet(
             start + Duration::from_millis(100),
+            start,
+            6_000,
             2,
             1,
-            1,
+            false,
         );
 
-        let bandwidth = controller.sampler.get_estimate();
+        let bandwidth = controller.max_bandwidth.get();
         assert_eq!(bandwidth, 60_000);
         assert_eq!(
             controller.ack_aggregation.update_ack_aggregation_bytes(
@@ -1211,17 +1263,87 @@ mod tests {
     }
 
     #[test]
+    fn max_bandwidth_filter_rotates_at_probe_down_boundary() {
+        let mut filter = MaxBandwidthFilter::default();
+        filter.update(120_000);
+        filter.update(100_000);
+        assert_eq!(filter.get(), 120_000);
+
+        filter.advance();
+        filter.update(80_000);
+        assert_eq!(filter.get(), 120_000);
+
+        filter.advance();
+        assert_eq!(filter.get(), 80_000);
+        filter.advance();
+        assert_eq!(filter.get(), 80_000, "an empty bucket must not rotate");
+    }
+
+    #[test]
+    fn probe_down_advances_max_bandwidth_once_per_cycle() {
+        let start = Instant::now();
+        let mut controller = controller(start);
+        controller.min_rtt = Duration::from_millis(100);
+        controller.max_bandwidth.update(120_000);
+        controller.set_probe_phase(ProbePhase::Down, start);
+        controller.probe_wait = Duration::from_secs(10);
+        controller.rounds_since_probe = 0;
+        controller.round_started = true;
+        controller.last_send_state = Some(SendTimeState {
+            app_limited: false,
+            total_acked: 0,
+            bytes_in_flight: 24_000,
+        });
+
+        controller.update_mode(
+            start + Duration::from_millis(1),
+            24_000,
+            24_000,
+            false,
+        );
+        assert_eq!(controller.mode, Mode::ProbeBw(ProbePhase::Down));
+        assert!(controller.probe_cycle_advanced_max_bandwidth);
+        assert_eq!(controller.max_bandwidth.buckets, [120_000, 0]);
+
+        controller.max_bandwidth.update(80_000);
+        controller.set_probe_phase(ProbePhase::Cruise, start);
+        assert_eq!(
+            controller.max_bandwidth.buckets,
+            [120_000, 80_000],
+            "leaving ProbeDown after its first full round must not rotate twice",
+        );
+
+        controller.set_probe_phase(ProbePhase::Down, start);
+        controller.probe_wait = Duration::from_secs(10);
+        controller.rounds_since_probe = 0;
+        controller.round_started = true;
+        controller.last_send_state = Some(SendTimeState {
+            app_limited: false,
+            total_acked: 0,
+            bytes_in_flight: 24_000,
+        });
+        controller.update_mode(
+            start + Duration::from_millis(1),
+            24_000,
+            24_000,
+            false,
+        );
+        assert_eq!(controller.max_bandwidth.buckets, [80_000, 0]);
+        assert_eq!(controller.bandwidth_estimate(), 80_000);
+    }
+
+    #[test]
     fn reno_coexistence_and_time_boundaries_start_refill() {
         let start = Instant::now();
         let mut controller = controller(start);
-        controller
-            .sampler
-            .on_sent_packet(start, 14_600, 2, 1, 0, false);
-        let _ = controller.sampler.on_ack_packet(
+        controller.on_sent_packet(start, 14_600, 2, 1, 0, false);
+        controller.on_ack_packet(
             start + Duration::from_millis(100),
+            start,
+            14_600,
             2,
             1,
-            1,
+            false,
         );
         assert_eq!(controller.reno_coexistence_probe_rounds(), 10);
 
