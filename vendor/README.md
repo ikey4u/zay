@@ -33,6 +33,23 @@ git add vendor/Easytier   # records the new gitlink SHA
 # update the table above
 ```
 
+## Formatting
+
+Use the repository formatter instead of invoking a vendored workspace directly:
+
+```bash
+./scripts/fmt.sh
+./scripts/fmt.sh --check
+```
+
+The script explicitly formats only the `zay`, `singbox`, and `zay-ios`
+packages. Do not use `cargo fmt --all`: cargo-fmt defines that flag to include
+local path dependencies even when they are listed in `workspace.exclude`, so
+it will rewrite `vendor/Easytier`. Repository automation is instructed through
+the root `AGENTS.md` to use the safe script and to leave submodules untouched.
+Formatting a vendored dependency should be done only in its upstream
+repository as a separate, intentional change.
+
 ## Consumers
 
 - **Desktop (`zay`)**: Cargo `easytier` / `easytier-core` path deps; `build.rs` compiles `sing-box` from `vendor/sing-box` (requires Go).
