@@ -219,7 +219,10 @@ struct RuleSetDetailView: View {
     }
 
     /// Parse sing-box local source rule-set JSON into display lines.
-    private static func parseSourceFile(at path: URL, displayCap: Int) -> LoadResult {
+    nonisolated private static func parseSourceFile(
+        at path: URL,
+        displayCap: Int
+    ) -> LoadResult {
         guard FileManager.default.fileExists(atPath: path.path) else {
             return .fail("文件不存在：\(path.lastPathComponent)\n请先启动一次隧道以解压内置规则。")
         }
@@ -246,7 +249,7 @@ struct RuleSetDetailView: View {
         return .ok(lines: lines, total: total, subtitle: path.path)
     }
 
-    private static func flattenRule(_ item: Any) -> [String] {
+    nonisolated private static func flattenRule(_ item: Any) -> [String] {
         if let s = item as? String {
             return [s]
         }

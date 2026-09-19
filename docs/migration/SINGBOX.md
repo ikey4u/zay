@@ -12,6 +12,7 @@
 | --- | --- |
 | 总体 | **99.9%**；本轮继续收敛 Naive/QUIC BBRv2 的逐事件模型，完成度不因内部算法校准或单纯增加回归而上调 |
 | 交付 | `crates/singbox` 为可嵌入 Rust library；binary/CLI 由 zay 实现；上游 CLI、daemon/service 与 experimental 应用控制 API 不计入分母 |
+| 首版试用 | **已可交付 iOS 真机试用**：`zay-ios` 直接静态链接 `crates/singbox`，重新生成 259 MiB `libzay_ios.a` 与 `ZayCore.framework`；Zay App + ZayTunnel 已用 iPhoneOS 26.2 device SDK、iOS 16 deployment target 完成无签名整包构建。仓库构建/工程链接路径不依赖 sing-box binary 或 Libbox；剩余签名、安装、真实 utun 收发、切网/睡眠/jetsam 由首轮真机反馈验证 |
 | 最新实现 | Naive 的基础 Cronet `B2ON` 已从混用可选实验参数改为 Chromium 默认模型：ProbeDown pacing 0.91、2% loss 阈值、1× ACK aggregation threshold、关闭未启用的 A0 过估计规避；`extra_acked` 仅在 full-bandwidth 后进入 cwnd 目标。ProbeBW Down/Refill/Cruise/Up 分别应用正确的 `inflight_hi`/headroom，默认 ProbeUp 忽略 upper bound 且不再执行实验性动态斜率；loss upper bound 取 send-time physical inflight 与 70% target，不误纳入 max-delivered。探测周期使用微秒级随机 wait、随机初始 Reno round，并在上一周期 risky 但未高损时首轮快速 Refill；queue 门槛改用固定 TCP MSS |
 | 最新验证 | 1639 项 unit 注册：1630 通过、9 默认忽略；50 项 crate 外 public-library integration 通过，稳定默认基线 **1680 项零失败**；9 个固定 Go/macOS 现场项均已实际执行通过，合计 **1689 项零失败**；25 项 BBR 定向回归、Rust client→固定 Go sing-box 的 2 MiB 有损 H3 BBRv2 复验、全特性全目标严格 Clippy 与格式检查通过 |
 | 仍需外部验证 | 三桌面特权 TUN/系统 VPN/路由与休眠恢复、Linux kTLS 内核矩阵、Windows Schannel/WinDivert/IP Helper 真机、Android/iOS 真机切网、外部 C Tor、多项生产服务与公网长时/高损耗互通 |
@@ -23,7 +24,7 @@
 
 | 追踪项 | 当前值 |
 | --- | --- |
-| 最后更新 | 2026-09-13 |
+| 最后更新 | 2026-09-19 |
 | 交付形态 | `crates/singbox` 只提供可嵌入 Rust library；最终 binary/CLI 由 zay 实现 |
 | 完成分母 | 配置与 Runtime、DNS/路由、代理协议、TLS/transport、TUN/平台网络及 zay library 集成 |
 | 明确排除 | 上游独立 CLI、daemon、顶层 service、experimental 应用控制 API 的完整兼容 |
@@ -946,6 +947,10 @@ sing-box 使用 GPL-3.0-or-later。直接移植及其派生实现放在独立 `s
 - raw stream TLS 建立 backend-neutral library 握手入口，迁移 TCP/DoT/DoH、HTTP、Naive、OpenConnect、cloudflared origin、URLTest 与通用 TLS dialer，并以后端无关结果保留 ALPN、peer chain、exporter、timeout、fragment/spoof 和 socket metadata。成熟 OpenSSL/Tokio-OpenSSL 后端完成显式 TLS 1.0/1.1 实际协商、Go 兼容 legacy cipher、curve/ALPN、独占 custom/Runtime roots、client certificate、NTP verify-time、insecure 与 SPKI/fingerprint pin；QUIC/Vision/ShadowTLS 不兼容组合 fail-closed。完整测试为 1468 项 crate unit（1461 通过、7 忽略）及 43 项 public-library integration，默认自动执行 1504 项、零失败；原生、Windows 与 iOS 全目标严格 Clippy 通过。TLS 工作流升至 97%，总体精确加权估算升至 98.7%。
 - macOS raw Apple system TLS 接入 backend-neutral stream：复制现有 TCP fd 后由 Network.framework 完成原生 TLS，Rust 保留原始 stream 生命周期并以可取消 blocking task 提供异步 I/O；支持版本、SNI/ALPN、系统/独占自定义/Runtime 根、insecure、SPKI pin、NTP verify-time、peer chain 与握手超时，不支持的 system-engine 选项构造期拒绝。真实 TCP+TLS 回环验证 custom root、错误 hostname 下 pin、ALPN、证书链与双向数据。完整测试为 1470 项 crate unit（1463 通过、7 忽略）及 43 项 public-library integration，默认自动执行 1506 项、零失败；原生、Windows 与 iOS 全目标严格 Clippy 通过。TLS 工作流升至 98%，总体精确加权估算升至 98.8%。
 - Windows raw Schannel system TLS 接入同一 backend-neutral library stream：成熟 `schannel` 0.1.29 承担 SSPI handshake、记录加解密、版本、SNI 与 ALPN，薄 Tokio readiness bridge 保留原始 `Stream` 的 timeout/cancel/read/write/shutdown 和 socket metadata；握手后按固定 Go 独立验证系统/独占自定义/动态 Runtime roots、DNS/IP hostname、NTP verify-time、insecure、SPKI/OpenConnect fingerprint pin，并暴露完整 peer chain。Windows 条件真实回环测试已编入；Windows GNU 整库 `check` 和全目标严格 Clippy 通过，`test --no-run` 在完成 Rust 编译后仅因当前 MinGW sysroot 缺少既有 `-lsqlite3` 链接库未生成测试程序，故仍保留 Windows 真机执行门槛。TLS 工作流升至 99%，总体精确加权估算升至 98.9%。
+
+### 2026-09-19
+
+- 为尽快取得真实使用反馈冻结首个 iOS 可试用基线，不把后续 BBRv2 两轮 filter 实验混入交付。当前源码重新完成 `aarch64-apple-ios` release 编译，产出 259 MiB `libzay_ios.a` 并链接 `ZayCore.framework`；随后以 iPhoneOS 26.2 device SDK、iOS 16 deployment target、关闭 code signing 构建 `Zay` scheme，Zay App、ZayTunnel Packet Tunnel 与内嵌 ZayCore 全部链接成功（`BUILD SUCCEEDED`）。Xcode 工程仅引用 ZayCore，Swift 的 start/reload/stop、selector、URLTest 与 utun FD callback 均进入 Rust singbox library，不依赖 sing-box binary/Libbox。真机签名安装与网络场景验证留给首轮用户试用反馈。
 
 ### 2026-09-13
 
