@@ -3,7 +3,7 @@ import SwiftUI
 struct HomeView: View {
     @EnvironmentObject private var configStore: ConfigStore
     @StateObject private var vpn = VPNManager.shared
-    @State private var didRunSimulatorNetworkProbe = false
+    @State private var didRunLaunchProbe = false
 
     var body: some View {
         ZStack {
@@ -35,18 +35,18 @@ struct HomeView: View {
             .padding(.horizontal, 24)
         }
         .onAppear {
-            Task { await refreshAndMaybeStartSimulatorNetworkProbe() }
+            Task { await refreshAndMaybeStartLaunchProbe() }
         }
     }
 
     @MainActor
-    private func refreshAndMaybeStartSimulatorNetworkProbe() async {
+    private func refreshAndMaybeStartLaunchProbe() async {
         await vpn.refreshInstallState()
 #if targetEnvironment(simulator)
-        guard !didRunSimulatorNetworkProbe,
+        guard !didRunLaunchProbe,
               ProcessInfo.processInfo.arguments.contains("--zay-network-probe")
         else { return }
-        didRunSimulatorNetworkProbe = true
+        didRunLaunchProbe = true
         ZayLog.info("simulator network probe: auto-start requested")
         configStore.saveNow()
         await vpn.start(config: configStore.config)
@@ -60,6 +60,63 @@ struct HomeView: View {
             ZayLog.info("simulator TUN probe passed: \(json)")
         case .failure(let error):
             ZayLog.error("simulator TUN probe failed: \(error.localizedDescription)")
+        }
+#else
+        // Explicit QA-only launch hook. Normal device launches never issue this request.
+        guard !didRunLaunchProbe,
+              ProcessInfo.processInfo.arguments.contains("--zay-device-network-probe")
+        else { return }
+        didRunLaunchProbe = true
+        guard vpn.status == .connected else {
+            ZayLog.error("device network probe failed: tunnel is not connected")
+            return
+        }
+        ZayLog.info("device network probe: HTTPS request started")
+        do {
+            guard var components = URLComponents(string: "https://example.com/") else {
+                throw NSError(
+                    domain: "zay.device-probe",
+                    code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: "failed to construct probe URL"]
+                )
+            }
+            components.queryItems = [
+                URLQueryItem(name: "zayprobe", value: UUID().uuidString),
+            ]
+            guard let url = components.url else {
+                throw NSError(
+                    domain: "zay.device-probe",
+                    code: 3,
+                    userInfo: [NSLocalizedDescriptionKey: "failed to encode probe URL"]
+                )
+            }
+            var request = URLRequest(url: url)
+            request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+            request.timeoutInterval = 15
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+            configuration.timeoutIntervalForRequest = 15
+            let session = URLSession(configuration: configuration)
+            defer { session.invalidateAndCancel() }
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse,
+                  http.statusCode == 200,
+                  String(decoding: data, as: UTF8.self).contains("Example Domain")
+            else {
+                throw NSError(
+                    domain: "zay.device-probe",
+                    code: 1,
+                    userInfo: [
+                        NSLocalizedDescriptionKey:
+                            "unexpected HTTPS response (bytes=\(data.count))",
+                    ]
+                )
+            }
+            ZayLog.info(
+                "device network probe passed: status=\(http.statusCode) bytes=\(data.count)"
+            )
+        } catch {
+            ZayLog.error("device network probe failed: \(error.localizedDescription)")
         }
 #endif
     }
