@@ -7,7 +7,7 @@ use std::{
     pin::Pin,
     sync::{
         Arc,
-        atomic::{AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
     },
     task::{Context, Poll},
     time::{Duration, Instant},
@@ -22,8 +22,9 @@ use quinn::{
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf},
     sync::Mutex,
-    task::JoinHandle,
+    task::{JoinHandle, JoinSet},
 };
+use tokio_util::task::AbortOnDropHandle;
 use uuid::Uuid;
 
 use crate::{
@@ -811,9 +812,20 @@ impl Drop for TuicPacketConnection {
     }
 }
 
+enum ServerUniEvent {
+    Authenticated(String),
+    Udp(ServerUdpEvent),
+    Fatal(io::Error),
+}
+
 pub struct ServerSession {
     connection: Connection,
     pub user: String,
+    tcp_events:
+        Mutex<tokio::sync::mpsc::UnboundedReceiver<(TuicStream, SocksAddr)>>,
+    uni_events: Mutex<tokio::sync::mpsc::UnboundedReceiver<ServerUniEvent>>,
+    tcp_dispatcher: AbortOnDropHandle<()>,
+    uni_dispatcher: AbortOnDropHandle<()>,
 }
 
 impl ServerSession {
@@ -822,51 +834,86 @@ impl ServerSession {
         users: &HashMap<Uuid, (String, String)>,
         auth_timeout: Duration,
     ) -> io::Result<Self> {
-        let mut stream = tokio::time::timeout(
+        let (event_sender, mut event_receiver) =
+            tokio::sync::mpsc::unbounded_channel();
+        let (tcp_sender, tcp_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let authenticated = Arc::new(AtomicBool::new(false));
+        let (auth_sender, auth_receiver) = tokio::sync::watch::channel(false);
+        let dispatcher_connection = connection.clone();
+        let dispatcher_users = Arc::new(users.clone());
+        let dispatcher_authenticated = authenticated.clone();
+        let dispatcher_auth_sender = auth_sender.clone();
+        let uni_dispatcher = AbortOnDropHandle::new(tokio::spawn(async move {
+            dispatch_server_uni_streams(
+                dispatcher_connection,
+                dispatcher_users,
+                dispatcher_authenticated,
+                dispatcher_auth_sender,
+                event_sender,
+            )
+            .await;
+        }));
+        let dispatcher_connection = connection.clone();
+        let tcp_dispatcher = AbortOnDropHandle::new(tokio::spawn(async move {
+            dispatch_server_bi_streams(
+                dispatcher_connection,
+                auth_receiver,
+                tcp_sender,
+            )
+            .await;
+        }));
+        let event = match tokio::time::timeout(
             if auth_timeout.is_zero() {
                 Duration::from_secs(3)
             } else {
                 auth_timeout
             },
-            connection.accept_uni(),
+            event_receiver.recv(),
         )
         .await
-        .map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::TimedOut,
-                "TUIC authentication timed out",
-            )
-        })?
-        .map_err(io::Error::other)?;
-        let request = stream
-            .read_to_end(AUTHENTICATE_LENGTH)
-            .await
-            .map_err(io::Error::other)?;
-        if request.len() != AUTHENTICATE_LENGTH
-            || request[..2] != [VERSION, COMMAND_AUTHENTICATE]
         {
-            return Err(invalid("invalid TUIC authentication command"));
+            Ok(event) => event,
+            Err(_) => {
+                connection.close(0_u32.into(), b"");
+                tcp_dispatcher.abort();
+                uni_dispatcher.abort();
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "TUIC authentication timed out",
+                ));
+            }
+        };
+        match event {
+            Some(ServerUniEvent::Authenticated(user)) => Ok(Self {
+                connection,
+                user,
+                tcp_events: Mutex::new(tcp_receiver),
+                uni_events: Mutex::new(event_receiver),
+                tcp_dispatcher,
+                uni_dispatcher,
+            }),
+            Some(ServerUniEvent::Fatal(error)) => {
+                connection.close(0_u32.into(), b"");
+                tcp_dispatcher.abort();
+                uni_dispatcher.abort();
+                Err(error)
+            }
+            Some(ServerUniEvent::Udp(_)) => {
+                connection.close(0_u32.into(), b"");
+                tcp_dispatcher.abort();
+                uni_dispatcher.abort();
+                Err(invalid("TUIC data arrived before authentication"))
+            }
+            None => {
+                connection.close(0_u32.into(), b"");
+                tcp_dispatcher.abort();
+                uni_dispatcher.abort();
+                Err(io::Error::new(
+                    io::ErrorKind::ConnectionAborted,
+                    "TUIC authentication dispatcher stopped",
+                ))
+            }
         }
-        let uuid = Uuid::from_slice(&request[2..18])
-            .map_err(|_| invalid("invalid TUIC authentication UUID"))?;
-        let (user, password) = users.get(&uuid).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::PermissionDenied, "unknown TUIC user")
-        })?;
-        let expected = encode_authenticate(uuid, &connection, password)?;
-        let different = expected[18..]
-            .iter()
-            .zip(&request[18..])
-            .fold(0_u8, |value, (left, right)| value | (left ^ right));
-        if different != 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "TUIC authentication token mismatch",
-            ));
-        }
-        Ok(Self {
-            connection,
-            user: user.clone(),
-        })
     }
 
     pub fn connection(&self) -> &Connection {
@@ -874,45 +921,36 @@ impl ServerSession {
     }
 
     pub async fn accept_tcp(&self) -> io::Result<(TuicStream, SocksAddr)> {
-        let (send, mut recv) = self
-            .connection
-            .accept_bi()
-            .await
-            .map_err(io::Error::other)?;
-        let mut command = [0_u8; 2];
-        recv.read_exact(&mut command)
-            .await
-            .map_err(io::Error::other)?;
-        if command != [VERSION, COMMAND_CONNECT] {
-            return Err(invalid("invalid TUIC connect command"));
-        }
-        let destination = read_address(&mut recv)
-            .await?
-            .ok_or_else(|| invalid("empty TUIC connect destination"))?;
-        Ok((TuicStream { send, recv }, destination))
+        self.tcp_events.lock().await.recv().await.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::ConnectionAborted,
+                "TUIC bidirectional stream dispatcher stopped",
+            )
+        })
     }
 
     pub async fn read_udp(&self) -> io::Result<ServerUdpEvent> {
-        let data = tokio::select! {
+        let mut uni_events = self.uni_events.lock().await;
+        tokio::select! {
             result = self.connection.read_datagram() => {
                 let data = result.map_err(io::Error::other)?;
-                (data.to_vec(), false)
+                if data.as_ref() == [VERSION, COMMAND_HEARTBEAT] {
+                    return Ok(ServerUdpEvent::Heartbeat);
+                }
+                Ok(ServerUdpEvent::Packet(UdpMessage::decode(&data)?, false))
             }
-            result = self.connection.accept_uni() => {
-                let mut stream = result.map_err(io::Error::other)?;
-                let data = stream.read_to_end(MAX_UDP_SIZE + 300).await.map_err(io::Error::other)?;
-                (data, true)
+            event = uni_events.recv() => match event {
+                Some(ServerUniEvent::Udp(event)) => Ok(event),
+                Some(ServerUniEvent::Fatal(error)) => Err(error),
+                Some(ServerUniEvent::Authenticated(_)) => {
+                    Err(invalid("multiple TUIC authentication requests"))
+                }
+                None => Err(io::Error::new(
+                    io::ErrorKind::ConnectionAborted,
+                    "TUIC unidirectional stream dispatcher stopped",
+                )),
             }
-        };
-        if data.0 == [VERSION, COMMAND_HEARTBEAT] {
-            return Ok(ServerUdpEvent::Heartbeat);
         }
-        if data.0.len() == 4 && data.0[..2] == [VERSION, COMMAND_DISSOCIATE] {
-            return Ok(ServerUdpEvent::Dissociate(u16::from_be_bytes([
-                data.0[2], data.0[3],
-            ])));
-        }
-        Ok(ServerUdpEvent::Packet(UdpMessage::decode(&data.0)?, data.1))
     }
 
     pub fn send_heartbeat(&self) -> io::Result<()> {
@@ -951,6 +989,241 @@ impl ServerSession {
                 .map_err(io::Error::other)?;
         }
         Ok(())
+    }
+}
+
+impl Drop for ServerSession {
+    fn drop(&mut self) {
+        self.tcp_dispatcher.abort();
+        self.uni_dispatcher.abort();
+    }
+}
+
+async fn dispatch_server_uni_streams(
+    connection: Connection,
+    users: Arc<HashMap<Uuid, (String, String)>>,
+    authenticated: Arc<AtomicBool>,
+    auth_sender: tokio::sync::watch::Sender<bool>,
+    event_sender: tokio::sync::mpsc::UnboundedSender<ServerUniEvent>,
+) {
+    let mut handlers = JoinSet::new();
+    loop {
+        tokio::select! {
+            _ = event_sender.closed() => {
+                connection.close(0_u32.into(), b"");
+                break;
+            }
+            stream = connection.accept_uni() => {
+                let stream = match stream {
+                    Ok(stream) => stream,
+                    Err(error) => {
+                        let _ = event_sender.send(ServerUniEvent::Fatal(
+                            io::Error::other(error),
+                        ));
+                        break;
+                    }
+                };
+                handlers.spawn(handle_server_uni_stream(
+                    stream,
+                    connection.clone(),
+                    users.clone(),
+                    authenticated.clone(),
+                    auth_sender.clone(),
+                    event_sender.clone(),
+                ));
+            }
+            result = handlers.join_next(), if !handlers.is_empty() => {
+                let result = match result {
+                    Some(Ok(result)) => result,
+                    Some(Err(error)) => Err(io::Error::other(error)),
+                    None => continue,
+                };
+                if let Err(error) = result {
+                    let _ = event_sender.send(ServerUniEvent::Fatal(error));
+                    connection.close(0_u32.into(), b"");
+                    break;
+                }
+            }
+        }
+    }
+    handlers.abort_all();
+}
+
+async fn dispatch_server_bi_streams(
+    connection: Connection,
+    authenticated: tokio::sync::watch::Receiver<bool>,
+    event_sender: tokio::sync::mpsc::UnboundedSender<(TuicStream, SocksAddr)>,
+) {
+    let mut handlers = JoinSet::new();
+    loop {
+        tokio::select! {
+            _ = event_sender.closed() => break,
+            stream = connection.accept_bi() => {
+                let (send, recv) = match stream {
+                    Ok(stream) => stream,
+                    Err(_) => break,
+                };
+                handlers.spawn(handle_server_bi_stream(
+                    send,
+                    recv,
+                    connection.clone(),
+                    authenticated.clone(),
+                    event_sender.clone(),
+                ));
+            }
+            _ = handlers.join_next(), if !handlers.is_empty() => {}
+        }
+    }
+    handlers.abort_all();
+}
+
+async fn handle_server_bi_stream(
+    mut send: SendStream,
+    mut recv: RecvStream,
+    connection: Connection,
+    authenticated: tokio::sync::watch::Receiver<bool>,
+    event_sender: tokio::sync::mpsc::UnboundedSender<(TuicStream, SocksAddr)>,
+) {
+    let result = async {
+        let mut command = [0_u8; 2];
+        recv.read_exact(&mut command)
+            .await
+            .map_err(io::Error::other)?;
+        if command != [VERSION, COMMAND_CONNECT] {
+            return Err(invalid("invalid TUIC connect command"));
+        }
+        let destination = read_address(&mut recv)
+            .await?
+            .ok_or_else(|| invalid("empty TUIC connect destination"))?;
+        wait_for_server_auth(authenticated, &connection).await?;
+        Ok(destination)
+    }
+    .await;
+    match result {
+        Ok(destination) => {
+            let _ = event_sender.send((TuicStream { send, recv }, destination));
+        }
+        Err(_) => {
+            let _ = recv.stop(0_u32.into());
+            let _ = send.reset(0_u32.into());
+        }
+    }
+}
+
+async fn handle_server_uni_stream(
+    mut stream: RecvStream,
+    connection: Connection,
+    users: Arc<HashMap<Uuid, (String, String)>>,
+    authenticated: Arc<AtomicBool>,
+    auth_sender: tokio::sync::watch::Sender<bool>,
+    event_sender: tokio::sync::mpsc::UnboundedSender<ServerUniEvent>,
+) -> io::Result<()> {
+    let mut command = [0_u8; 2];
+    stream
+        .read_exact(&mut command)
+        .await
+        .map_err(io::Error::other)?;
+    if command[0] != VERSION {
+        return Err(invalid(format!("unknown TUIC version {}", command[0])));
+    }
+    match command[1] {
+        COMMAND_AUTHENTICATE => {
+            if authenticated.load(Ordering::Acquire) {
+                return Err(invalid("multiple TUIC authentication requests"));
+            }
+            let mut request = [0_u8; AUTHENTICATE_LENGTH];
+            request[..2].copy_from_slice(&command);
+            stream
+                .read_exact(&mut request[2..])
+                .await
+                .map_err(io::Error::other)?;
+            let uuid = Uuid::from_slice(&request[2..18])
+                .map_err(|_| invalid("invalid TUIC authentication UUID"))?;
+            let (user, password) = users.get(&uuid).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "unknown TUIC user",
+                )
+            })?;
+            let expected = encode_authenticate(uuid, &connection, password)?;
+            let different = expected[18..]
+                .iter()
+                .zip(&request[18..])
+                .fold(0_u8, |value, (left, right)| value | (left ^ right));
+            if different != 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "TUIC authentication token mismatch",
+                ));
+            }
+            authenticated
+                .compare_exchange(
+                    false,
+                    true,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .map_err(|_| {
+                    invalid("multiple TUIC authentication requests")
+                })?;
+            let _ =
+                event_sender.send(ServerUniEvent::Authenticated(user.clone()));
+            auth_sender.send_replace(true);
+            let _ = stream.stop(0_u32.into());
+            Ok(())
+        }
+        COMMAND_PACKET => {
+            wait_for_server_auth(auth_sender.subscribe(), &connection).await?;
+            let tail = stream
+                .read_to_end(MAX_UDP_SIZE + 298)
+                .await
+                .map_err(io::Error::other)?;
+            let mut data = Vec::with_capacity(2 + tail.len());
+            data.extend_from_slice(&command);
+            data.extend_from_slice(&tail);
+            let event =
+                ServerUdpEvent::Packet(UdpMessage::decode(&data)?, true);
+            let _ = event_sender.send(ServerUniEvent::Udp(event));
+            Ok(())
+        }
+        COMMAND_DISSOCIATE => {
+            wait_for_server_auth(auth_sender.subscribe(), &connection).await?;
+            let mut session_id = [0_u8; 2];
+            stream
+                .read_exact(&mut session_id)
+                .await
+                .map_err(io::Error::other)?;
+            let _ = stream.stop(0_u32.into());
+            let _ = event_sender.send(ServerUniEvent::Udp(
+                ServerUdpEvent::Dissociate(u16::from_be_bytes(session_id)),
+            ));
+            Ok(())
+        }
+        command => Err(invalid(format!(
+            "unknown TUIC unidirectional command {command}"
+        ))),
+    }
+}
+
+async fn wait_for_server_auth(
+    mut authenticated: tokio::sync::watch::Receiver<bool>,
+    connection: &Connection,
+) -> io::Result<()> {
+    loop {
+        if *authenticated.borrow() {
+            return Ok(());
+        }
+        tokio::select! {
+            changed = authenticated.changed() => {
+                changed.map_err(|_| io::Error::new(
+                    io::ErrorKind::ConnectionAborted,
+                    "TUIC authentication state closed",
+                ))?;
+            }
+            error = connection.closed() => {
+                return Err(io::Error::other(error));
+            }
+        }
     }
 }
 
@@ -1224,6 +1497,160 @@ mod tests {
         let restored = restored.unwrap();
         assert_eq!(restored.destination, message.destination);
         assert_eq!(restored.data, message.data);
+    }
+
+    #[tokio::test]
+    async fn authentication_overtakes_incomplete_pre_auth_streams()
+    -> io::Result<()> {
+        let CertifiedKey { cert, key_pair } =
+            generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let server_options: InboundTlsOptions = serde_json::from_value(json!({
+            "enabled":true,
+            "certificate":cert.pem(),
+            "key":key_pair.serialize_pem()
+        }))
+        .unwrap();
+        let server_tls = build_server_config_with_default_alpn(
+            &server_options,
+            &[DEFAULT_ALPN],
+        )
+        .unwrap();
+        let endpoint = server_endpoint(
+            "127.0.0.1:0".parse().unwrap(),
+            server_tls,
+            Arc::new(quinn::TransportConfig::default()),
+        )
+        .unwrap();
+        let address = endpoint.local_addr().unwrap();
+        let user_uuid =
+            Uuid::parse_str("059032a9-7d40-4a96-9bb1-36823d848068").unwrap();
+        let server = tokio::spawn(async move {
+            let connection = endpoint.accept().await.unwrap().await.unwrap();
+            let users = HashMap::from([(
+                user_uuid,
+                ("alice".to_owned(), "secret".to_owned()),
+            )]);
+            let session = ServerSession::authenticate(
+                connection,
+                &users,
+                Duration::from_secs(3),
+            )
+            .await
+            .unwrap();
+            assert_eq!(session.user, "alice");
+
+            let (mut stream, destination) = tokio::time::timeout(
+                Duration::from_secs(1),
+                session.accept_tcp(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(destination, SocksAddr::new("example.com", 443));
+            let mut payload = [0_u8; 4];
+            stream.read_exact(&mut payload).await.unwrap();
+            assert_eq!(&payload, b"ping");
+
+            let event = tokio::time::timeout(
+                Duration::from_secs(1),
+                session.read_udp(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let ServerUdpEvent::Packet(message, true) = event else {
+                panic!("expected stream-mode UDP packet, got {event:?}");
+            };
+            assert_eq!(message.session_id, 7);
+            assert_eq!(
+                message.destination,
+                Some(SocksAddr::new("1.2.3.4", 53))
+            );
+            assert_eq!(message.data, b"queued before authentication");
+        });
+
+        let client_tls = build_client_config(
+            "localhost",
+            &OutboundTlsOptions {
+                enabled: true,
+                insecure: true,
+                ..Default::default()
+            },
+            &[DEFAULT_ALPN],
+        )
+        .unwrap();
+        let tls_config = client_tls.config_for_handshake().await.unwrap();
+        let crypto = QuicClientConfig::try_from(tls_config).unwrap();
+        let mut config = quinn::ClientConfig::new(Arc::new(crypto));
+        config.transport_config(Arc::new(quinn::TransportConfig::default()));
+        let mut client_endpoint =
+            Endpoint::client("0.0.0.0:0".parse().unwrap()).unwrap();
+        client_endpoint.set_default_client_config(config);
+        let connection = client_endpoint
+            .connect(address, "localhost")
+            .unwrap()
+            .await
+            .unwrap();
+
+        // A stream-mode UDP request opens first and deliberately stalls after
+        // its command header. The fixed Go service handles every uni stream in
+        // its own goroutine, so this must not head-of-line block authentication.
+        let mut pending_udp = connection.open_uni().await.unwrap();
+        pending_udp
+            .write_all(&[VERSION, COMMAND_PACKET])
+            .await
+            .unwrap();
+        pending_udp.flush().await.unwrap();
+
+        // A partial CONNECT stream must not head-of-line block a later valid
+        // stream. sing-quic accepts and parses every bidirectional stream in a
+        // separate goroutine before gating the completed request on auth.
+        let (mut blocked_tcp, _blocked_tcp_recv) =
+            connection.open_bi().await.unwrap();
+        blocked_tcp
+            .write_all(&[VERSION, COMMAND_CONNECT])
+            .await
+            .unwrap();
+        blocked_tcp.flush().await.unwrap();
+
+        // A complete bidirectional CONNECT stream may arrive before auth and
+        // remains gated until the authentication state is committed.
+        let (mut tcp_send, _tcp_recv) = connection.open_bi().await.unwrap();
+        tcp_send
+            .write_all(
+                &encode_connect(&SocksAddr::new("example.com", 443)).unwrap(),
+            )
+            .await
+            .unwrap();
+        tcp_send.write_all(b"ping").await.unwrap();
+
+        let mut authentication = connection.open_uni().await.unwrap();
+        let mut authentication_wire =
+            encode_authenticate(user_uuid, &connection, "secret")?.to_vec();
+        // sing-quic reads the fixed-size authentication request and cancels
+        // the remaining receive side instead of requiring stream EOF.
+        authentication_wire.push(0xaa);
+        authentication
+            .write_all(&authentication_wire)
+            .await
+            .unwrap();
+        authentication.finish().unwrap();
+
+        let message = UdpMessage {
+            session_id: 7,
+            packet_id: 0,
+            fragment_total: 1,
+            fragment_id: 0,
+            destination: Some(SocksAddr::new("1.2.3.4", 53)),
+            data: b"queued before authentication".to_vec(),
+        }
+        .encode()
+        .unwrap();
+        pending_udp.write_all(&message[2..]).await.unwrap();
+        pending_udp.finish().unwrap();
+
+        server.await.unwrap();
+        Ok::<_, io::Error>(())
     }
 
     async fn exercise_quic_session(udp_stream: bool) {

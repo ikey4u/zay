@@ -8,7 +8,7 @@ use tokio::{
     task::{JoinHandle, JoinSet},
     time::timeout,
 };
-use tokio_util::sync::CancellationToken;
+use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use uuid::Uuid;
 
 use crate::{
@@ -276,22 +276,47 @@ async fn accept_loop(
                 connections.spawn(async move {
                     let connection = incoming.await.map_err(io::Error::other)?;
                     let source = connection.remote_address();
-                    let session = ServerSession::authenticate(connection, &users, auth_timeout).await?;
+                    let heartbeat_connection = connection.clone();
+                    let heartbeat_task = AbortOnDropHandle::new(tokio::spawn(async move {
+                        let mut timer = tokio::time::interval(heartbeat);
+                        timer.set_missed_tick_behavior(
+                            tokio::time::MissedTickBehavior::Delay,
+                        );
+                        timer.tick().await;
+                        loop {
+                            timer.tick().await;
+                            if heartbeat_connection
+                                .send_datagram(bytes::Bytes::from_static(&[
+                                    crate::protocol::tuic::VERSION,
+                                    crate::protocol::tuic::COMMAND_HEARTBEAT,
+                                ]))
+                                .is_err()
+                            {
+                                heartbeat_connection.close(0_u32.into(), b"");
+                                break;
+                            }
+                        }
+                    }));
+                    let session = match ServerSession::authenticate(
+                        connection,
+                        &users,
+                        auth_timeout,
+                    )
+                    .await
+                    {
+                        Ok(session) => session,
+                        Err(error) => {
+                            heartbeat_task.abort();
+                            return Err(error);
+                        }
+                    };
                     let user = session.user.clone();
                     let mut udp_sessions = HashMap::<u16, UdpState>::new();
                     let (udp_closed_sender, mut udp_closed_receiver) =
                         mpsc::unbounded_channel();
                     let mut tasks = JoinSet::new();
-                    let mut heartbeat_timer = tokio::time::interval(heartbeat);
-                    heartbeat_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                    heartbeat_timer.tick().await;
                     loop {
                         tokio::select! {
-                            _ = heartbeat_timer.tick() => {
-                                if session.send_heartbeat().is_err() {
-                                    break;
-                                }
-                            }
                             result = session.accept_tcp() => {
                                 let (stream, destination) = match result {
                                     Ok(value) => value,
@@ -355,6 +380,7 @@ async fn accept_loop(
                             }
                         }
                     }
+                    heartbeat_task.abort();
                     tasks.abort_all();
                     while tasks.join_next().await.is_some() {}
                     Ok::<_, io::Error>(())
@@ -673,6 +699,81 @@ mod tests {
         },
         route::Router,
     };
+
+    #[tokio::test]
+    async fn heartbeat_starts_before_authentication() {
+        let uuid =
+            Uuid::parse_str("059032a9-7d40-4a96-9bb1-36823d848068").unwrap();
+        let CertifiedKey { cert, key_pair } =
+            generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let options: TuicInboundOptions = serde_json::from_value(json!({
+            "listen":"127.0.0.1", "listen_port":0,
+            "users":[{
+                "name":"alice", "uuid":uuid.to_string(),
+                "password":"secret"
+            }],
+            "auth_timeout":"1s", "heartbeat":"20ms",
+            "tls":{
+                "enabled":true,
+                "certificate":cert.pem(),
+                "key":key_pair.serialize_pem()
+            }
+        }))
+        .unwrap();
+        let outbounds = Arc::new(
+            OutboundManager::from_options(&Options::default(), "").unwrap(),
+        );
+        let router = Arc::new(Router::from_json(&[], "").unwrap());
+        let mut inbound =
+            TuicInbound::new("tuic-in", options, router, outbounds).unwrap();
+        inbound.start(StartStage::Start).await.unwrap();
+
+        let tls = build_client_config(
+            "localhost",
+            &OutboundTlsOptions {
+                enabled: true,
+                insecure: true,
+                ..Default::default()
+            },
+            &[DEFAULT_ALPN],
+        )
+        .unwrap();
+        let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(
+            tls.config_for_handshake().await.unwrap(),
+        )
+        .unwrap();
+        let mut client_config = quinn::ClientConfig::new(Arc::new(crypto));
+        client_config.transport_config(Arc::new(
+            Hysteria2QuicOptions::default().build().unwrap(),
+        ));
+        let mut endpoint =
+            quinn::Endpoint::client("0.0.0.0:0".parse().unwrap()).unwrap();
+        endpoint.set_default_client_config(client_config);
+        let connection = endpoint
+            .connect(inbound.local_addr().unwrap(), "localhost")
+            .unwrap()
+            .await
+            .unwrap();
+
+        let heartbeat = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            connection.read_datagram(),
+        )
+        .await
+        .expect("heartbeat before the authentication timeout")
+        .unwrap();
+        assert_eq!(
+            heartbeat.as_ref(),
+            [
+                crate::protocol::tuic::VERSION,
+                crate::protocol::tuic::COMMAND_HEARTBEAT,
+            ]
+        );
+
+        connection.close(0_u32.into(), b"");
+        endpoint.close(0_u32.into(), b"");
+        inbound.close().await.unwrap();
+    }
 
     #[tokio::test]
     async fn proxies_authenticated_tcp_and_fragmented_udp_end_to_end() {
