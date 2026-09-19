@@ -682,8 +682,17 @@ impl Bbr2 {
                 self.ack_aggregation.max_ack_height().min(self.cwnd);
         }
 
+        // Quinn passes the packet space's historical largest ACK here.  QUICHE
+        // advances a BBR round from the largest packet in this ACK event, so a
+        // reordered ACK (or a loss-only timer event) must not reuse that older
+        // high watermark.  The fallback only serves controllers that report
+        // aggregate ACK bytes without the per-packet callback.
         self.largest_acked_packet =
-            largest_packet_num_acked.or(self.largest_acked_packet);
+            self.largest_acked_packet.or(if self.bytes_acked > 0 {
+                largest_packet_num_acked
+            } else {
+                None
+            });
         self.round_started = self
             .largest_acked_packet
             .is_some_and(|packet| packet > self.round_end_packet);
@@ -1198,6 +1207,99 @@ mod tests {
         );
 
         assert_eq!(controller.extra_acked, extra);
+    }
+
+    #[test]
+    fn round_boundary_uses_current_ack_batch_not_historical_largest() {
+        let start = Instant::now();
+        let mut controller = controller(start);
+        controller.round_end_packet = 10;
+        controller.max_sent_packet = 20;
+
+        controller.bytes_acked = 1_200;
+        controller.largest_acked_packet = Some(5);
+        controller.finish_event(start, controller.cwnd, false, Some(15));
+        assert_eq!(controller.round_count, 0);
+        assert_eq!(controller.round_end_packet, 10);
+
+        controller.bytes_acked = 1_200;
+        controller.largest_acked_packet = Some(11);
+        controller.finish_event(start, controller.cwnd, false, Some(15));
+        assert_eq!(controller.round_count, 1);
+        assert_eq!(controller.round_end_packet, 20);
+
+        controller.round_end_packet = 30;
+        controller.max_sent_packet = 40;
+        controller.bytes_lost = 1_200;
+        controller.finish_event(start, controller.cwnd, false, Some(35));
+        assert_eq!(
+            controller.round_count, 1,
+            "a loss-only event must ignore the packet space's ACK watermark"
+        );
+        assert_eq!(controller.round_end_packet, 30);
+    }
+
+    #[test]
+    fn same_batch_ack_and_loss_keep_largest_packet_send_state() {
+        let start = Instant::now();
+        let mut reverse_controller = controller(start);
+        reverse_controller.on_sent_packet(start, 1_200, 2, 1, 0, false);
+        reverse_controller.on_sent_packet(
+            start + Duration::from_millis(1),
+            1_200,
+            2,
+            2,
+            1_200,
+            false,
+        );
+        reverse_controller.on_ack_packet(
+            start + Duration::from_millis(100),
+            start,
+            1_200,
+            2,
+            1,
+            false,
+        );
+        reverse_controller.on_lost_packet(
+            start + Duration::from_millis(100),
+            start + Duration::from_millis(1),
+            1_200,
+            2,
+            2,
+        );
+        assert_eq!(reverse_controller.last_event_packet, Some((2, 2)));
+        assert_eq!(
+            reverse_controller.last_send_state.unwrap().bytes_in_flight,
+            2_400
+        );
+
+        let mut controller = controller(start);
+        controller.on_sent_packet(start, 1_200, 2, 1, 0, false);
+        controller.on_sent_packet(
+            start + Duration::from_millis(1),
+            1_200,
+            2,
+            2,
+            1_200,
+            false,
+        );
+        controller.on_ack_packet(
+            start + Duration::from_millis(100),
+            start + Duration::from_millis(1),
+            1_200,
+            2,
+            2,
+            false,
+        );
+        controller.on_lost_packet(
+            start + Duration::from_millis(100),
+            start,
+            1_200,
+            2,
+            1,
+        );
+        assert_eq!(controller.last_event_packet, Some((2, 2)));
+        assert_eq!(controller.last_send_state.unwrap().bytes_in_flight, 2_400);
     }
 
     #[test]
