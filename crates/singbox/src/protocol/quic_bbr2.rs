@@ -36,7 +36,7 @@ const DRAIN_PACING_GAIN: f64 = 1.0 / 2.885;
 const PROBE_UP_PACING_GAIN: f64 = 1.25;
 const PROBE_DOWN_PACING_GAIN: f64 = 0.91;
 const PROBE_CWND_GAIN: f64 = 2.0;
-const PROBE_UP_CWND_GAIN: f64 = 2.25;
+const PROBE_RTT_CWND_GAIN: f64 = 1.0;
 const PROBE_RTT_BDP_FRACTION: f64 = 0.5;
 const FULL_BW_THRESHOLD: f64 = 1.25;
 const FULL_BW_ROUNDS: u8 = 3;
@@ -270,8 +270,8 @@ impl Bbr2 {
     fn cwnd_gain(&self) -> f64 {
         match self.mode {
             Mode::Startup => STARTUP_CWND_GAIN,
-            Mode::ProbeBw(ProbePhase::Up) => PROBE_UP_CWND_GAIN,
-            Mode::Drain | Mode::ProbeBw(_) | Mode::ProbeRtt => PROBE_CWND_GAIN,
+            Mode::Drain | Mode::ProbeBw(_) => PROBE_CWND_GAIN,
+            Mode::ProbeRtt => PROBE_RTT_CWND_GAIN,
         }
     }
 
@@ -285,9 +285,7 @@ impl Bbr2 {
             Mode::Startup | Mode::Drain => self.inflight_lo,
             Mode::ProbeBw(ProbePhase::Cruise) | Mode::ProbeRtt => min_optional(
                 self.inflight_lo,
-                self.inflight_hi.map(|hi| {
-                    hi.saturating_mul_float(1.0 - INFLIGHT_HI_HEADROOM)
-                }),
+                self.inflight_hi_with_headroom_bound(),
             ),
             Mode::ProbeBw(ProbePhase::Down | ProbePhase::Refill) => {
                 min_optional(self.inflight_lo, self.inflight_hi)
@@ -388,6 +386,36 @@ impl Bbr2 {
         self.inflight_hi = Some(candidate);
     }
 
+    /// Mirror QUICHE's `MaybeAdaptUpperBounds`: once a probing loss has
+    /// established `inflight_hi`, later valid send-state samples can raise it
+    /// again. A high-loss event never raises the bound; ProbeUp handles its
+    /// one-time downward cut separately.
+    fn adapt_probe_inflight_hi(&mut self) -> bool {
+        let too_high = self.loss_is_too_high(PROBE_FULL_LOSS_EVENTS);
+        if too_high {
+            return true;
+        }
+        if let (Some(current), Some(send_state)) =
+            (self.inflight_hi, self.last_send_state)
+            && send_state.bytes_in_flight > current
+        {
+            self.inflight_hi = Some(send_state.bytes_in_flight);
+        }
+        false
+    }
+
+    fn inflight_hi_with_headroom_bound(&self) -> Option<u64> {
+        self.inflight_hi.map(|inflight_hi| {
+            inflight_hi.saturating_sub(
+                inflight_hi.saturating_mul_float(INFLIGHT_HI_HEADROOM),
+            )
+        })
+    }
+
+    fn inflight_hi_with_headroom(&self) -> u64 {
+        self.inflight_hi_with_headroom_bound().unwrap_or(u64::MAX)
+    }
+
     fn record_send_state(
         &mut self,
         packet_space: u8,
@@ -437,7 +465,14 @@ impl Bbr2 {
             ProbePhase::Up => {
                 self.round_end_packet = self.max_sent_packet;
             }
-            ProbePhase::Cruise => {}
+            ProbePhase::Cruise => {
+                if let (Some(inflight_lo), Some(inflight_hi)) =
+                    (self.inflight_lo, self.inflight_hi)
+                    && inflight_lo > inflight_hi
+                {
+                    self.inflight_lo = Some(inflight_hi);
+                }
+            }
         }
     }
 
@@ -465,6 +500,9 @@ impl Bbr2 {
 
     fn leave_probe_rtt(&mut self, now: Instant) {
         self.min_rtt_stamp = now;
+        // QUICHE re-enters ProbeBW through `Enter`, which starts a fresh
+        // native/time-based probing cycle even when returning to Cruise.
+        self.cycle_started = now;
         self.set_probe_phase(self.probe_rtt_return_phase, now);
     }
 
@@ -476,9 +514,17 @@ impl Bbr2 {
         app_limited: bool,
     ) {
         if self.round_started && matches!(self.mode, Mode::ProbeBw(_)) {
-            self.rounds_since_probe = self.rounds_since_probe.saturating_add(1);
-            self.phase_rounds = self.phase_rounds.saturating_add(1);
+            if self.cycle_started != now {
+                self.rounds_since_probe =
+                    self.rounds_since_probe.saturating_add(1);
+            }
+            if self.phase_started != now {
+                self.phase_rounds = self.phase_rounds.saturating_add(1);
+            }
         }
+
+        let probe_inflight_too_high = matches!(self.mode, Mode::ProbeBw(_))
+            && self.adapt_probe_inflight_hi();
 
         match self.mode {
             Mode::Startup => {
@@ -523,14 +569,14 @@ impl Bbr2 {
                     && !self.last_cycle_probed_too_high;
                 if restart_risky_probe || self.is_time_to_probe_bandwidth(now) {
                     self.set_probe_phase(ProbePhase::Refill, now);
-                } else if in_flight <= self.bdp(1.0).max(self.min_cwnd)
-                    || now.saturating_duration_since(self.phase_started)
-                        >= self.min_rtt
+                } else if now.saturating_duration_since(self.phase_started)
+                    > self.min_rtt
+                    || (in_flight <= self.inflight_hi_with_headroom()
+                        && in_flight < self.bdp(1.0))
                 {
                     self.set_probe_phase(ProbePhase::Cruise, now);
                 }
                 if !matches!(self.mode, Mode::ProbeBw(ProbePhase::Down))
-                    && !app_limited
                     && now.saturating_duration_since(self.min_rtt_stamp)
                         >= PROBE_RTT_PERIOD
                     && let Some(sample) = self.sample_min_rtt
@@ -551,8 +597,7 @@ impl Bbr2 {
                 }
             }
             Mode::ProbeBw(ProbePhase::Up) => {
-                let probed_too_high =
-                    self.loss_is_too_high(PROBE_FULL_LOSS_EVENTS);
+                let probed_too_high = probe_inflight_too_high;
                 let risky = self.last_cycle_probed_too_high
                     && self.inflight_hi.is_some_and(|hi| prior_in_flight >= hi);
                 let queueing_threshold = self
@@ -563,7 +608,11 @@ impl Bbr2 {
                 let queueing =
                     self.phase_rounds > 0 && in_flight >= queueing_threshold;
                 if probed_too_high || risky || queueing {
-                    if probed_too_high {
+                    if probed_too_high
+                        && self
+                            .last_send_state
+                            .is_some_and(|state| !state.app_limited)
+                    {
                         self.bound_probe_inflight_hi();
                     }
                     self.last_cycle_probed_too_high = probed_too_high;
@@ -597,8 +646,7 @@ impl Bbr2 {
         let mut target = self.probe_rtt_target();
         if let Some(limit) = min_optional(
             self.inflight_lo,
-            self.inflight_hi
-                .map(|hi| hi.saturating_mul_float(1.0 - INFLIGHT_HI_HEADROOM)),
+            self.inflight_hi_with_headroom_bound(),
         ) {
             target = target.min(limit);
         }
@@ -1173,7 +1221,7 @@ mod tests {
         assert_eq!(controller.target_inflight(), base + DEFAULT_TCP_MSS);
         controller.mode = Mode::ProbeBw(ProbePhase::Up);
         let probe_up_base =
-            controller.bdp(PROBE_UP_CWND_GAIN).max(controller.min_cwnd);
+            controller.bdp(PROBE_CWND_GAIN).max(controller.min_cwnd);
         assert_eq!(controller.target_inflight(), probe_up_base + excess);
     }
 
@@ -1374,6 +1422,172 @@ mod tests {
         controller.max_bytes_delivered_in_round = 80_000;
         controller.bound_probe_inflight_hi();
         assert_eq!(controller.inflight_hi, Some(50_000));
+    }
+
+    #[test]
+    fn probe_bw_uses_uniform_default_cwnd_gain() {
+        let start = Instant::now();
+        let mut controller = controller(start);
+        for phase in [
+            ProbePhase::Down,
+            ProbePhase::Cruise,
+            ProbePhase::Refill,
+            ProbePhase::Up,
+        ] {
+            controller.mode = Mode::ProbeBw(phase);
+            assert_eq!(controller.cwnd_gain(), PROBE_CWND_GAIN);
+        }
+        controller.mode = Mode::ProbeRtt;
+        assert_eq!(controller.cwnd_gain(), PROBE_RTT_CWND_GAIN);
+    }
+
+    #[test]
+    fn probe_upper_bound_recovers_from_valid_send_state() {
+        let start = Instant::now();
+        let mut controller = controller(start);
+        controller.mode = Mode::ProbeBw(ProbePhase::Cruise);
+        controller.inflight_hi = Some(20_000);
+        controller.last_send_state = Some(SendTimeState {
+            app_limited: false,
+            total_acked: 0,
+            bytes_in_flight: 25_000,
+        });
+
+        assert!(!controller.adapt_probe_inflight_hi());
+        assert_eq!(controller.inflight_hi, Some(25_000));
+
+        controller.round_loss_events = PROBE_FULL_LOSS_EVENTS;
+        controller.round_bytes_lost = 501;
+        controller.last_send_state = Some(SendTimeState {
+            app_limited: false,
+            total_acked: 0,
+            bytes_in_flight: 25_000,
+        });
+        assert!(controller.adapt_probe_inflight_hi());
+        assert_eq!(controller.inflight_hi, Some(25_000));
+    }
+
+    #[test]
+    fn app_limited_probe_loss_exits_without_cutting_upper_bound() {
+        let start = Instant::now();
+        let mut controller = controller(start);
+        controller.mode = Mode::ProbeBw(ProbePhase::Up);
+        controller.phase_started = start;
+        controller.inflight_hi = Some(7);
+        assert_eq!(controller.inflight_hi_with_headroom(), 6);
+        controller.inflight_hi = Some(80_000);
+        assert_eq!(controller.inflight_hi_with_headroom(), 68_000);
+        controller.round_loss_events = PROBE_FULL_LOSS_EVENTS;
+        controller.round_bytes_lost = 1_001;
+        controller.last_send_state = Some(SendTimeState {
+            app_limited: true,
+            total_acked: 0,
+            bytes_in_flight: 50_000,
+        });
+
+        controller.update_mode(
+            start + Duration::from_millis(1),
+            40_000,
+            50_000,
+            true,
+        );
+
+        assert_eq!(controller.mode, Mode::ProbeBw(ProbePhase::Down));
+        assert_eq!(controller.inflight_hi, Some(80_000));
+    }
+
+    #[test]
+    fn probe_down_waits_for_upper_bound_headroom_before_bdp_exit() {
+        let start = Instant::now();
+        let mut controller = controller(start);
+        controller.min_rtt = Duration::from_millis(100);
+        controller.max_bandwidth.update(1_000_000);
+        controller.set_probe_phase(ProbePhase::Down, start);
+        controller.probe_wait = Duration::from_secs(10);
+        controller.rounds_since_probe = 0;
+        controller.inflight_hi = Some(80_000);
+
+        controller.update_mode(
+            start + Duration::from_millis(1),
+            75_000,
+            75_000,
+            false,
+        );
+        assert_eq!(controller.mode, Mode::ProbeBw(ProbePhase::Down));
+
+        controller.update_mode(
+            start + Duration::from_millis(2),
+            67_000,
+            67_000,
+            false,
+        );
+        assert_eq!(controller.mode, Mode::ProbeBw(ProbePhase::Cruise));
+    }
+
+    #[test]
+    fn entering_probe_cruise_caps_lower_bound_to_upper_bound() {
+        let start = Instant::now();
+        let mut controller = controller(start);
+        controller.inflight_lo = Some(100_000);
+        controller.inflight_hi = Some(80_000);
+
+        controller.set_probe_phase(ProbePhase::Cruise, start);
+
+        assert_eq!(controller.inflight_lo, Some(80_000));
+    }
+
+    #[test]
+    fn app_limited_sample_can_expire_probe_rtt() {
+        let start = Instant::now();
+        let mut controller = controller(start);
+        controller.mode = Mode::ProbeBw(ProbePhase::Down);
+        controller.cycle_started = start;
+        controller.phase_started = start;
+        controller.min_rtt_stamp = start;
+        controller.sample_min_rtt = Some(Duration::from_millis(90));
+
+        controller.update_mode(
+            start + PROBE_RTT_PERIOD,
+            0,
+            controller.cwnd,
+            true,
+        );
+
+        assert_eq!(controller.mode, Mode::ProbeRtt);
+        assert_eq!(controller.min_rtt, Duration::from_millis(90));
+    }
+
+    #[test]
+    fn leaving_probe_rtt_restarts_probe_cycle() {
+        let start = Instant::now();
+        let now = start + Duration::from_secs(5);
+        let mut controller = controller(start);
+        controller.mode = Mode::ProbeRtt;
+        controller.probe_rtt_return_phase = ProbePhase::Cruise;
+
+        controller.leave_probe_rtt(now);
+
+        assert_eq!(controller.mode, Mode::ProbeBw(ProbePhase::Cruise));
+        assert_eq!(controller.cycle_started, now);
+        assert_eq!(controller.phase_started, now);
+    }
+
+    #[test]
+    fn same_timestamp_round_does_not_advance_probe_counters() {
+        let start = Instant::now();
+        let mut controller = controller(start);
+        controller.mode = Mode::ProbeBw(ProbePhase::Cruise);
+        controller.cycle_started = start;
+        controller.phase_started = start;
+        controller.probe_wait = Duration::from_secs(10);
+        controller.max_bandwidth.update(1_000_000);
+        controller.round_started = true;
+
+        controller.update_mode(start, 50_000, 50_000, false);
+
+        assert_eq!(controller.rounds_since_probe, 0);
+        assert_eq!(controller.phase_rounds, 0);
+        assert_eq!(controller.mode, Mode::ProbeBw(ProbePhase::Cruise));
     }
 
     #[test]
