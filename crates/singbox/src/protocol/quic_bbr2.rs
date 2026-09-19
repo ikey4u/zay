@@ -24,8 +24,10 @@ use super::quic_bbr::{
 };
 
 const INITIAL_WINDOW_PACKETS: u64 = 32;
+const MIN_INITIAL_WINDOW_PACKETS: u64 = 10;
+const MAX_INITIAL_WINDOW_PACKETS: u64 = 200;
 const MIN_WINDOW_PACKETS: u64 = 4;
-const MAX_WINDOW_BYTES: u64 = 200 * 1024 * 1024;
+const MAX_WINDOW_PACKETS: u64 = 2_000;
 
 const INITIAL_PACING_GAIN: f64 = 2.885;
 const STARTUP_PACING_GAIN: f64 = 2.885;
@@ -49,6 +51,8 @@ const PROBE_BASE_DURATION: Duration = Duration::from_secs(2);
 const PROBE_MAX_ROUNDS: u8 = 63;
 const PROBE_MAX_RANDOM_ROUNDS: u8 = 2;
 const DEFAULT_TCP_MSS: u64 = 1_460;
+const MIN_WINDOW_BYTES: u64 = MIN_WINDOW_PACKETS * DEFAULT_TCP_MSS;
+const MAX_WINDOW_BYTES: u64 = MAX_WINDOW_PACKETS * DEFAULT_TCP_MSS;
 // Chromium QUIC's BBRv2 model starts from kInitialRttMs rather than Quinn's
 // RFC recovery default, which is intentionally a different value.
 const INITIAL_RTT: Duration = Duration::from_millis(100);
@@ -112,7 +116,8 @@ impl Default for Bbr2Config {
 impl Bbr2Config {
     /// Override the initial congestion window in packets.
     pub fn initial_window_packets(&mut self, packets: u64) -> &mut Self {
-        self.initial_window_packets = packets.max(MIN_WINDOW_PACKETS);
+        self.initial_window_packets = packets
+            .clamp(MIN_INITIAL_WINDOW_PACKETS, MAX_INITIAL_WINDOW_PACKETS);
         self
     }
 }
@@ -130,13 +135,11 @@ impl ControllerFactory for Bbr2Config {
 /// QUIC BBRv2 sender state.
 #[derive(Clone, Debug)]
 pub struct Bbr2 {
-    config: Arc<Bbr2Config>,
     sampler: BandwidthEstimation,
     max_bandwidth: MaxBandwidthFilter,
     ack_aggregation: AckAggregationState,
     rng: StdRng,
     mode: Mode,
-    mtu: u64,
     initial_cwnd: u64,
     min_cwnd: u64,
     cwnd: u64,
@@ -185,17 +188,17 @@ pub struct Bbr2 {
 }
 
 impl Bbr2 {
-    fn new(config: Arc<Bbr2Config>, now: Instant, current_mtu: u16) -> Self {
-        let mtu = u64::from(current_mtu);
-        let min_cwnd = MIN_WINDOW_PACKETS * mtu;
-        let initial_cwnd = (config.initial_window_packets * mtu).max(min_cwnd);
+    fn new(config: Arc<Bbr2Config>, now: Instant, _current_mtu: u16) -> Self {
+        // Chromium expresses every BBRv2 congestion-window limit in the
+        // fixed TCP MSS, independent of the negotiated QUIC datagram size.
+        let min_cwnd = MIN_WINDOW_BYTES;
+        let initial_cwnd =
+            (config.initial_window_packets * DEFAULT_TCP_MSS).max(min_cwnd);
         Self {
-            config,
             sampler: BandwidthEstimation::new(false),
             max_bandwidth: MaxBandwidthFilter::default(),
             rng: StdRng::from_entropy(),
             mode: Mode::Startup,
-            mtu,
             initial_cwnd,
             min_cwnd,
             cwnd: initial_cwnd,
@@ -649,7 +652,9 @@ impl Bbr2 {
         let target = self.target_inflight();
         if self.full_bandwidth_reached {
             self.cwnd = self.cwnd.saturating_add(self.bytes_acked).min(target);
-        } else if self.cwnd < target || self.round_count < 3 {
+        } else if self.cwnd < target
+            || self.cwnd < self.initial_cwnd.saturating_mul(2)
+        {
             self.cwnd = self.cwnd.saturating_add(self.bytes_acked);
         }
         self.cwnd = self.cwnd.clamp(self.min_cwnd, MAX_WINDOW_BYTES);
@@ -856,22 +861,7 @@ impl Controller for Bbr2 {
         );
     }
 
-    fn on_mtu_update(&mut self, new_mtu: u16) {
-        let old_mtu = self.mtu;
-        self.mtu = u64::from(new_mtu);
-        self.min_cwnd = MIN_WINDOW_PACKETS * self.mtu;
-        self.initial_cwnd = self
-            .config
-            .initial_window_packets
-            .saturating_mul(self.mtu)
-            .max(self.min_cwnd);
-        if old_mtu > 0 {
-            self.cwnd = ((self.cwnd as u128 * self.mtu as u128)
-                / old_mtu as u128)
-                .min(MAX_WINDOW_BYTES as u128) as u64;
-        }
-        self.cwnd = self.cwnd.max(self.min_cwnd);
-    }
+    fn on_mtu_update(&mut self, _new_mtu: u16) {}
 
     fn window(&self) -> u64 {
         if self.mode == Mode::ProbeRtt {
@@ -1071,14 +1061,56 @@ mod tests {
     }
 
     #[test]
-    fn mtu_update_scales_window_and_floor() {
+    fn cwnd_uses_fixed_chromium_mss_and_global_limits() {
         let start = Instant::now();
         let mut controller = controller(start);
-        let old = controller.window();
+        assert_eq!(controller.initial_window(), 32 * DEFAULT_TCP_MSS);
+        assert_eq!(controller.min_cwnd, 4 * DEFAULT_TCP_MSS);
+
+        let old_window = controller.window();
         controller.on_mtu_update(1_350);
-        assert_eq!(controller.initial_window(), 32 * 1_350);
-        assert!(controller.window() > old);
-        assert!(controller.window() >= 4 * 1_350);
+        assert_eq!(controller.initial_window(), 32 * DEFAULT_TCP_MSS);
+        assert_eq!(controller.window(), old_window);
+
+        controller.max_bandwidth.update(100_000_000);
+        controller.cwnd = MAX_WINDOW_BYTES - 1;
+        controller.bytes_acked = DEFAULT_TCP_MSS;
+        controller.update_cwnd();
+        assert_eq!(controller.cwnd, 2_000 * DEFAULT_TCP_MSS);
+
+        let mut config = Bbr2Config::default();
+        config.initial_window_packets(1);
+        let minimum_initial = Bbr2::new(Arc::new(config.clone()), start, 1_200);
+        assert_eq!(
+            minimum_initial.initial_window(),
+            MIN_INITIAL_WINDOW_PACKETS * DEFAULT_TCP_MSS
+        );
+        config.initial_window_packets(u64::MAX);
+        let maximum_initial = Bbr2::new(Arc::new(config), start, 1_200);
+        assert_eq!(
+            maximum_initial.initial_window(),
+            MAX_INITIAL_WINDOW_PACKETS * DEFAULT_TCP_MSS
+        );
+    }
+
+    #[test]
+    fn startup_growth_uses_twice_initial_window_not_round_count() {
+        let start = Instant::now();
+        let mut controller = controller(start);
+        controller.round_count = u64::MAX;
+        controller.cwnd = 2 * controller.initial_cwnd - 1;
+        controller.bytes_acked = DEFAULT_TCP_MSS;
+        controller.update_cwnd();
+        assert_eq!(
+            controller.cwnd,
+            2 * controller.initial_cwnd - 1 + DEFAULT_TCP_MSS
+        );
+
+        controller.round_count = 0;
+        controller.cwnd = 2 * controller.initial_cwnd;
+        controller.bytes_acked = DEFAULT_TCP_MSS;
+        controller.update_cwnd();
+        assert_eq!(controller.cwnd, 2 * controller.initial_cwnd);
     }
 
     #[test]
@@ -1127,9 +1159,9 @@ mod tests {
             .max(controller.min_cwnd);
         assert_eq!(controller.target_inflight(), base + excess);
 
-        controller.inflight_hi = Some(base + controller.mtu);
+        controller.inflight_hi = Some(base + DEFAULT_TCP_MSS);
         controller.mode = Mode::ProbeBw(ProbePhase::Down);
-        assert_eq!(controller.target_inflight(), base + controller.mtu);
+        assert_eq!(controller.target_inflight(), base + DEFAULT_TCP_MSS);
         controller.mode = Mode::ProbeBw(ProbePhase::Up);
         let probe_up_base =
             controller.bdp(PROBE_UP_CWND_GAIN).max(controller.min_cwnd);
@@ -1156,7 +1188,7 @@ mod tests {
         assert_eq!(extra, 17_940);
         controller.full_bandwidth_reached = true;
         controller.extra_acked = extra;
-        controller.bytes_lost = controller.mtu;
+        controller.bytes_lost = DEFAULT_TCP_MSS;
 
         controller.finish_event(
             start + Duration::from_secs(1),
@@ -1177,15 +1209,19 @@ mod tests {
         controller.round_bytes_lost = 2_400;
         controller.bandwidth_latest = 80_000;
         controller.inflight_latest = 24_000;
+        let expected_inflight_lo = controller
+            .cwnd
+            .saturating_mul_float(1.0 - BETA)
+            .max(controller.inflight_latest);
 
         controller.adapt_lower_bounds();
         assert_eq!(controller.bandwidth_lo, Some(80_000));
-        assert_eq!(controller.inflight_lo, Some(26_880));
+        assert_eq!(controller.inflight_lo, Some(expected_inflight_lo));
 
         controller.round_bytes_lost = 0;
         controller.adapt_lower_bounds();
         assert_eq!(controller.bandwidth_lo, Some(80_000));
-        assert_eq!(controller.inflight_lo, Some(26_880));
+        assert_eq!(controller.inflight_lo, Some(expected_inflight_lo));
 
         controller.mode = Mode::ProbeBw(ProbePhase::Up);
         controller.round_bytes_lost = 1_200;
@@ -1208,7 +1244,7 @@ mod tests {
 
         controller.update_mode(
             start + Duration::from_secs(1),
-            controller.mtu,
+            1_200,
             controller.cwnd,
             false,
         );
@@ -1389,7 +1425,7 @@ mod tests {
         controller.finish_event(start + Duration::from_secs(1), 0, false, None);
         controller.on_sent_packet(
             start + Duration::from_secs(6),
-            controller.mtu,
+            1_200,
             2,
             1,
             0,
@@ -1403,7 +1439,7 @@ mod tests {
         controller.last_quiescence_start = Some(start + Duration::from_secs(6));
         controller.on_sent_packet(
             start + Duration::from_secs(7),
-            controller.mtu,
+            1_200,
             2,
             2,
             0,
