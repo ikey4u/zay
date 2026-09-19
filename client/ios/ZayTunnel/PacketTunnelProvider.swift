@@ -130,13 +130,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                         meshRunning = false
                     }
                     let cidrs = try startMeshRuntime(config: config, updateRoutes: false)
-                    for target in try ZayNative.relayBypassTargets(from: config.relayURL)
-                    where !lastBypassIPs.contains(target) {
-                        lastBypassIPs.append(target)
-                    }
+                    let bypass = try ZayNative.relayBypassTargets(from: config.relayURL)
                     lastMeshCIDRs = cidrs
+                    lastBypassIPs = bypass
                     try reloadSingboxMeshRoutes()
-                    ZayLog.info("hot mesh-enable ok cidrs=\(cidrs)")
+                    ZayLog.info("hot mesh-enable ok cidrs=\(cidrs) bypass=\(bypass)")
                     return #"{"ok":true,"enabled":true}"#
                 } else {
                     ZayNative.stopMesh()
@@ -144,6 +142,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                     meshSuspendedBySleep = false
                     // Keep meshAllowed — tunnel still up; user may toggle on again.
                     lastMeshCIDRs = []
+                    lastBypassIPs = []
                     try reloadSingboxMeshRoutes()
                     ZayLog.info("hot mesh-disable ok")
                     return #"{"ok":true,"enabled":false}"#
@@ -190,8 +189,20 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             }
             meshSuspendedBySleep = false
             do {
-                try startMeshRuntime(config: config, updateRoutes: false)
-                ZayLog.info("Mesh resumed after wake")
+                let oldCIDRs = lastMeshCIDRs
+                let oldBypass = lastBypassIPs
+                let cidrs = try startMeshRuntime(config: config, updateRoutes: false)
+                let bypass = try ZayNative.relayBypassTargets(from: config.relayURL)
+                lastMeshCIDRs = cidrs
+                lastBypassIPs = bypass
+                if cidrs != oldCIDRs || bypass != oldBypass {
+                    try reloadSingboxMeshRoutes()
+                    ZayLog.info(
+                        "Mesh resumed after wake; routes refreshed cidrs=\(cidrs) bypass=\(bypass)"
+                    )
+                } else {
+                    ZayLog.info("Mesh resumed after wake; routes unchanged")
+                }
             } catch {
                 ZayLog.warn("Mesh resume failed: \(error.localizedDescription)")
             }
