@@ -73,6 +73,7 @@ struct Http3Session {
     endpoint: Endpoint,
     sender: H3SendRequest,
     driver: tokio::task::JoinHandle<h3::error::ConnectionError>,
+    zero_rtt: Option<quinn::ZeroRttAccepted>,
 }
 
 impl Drop for Http3Session {
@@ -97,6 +98,8 @@ pub struct NaiveHttp3Outbound {
     state: Arc<Mutex<Option<Http3Session>>>,
     network_monitor_started: Arc<AtomicBool>,
     cancellation: CancellationToken,
+    #[cfg(test)]
+    last_connection_used_zero_rtt: AtomicBool,
 }
 
 impl NaiveHttp3Outbound {
@@ -167,6 +170,8 @@ impl NaiveHttp3Outbound {
             state: Arc::new(Mutex::new(None)),
             network_monitor_started: Arc::new(AtomicBool::new(false)),
             cancellation: CancellationToken::new(),
+            #[cfg(test)]
+            last_connection_used_zero_rtt: AtomicBool::new(false),
         })
     }
 
@@ -198,7 +203,10 @@ impl NaiveHttp3Outbound {
         Ok(outbound)
     }
 
-    async fn connect(&self) -> io::Result<Http3Session> {
+    async fn connect(
+        &self,
+        attempt_zero_rtt: bool,
+    ) -> io::Result<Http3Session> {
         let (socket, remote) = if let Some(dialer) = &self.packet_dialer {
             let (socket, remote) =
                 PacketUdpSocket::connect(dialer.clone(), &self.server).await?;
@@ -237,21 +245,30 @@ impl NaiveHttp3Outbound {
         } else {
             Endpoint::client(bind)?
         };
-        let tls_config = self
+        let mut tls_config = self
             .tls
             .config_for_handshake()
             .await
             .map_err(io::Error::other)?;
+        Arc::make_mut(&mut tls_config).enable_early_data = true;
         let crypto =
             QuicClientConfig::try_from(tls_config).map_err(io::Error::other)?;
         let mut client_config = quinn::ClientConfig::new(Arc::new(crypto));
         client_config.transport_config(self.transport.clone());
         endpoint.set_default_client_config(client_config);
-        let connection = endpoint
+        let connecting = endpoint
             .connect(remote, &self.server_name)
-            .map_err(io::Error::other)?
-            .await
             .map_err(io::Error::other)?;
+        let (connection, zero_rtt) = if attempt_zero_rtt {
+            match connecting.into_0rtt() {
+                Ok((connection, accepted)) => (connection, Some(accepted)),
+                Err(connecting) => {
+                    (connecting.await.map_err(io::Error::other)?, None)
+                }
+            }
+        } else {
+            (connecting.await.map_err(io::Error::other)?, None)
+        };
         let (http3, sender) =
             h3::client::new(h3_quinn::Connection::new(connection))
                 .await
@@ -265,12 +282,43 @@ impl NaiveHttp3Outbound {
             endpoint,
             sender,
             driver,
+            zero_rtt,
         })
     }
 
     /// Close every cached HTTP/3 connection. The next dial reconnects.
     pub async fn reset(&self) {
         self.state.lock().await.take();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn last_connection_used_zero_rtt(&self) -> bool {
+        self.last_connection_used_zero_rtt.load(Ordering::Acquire)
+    }
+
+    async fn open_session_tunnel(
+        &self,
+        session: &mut Http3Session,
+        destination: &SocksAddr,
+    ) -> (io::Result<Stream>, bool) {
+        let zero_rtt = session.zero_rtt.take();
+        let result = self.open_tunnel(&mut session.sender, destination).await;
+        let Some(accepted) = zero_rtt else {
+            return (result, false);
+        };
+        if !accepted.await {
+            return (
+                Err(io::Error::new(
+                    io::ErrorKind::ConnectionAborted,
+                    "NaiveProxy HTTP/3 0-RTT data was rejected",
+                )),
+                true,
+            );
+        }
+        #[cfg(test)]
+        self.last_connection_used_zero_rtt
+            .store(true, Ordering::Release);
+        (result, false)
     }
 
     async fn open_tunnel(
@@ -352,14 +400,30 @@ impl Dialer for NaiveHttp3Outbound {
                 .as_ref()
                 .is_none_or(|session| session.driver.is_finished())
             {
-                *state = Some(self.connect().await?);
+                #[cfg(test)]
+                self.last_connection_used_zero_rtt
+                    .store(false, Ordering::Release);
+                *state = Some(self.connect(true).await?);
             }
-            let result = self
-                .open_tunnel(
-                    &mut state.as_mut().expect("HTTP/3 session exists").sender,
+            let (result, zero_rtt_rejected) = self
+                .open_session_tunnel(
+                    state.as_mut().expect("HTTP/3 session exists"),
                     destination,
                 )
                 .await;
+            if zero_rtt_rejected {
+                *state = Some(self.connect(false).await?);
+                let (retry, _) = self
+                    .open_session_tunnel(
+                        state.as_mut().expect("HTTP/3 fallback session exists"),
+                        destination,
+                    )
+                    .await;
+                if retry.is_err() {
+                    *state = None;
+                }
+                return retry;
+            }
             if result.is_err() {
                 *state = None;
             }

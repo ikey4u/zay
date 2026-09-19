@@ -272,6 +272,9 @@ fn http3_endpoint(
     if !rustls.alpn_protocols.iter().any(|value| value == b"h3") {
         rustls.alpn_protocols.push(b"h3".to_vec());
     }
+    // The fixed Go Naive listener uses quic-go ListenEarly with Allow0RTT.
+    // QUIC requires either zero or the full u32 range here.
+    rustls.max_early_data_size = u32::MAX;
     let crypto =
         QuicServerConfig::try_from(rustls).map_err(io::Error::other)?;
     let mut transport = quinn::TransportConfig::default();
@@ -330,7 +333,16 @@ async fn http3_accept_loop(
                 let router = router.clone();
                 let outbounds = outbounds.clone();
                 connections.spawn(async move {
-                    let connection = incoming.await.map_err(io::Error::other)?;
+                    let connecting = incoming.accept().map_err(io::Error::other)?;
+                    let (connection, _handshake) = match connecting.into_0rtt() {
+                        Ok((connection, handshake)) => {
+                            (connection, Some(handshake))
+                        }
+                        Err(connecting) => (
+                            connecting.await.map_err(io::Error::other)?,
+                            None,
+                        ),
+                    };
                     let source = connection.remote_address();
                     let mut http3 = h3::server::Connection::new(
                         h3_quinn::Connection::new(connection),
@@ -708,9 +720,11 @@ mod tests {
         common::{
             lifecycle::{Lifecycle as _, StartStage},
             network::SocksAddr,
+            tls::build_client_config,
         },
-        option::{NaiveInboundOptions, Options},
+        option::{NaiveInboundOptions, Options, OutboundTlsOptions},
         outbound::OutboundManager,
+        protocol::naive::NaiveHttp3Outbound,
         route::Router,
     };
 
@@ -977,6 +991,100 @@ mod tests {
         inbound.close().await.unwrap();
         tcp_echo.await.unwrap();
         udp_echo.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn resumes_naive_http3_with_accepted_zero_rtt() {
+        let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let destination = target.local_addr().unwrap();
+        let echo = tokio::spawn(async move {
+            for expected in [*b"one!", *b"two!"] {
+                let (mut stream, _) = target.accept().await.unwrap();
+                let mut payload = [0_u8; 4];
+                stream.read_exact(&mut payload).await.unwrap();
+                assert_eq!(payload, expected);
+                stream.write_all(&payload).await.unwrap();
+            }
+        });
+
+        let CertifiedKey { cert, key_pair } =
+            generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let certificate = cert.pem();
+        let inbound_options: NaiveInboundOptions =
+            serde_json::from_value(json!({
+                "listen":"127.0.0.1",
+                "listen_port":0,
+                "network":"udp",
+                "users":[{"username":"alice","password":"secret"}],
+                "tls":{
+                    "enabled":true,
+                    "certificate":certificate,
+                    "key":key_pair.serialize_pem()
+                }
+            }))
+            .unwrap();
+        let direct_options: Options = serde_json::from_value(json!({
+            "dns":{"servers":[{"type":"hosts","tag":"hosts"}]},
+            "outbounds":[{"type":"direct","tag":"direct"}]
+        }))
+        .unwrap();
+        let direct = Arc::new(
+            OutboundManager::from_options(&direct_options, "").unwrap(),
+        );
+        let router = Arc::new(Router::from_json(&[], "").unwrap());
+        let mut inbound =
+            NaiveInbound::new("naive-0rtt", inbound_options, router, direct)
+                .unwrap();
+        inbound.start(StartStage::Start).await.unwrap();
+        let server = inbound.local_addr().unwrap();
+
+        let tls_options: OutboundTlsOptions = serde_json::from_value(json!({
+            "enabled":true,
+            "server_name":"localhost",
+            "certificate":certificate
+        }))
+        .unwrap();
+        let outbound = NaiveHttp3Outbound::new(
+            SocksAddr::from(server),
+            "localhost",
+            "alice",
+            "secret",
+            std::collections::HashMap::new(),
+            build_client_config("localhost", &tls_options, &["h3"]).unwrap(),
+            None,
+            None,
+            "cubic",
+        )
+        .unwrap();
+
+        let mut first = outbound
+            .dial_tcp(&SocksAddr::from(destination))
+            .await
+            .unwrap();
+        first.write_all(b"one!").await.unwrap();
+        let mut response = [0_u8; 4];
+        first.read_exact(&mut response).await.unwrap();
+        assert_eq!(&response, b"one!");
+        drop(first);
+
+        // Let the first connection receive and cache its TLS 1.3 session
+        // ticket, then force the HTTP/3 pool to create a fresh connection.
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        outbound.reset().await;
+
+        let mut second = outbound
+            .dial_tcp(&SocksAddr::from(destination))
+            .await
+            .unwrap();
+        second.write_all(b"two!").await.unwrap();
+        second.read_exact(&mut response).await.unwrap();
+        assert_eq!(&response, b"two!");
+        assert!(outbound.last_connection_used_zero_rtt());
+
+        drop(second);
+        outbound.reset().await;
+        inbound.close().await.unwrap();
+        echo.await.unwrap();
     }
 
     #[tokio::test]
