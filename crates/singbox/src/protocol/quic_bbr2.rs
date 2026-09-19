@@ -32,7 +32,7 @@ const STARTUP_PACING_GAIN: f64 = 2.885;
 const STARTUP_CWND_GAIN: f64 = 2.0;
 const DRAIN_PACING_GAIN: f64 = 1.0 / 2.885;
 const PROBE_UP_PACING_GAIN: f64 = 1.25;
-const PROBE_DOWN_PACING_GAIN: f64 = 0.9;
+const PROBE_DOWN_PACING_GAIN: f64 = 0.91;
 const PROBE_CWND_GAIN: f64 = 2.0;
 const PROBE_UP_CWND_GAIN: f64 = 2.25;
 const PROBE_RTT_BDP_FRACTION: f64 = 0.5;
@@ -40,13 +40,14 @@ const FULL_BW_THRESHOLD: f64 = 1.25;
 const FULL_BW_ROUNDS: u8 = 3;
 const STARTUP_FULL_LOSS_EVENTS: u8 = 8;
 const PROBE_FULL_LOSS_EVENTS: u8 = 2;
-const LOSS_THRESHOLD: f64 = 0.015;
+const LOSS_THRESHOLD: f64 = 0.02;
 const BETA: f64 = 0.3;
 const INFLIGHT_HI_HEADROOM: f64 = 0.15;
 const PROBE_RTT_PERIOD: Duration = Duration::from_secs(10);
 const PROBE_RTT_DURATION: Duration = Duration::from_millis(200);
 const PROBE_BASE_DURATION: Duration = Duration::from_secs(2);
 const PROBE_MAX_ROUNDS: u8 = 63;
+const PROBE_MAX_RANDOM_ROUNDS: u8 = 2;
 const DEFAULT_TCP_MSS: u64 = 1_460;
 // Chromium QUIC's BBRv2 model starts from kInitialRttMs rather than Quinn's
 // RFC recovery default, which is intentionally a different value.
@@ -148,10 +149,8 @@ pub struct Bbr2 {
     phase_rounds: u8,
     rounds_since_probe: u8,
     probe_wait: Duration,
-    probe_up_acked: u64,
-    probe_up_step: u64,
-    probe_up_rounds: u8,
     last_cycle_probed_too_high: bool,
+    last_cycle_stopped_risky_probe: bool,
     probe_rtt_done_stamp: Option<Instant>,
     probe_rtt_return_phase: ProbePhase,
     last_quiescence_start: Option<Instant>,
@@ -164,7 +163,7 @@ impl Bbr2 {
         let initial_cwnd = (config.initial_window_packets * mtu).max(min_cwnd);
         Self {
             config,
-            sampler: BandwidthEstimation::new(true),
+            sampler: BandwidthEstimation::new(false),
             rng: StdRng::from_entropy(),
             mode: Mode::Startup,
             mtu,
@@ -204,14 +203,12 @@ impl Bbr2 {
             phase_rounds: 0,
             rounds_since_probe: 0,
             probe_wait: PROBE_BASE_DURATION,
-            probe_up_acked: 0,
-            probe_up_step: mtu,
-            probe_up_rounds: 0,
             last_cycle_probed_too_high: false,
+            last_cycle_stopped_risky_probe: false,
             probe_rtt_done_stamp: None,
             probe_rtt_return_phase: ProbePhase::Down,
             last_quiescence_start: None,
-            ack_aggregation: AckAggregationState::new(true, false),
+            ack_aggregation: AckAggregationState::new(false, false),
         }
     }
 
@@ -246,10 +243,11 @@ impl Bbr2 {
     }
 
     fn target_inflight(&self) -> u64 {
-        let mut target = self
-            .bdp(self.cwnd_gain())
-            .saturating_add(self.extra_acked)
-            .max(self.min_cwnd);
+        let mut target = self.bdp(self.cwnd_gain());
+        if self.full_bandwidth_reached {
+            target = target.saturating_add(self.extra_acked);
+        }
+        target = target.max(self.min_cwnd);
         let mode_limit = match self.mode {
             Mode::Startup | Mode::Drain => self.inflight_lo,
             Mode::ProbeBw(ProbePhase::Cruise) | Mode::ProbeRtt => min_optional(
@@ -258,9 +256,13 @@ impl Bbr2 {
                     hi.saturating_mul_float(1.0 - INFLIGHT_HI_HEADROOM)
                 }),
             ),
-            Mode::ProbeBw(_) => {
+            Mode::ProbeBw(ProbePhase::Down | ProbePhase::Refill) => {
                 min_optional(self.inflight_lo, self.inflight_hi)
             }
+            // Chromium's default B2ON configuration deliberately ignores
+            // inflight_hi while probing upward. Optional experiment flags can
+            // enable the per-round slope growth, but Cronet does not set them.
+            Mode::ProbeBw(ProbePhase::Up) => self.inflight_lo,
         };
         if let Some(limit) = mode_limit {
             target = target.min(limit.max(self.min_cwnd));
@@ -346,10 +348,9 @@ impl Bbr2 {
 
     fn bound_probe_inflight_hi(&mut self) {
         let candidate = self
-            .delivered_since_last_send()
-            .unwrap_or_default()
+            .last_send_state
+            .map_or(0, |state| state.bytes_in_flight)
             .max(self.target_inflight().saturating_mul_float(1.0 - BETA))
-            .max(self.max_bytes_delivered_in_round)
             .max(self.min_cwnd);
         self.inflight_hi = Some(candidate);
     }
@@ -381,20 +382,18 @@ impl Bbr2 {
         match phase {
             ProbePhase::Down => {
                 self.cycle_started = now;
-                self.rounds_since_probe = 0;
+                self.rounds_since_probe =
+                    self.rng.gen_range(0..PROBE_MAX_RANDOM_ROUNDS);
                 self.probe_wait = PROBE_BASE_DURATION
-                    + Duration::from_millis(self.rng.gen_range(0..=1000));
+                    + Duration::from_micros(self.rng.gen_range(0..1_000_000));
                 self.round_end_packet = self.max_sent_packet;
             }
             ProbePhase::Refill => {
-                self.probe_up_rounds = 0;
-                self.probe_up_acked = 0;
                 self.bandwidth_lo = None;
                 self.inflight_lo = None;
                 self.round_end_packet = self.max_sent_packet;
             }
             ProbePhase::Up => {
-                self.raise_probe_up_slope();
                 self.round_end_packet = self.max_sent_packet;
             }
             ProbePhase::Cruise => {}
@@ -413,12 +412,6 @@ impl Bbr2 {
     fn is_time_to_probe_bandwidth(&self, now: Instant) -> bool {
         now.saturating_duration_since(self.cycle_started) > self.probe_wait
             || self.rounds_since_probe >= self.reno_coexistence_probe_rounds()
-    }
-
-    fn raise_probe_up_slope(&mut self) {
-        let growth = 1_u64 << self.probe_up_rounds.min(30);
-        self.probe_up_rounds = self.probe_up_rounds.saturating_add(1).min(30);
-        self.probe_up_step = (self.cwnd / growth).max(self.mtu);
     }
 
     fn enter_probe_rtt(&mut self) {
@@ -474,7 +467,11 @@ impl Bbr2 {
                 }
             }
             Mode::ProbeBw(ProbePhase::Down) => {
-                if self.is_time_to_probe_bandwidth(now) {
+                let restart_risky_probe = self.round_started
+                    && self.phase_rounds == 1
+                    && self.last_cycle_stopped_risky_probe
+                    && !self.last_cycle_probed_too_high;
+                if restart_risky_probe || self.is_time_to_probe_bandwidth(now) {
                     self.set_probe_phase(ProbePhase::Refill, now);
                 } else if in_flight <= self.bdp(1.0).max(self.min_cwnd)
                     || now.saturating_duration_since(self.phase_started)
@@ -504,21 +501,6 @@ impl Bbr2 {
                 }
             }
             Mode::ProbeBw(ProbePhase::Up) => {
-                if prior_in_flight >= self.cwnd
-                    && self.inflight_hi.is_some_and(|hi| self.cwnd >= hi)
-                {
-                    self.probe_up_acked =
-                        self.probe_up_acked.saturating_add(self.bytes_acked);
-                }
-                if let Some(hi) = self.inflight_hi.as_mut() {
-                    while self.probe_up_acked >= self.probe_up_step {
-                        self.probe_up_acked -= self.probe_up_step;
-                        *hi = hi.saturating_add(self.mtu);
-                    }
-                }
-                if self.round_started {
-                    self.raise_probe_up_slope();
-                }
                 let probed_too_high =
                     self.loss_is_too_high(PROBE_FULL_LOSS_EVENTS);
                 let risky = self.last_cycle_probed_too_high
@@ -526,7 +508,7 @@ impl Bbr2 {
                 let queueing_threshold = self
                     .bdp(1.0)
                     .saturating_mul_float(FULL_BW_THRESHOLD)
-                    .saturating_add(2 * self.mtu)
+                    .saturating_add(2 * DEFAULT_TCP_MSS)
                     .saturating_add(self.extra_acked);
                 let queueing =
                     self.phase_rounds > 0 && in_flight >= queueing_threshold;
@@ -535,8 +517,8 @@ impl Bbr2 {
                         self.bound_probe_inflight_hi();
                     }
                     self.last_cycle_probed_too_high = probed_too_high;
+                    self.last_cycle_stopped_risky_probe = risky;
                     self.set_probe_phase(ProbePhase::Down, now);
-                    self.rounds_since_probe = 0;
                 }
             }
             Mode::ProbeRtt => {
@@ -644,12 +626,8 @@ impl Bbr2 {
                     self.bandwidth_increased,
                 );
             self.sampler.end_acks(excess_acked == 0);
-            self.extra_acked = if self.full_bandwidth_reached {
-                self.ack_aggregation.max_ack_height()
-            } else {
-                excess_acked
-            }
-            .min(self.cwnd);
+            self.extra_acked =
+                self.ack_aggregation.max_ack_height().min(self.cwnd);
         }
 
         self.largest_acked_packet =
@@ -1085,7 +1063,7 @@ mod tests {
             bandwidth,
             false,
         );
-        assert_eq!(excess, 17_880);
+        assert_eq!(excess, 17_940);
 
         controller.full_bandwidth_reached = true;
         controller.extra_acked = controller
@@ -1098,9 +1076,12 @@ mod tests {
         assert_eq!(controller.target_inflight(), base + excess);
 
         controller.inflight_hi = Some(base + controller.mtu);
-        assert_eq!(controller.target_inflight(), base + excess);
-        controller.mode = Mode::ProbeBw(ProbePhase::Up);
+        controller.mode = Mode::ProbeBw(ProbePhase::Down);
         assert_eq!(controller.target_inflight(), base + controller.mtu);
+        controller.mode = Mode::ProbeBw(ProbePhase::Up);
+        let probe_up_base =
+            controller.bdp(PROBE_UP_CWND_GAIN).max(controller.min_cwnd);
+        assert_eq!(controller.target_inflight(), probe_up_base + excess);
     }
 
     #[test]
@@ -1120,7 +1101,7 @@ mod tests {
             60_000,
             false,
         );
-        assert_eq!(extra, 17_880);
+        assert_eq!(extra, 17_940);
         controller.full_bandwidth_reached = true;
         controller.extra_acked = extra;
         controller.bytes_lost = controller.mtu;
@@ -1182,6 +1163,51 @@ mod tests {
 
         assert_eq!(controller.mode, Mode::ProbeBw(ProbePhase::Up));
         assert_eq!(controller.phase_rounds, 4);
+    }
+
+    #[test]
+    fn base_b2on_loss_and_probe_inflight_rules_match_chromium() {
+        let start = Instant::now();
+        let mut controller = controller(start);
+        controller.round_loss_events = PROBE_FULL_LOSS_EVENTS;
+        controller.round_bytes_lost = 1_000;
+        controller.last_send_state = Some(SendTimeState {
+            app_limited: false,
+            total_acked: 0,
+            bytes_in_flight: 50_000,
+        });
+        assert!(!controller.loss_is_too_high(PROBE_FULL_LOSS_EVENTS));
+        controller.round_bytes_lost = 1_001;
+        assert!(controller.loss_is_too_high(PROBE_FULL_LOSS_EVENTS));
+
+        controller.mode = Mode::ProbeBw(ProbePhase::Up);
+        controller.max_bytes_delivered_in_round = 80_000;
+        controller.bound_probe_inflight_hi();
+        assert_eq!(controller.inflight_hi, Some(50_000));
+    }
+
+    #[test]
+    fn probe_cycle_randomization_and_risky_restart_use_default_bounds() {
+        let start = Instant::now();
+        let mut controller = controller(start);
+        controller.set_probe_phase(ProbePhase::Down, start);
+        assert!(controller.rounds_since_probe < PROBE_MAX_RANDOM_ROUNDS);
+        assert!(controller.probe_wait >= PROBE_BASE_DURATION);
+        assert!(
+            controller.probe_wait
+                < PROBE_BASE_DURATION + Duration::from_secs(1)
+        );
+
+        controller.last_cycle_stopped_risky_probe = true;
+        controller.last_cycle_probed_too_high = false;
+        controller.round_started = true;
+        controller.update_mode(
+            start + Duration::from_millis(1),
+            controller.cwnd,
+            controller.cwnd,
+            false,
+        );
+        assert_eq!(controller.mode, Mode::ProbeBw(ProbePhase::Refill));
     }
 
     #[test]

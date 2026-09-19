@@ -12,10 +12,10 @@
 | --- | --- |
 | 总体 | **99.9%**；本轮继续收敛 Naive/QUIC BBRv2 的逐事件模型，完成度不因内部算法校准或单纯增加回归而上调 |
 | 交付 | `crates/singbox` 为可嵌入 Rust library；binary/CLI 由 zay 实现；上游 CLI、daemon/service 与 experimental 应用控制 API 不计入分母 |
-| 最新实现 | BBRv2 继续按 Chromium/sing-quic 状态机校准：初始 RTT 与 2.885 pacing gain、首个 ACK pacing、整轮 loss event/`bandwidth_lo`/`inflight_lo`、按模式应用 `inflight_hi` headroom、ProbeBW Up 动态斜率及 queue/risk/loss 退出、ProbeRTT 与 quiescence 返回路径均已落地。delivery sampler 现向控制器传递精确 send-time inflight、delivered inflight 与 app-limited 状态；ProbeBW 还会按 `min(63, target_inflight / 1460)` 的 Reno coexistence 轮次阈值或严格超过随机时间窗口触发 Refill，并从 ProbeDown 直接进入新探测周期 |
-| 最新验证 | 1637 项 unit 注册：1628 通过、9 默认忽略；50 项 crate 外 public-library integration 通过，稳定默认基线 **1678 项零失败**；9 个固定 Go/macOS 现场项均已实际执行通过，本轮合计 **1687 项零失败**；23 项 BBR 定向回归、Rust client→固定 Go sing-box 的 2 MiB 有损 H3 BBRv2 复验、全特性全目标严格 Clippy 与格式检查通过 |
+| 最新实现 | Naive 的基础 Cronet `B2ON` 已从混用可选实验参数改为 Chromium 默认模型：ProbeDown pacing 0.91、2% loss 阈值、1× ACK aggregation threshold、关闭未启用的 A0 过估计规避；`extra_acked` 仅在 full-bandwidth 后进入 cwnd 目标。ProbeBW Down/Refill/Cruise/Up 分别应用正确的 `inflight_hi`/headroom，默认 ProbeUp 忽略 upper bound 且不再执行实验性动态斜率；loss upper bound 取 send-time physical inflight 与 70% target，不误纳入 max-delivered。探测周期使用微秒级随机 wait、随机初始 Reno round，并在上一周期 risky 但未高损时首轮快速 Refill；queue 门槛改用固定 TCP MSS |
+| 最新验证 | 1639 项 unit 注册：1630 通过、9 默认忽略；50 项 crate 外 public-library integration 通过，稳定默认基线 **1680 项零失败**；9 个固定 Go/macOS 现场项均已实际执行通过，合计 **1689 项零失败**；25 项 BBR 定向回归、Rust client→固定 Go sing-box 的 2 MiB 有损 H3 BBRv2 复验、全特性全目标严格 Clippy 与格式检查通过 |
 | 仍需外部验证 | 三桌面特权 TUN/系统 VPN/路由与休眠恢复、Linux kTLS 内核矩阵、Windows Schannel/WinDivert/IP Helper 真机、Android/iOS 真机切网、外部 C Tor、多项生产服务与公网长时/高损耗互通 |
-| 当前重点 | 固定 Cronet 与 Rust BBRv2 的逐事件数值 oracle，继续核对 ACK/loss 同批排序、persistent-queue 与 cwnd 全局上限边界；之后压缩可在本机确定性复现的 wire/error-timing 长尾 |
+| 当前重点 | 固定 Cronet 与 Rust BBRv2 的逐事件数值 oracle，继续核对两轮 max-bandwidth filter、ACK/loss 同批排序、persistent-queue 与 cwnd 全局上限边界；之后压缩可在本机确定性复现的 wire/error-timing 长尾 |
 
 <details>
 <summary>详细模块矩阵与上一基线（展开查看）</summary>
@@ -949,6 +949,7 @@ sing-box 使用 GPL-3.0-or-later。直接移植及其派生实现放在独立 `s
 
 ### 2026-09-13
 
+- Naive BBRv2 回到 Cronet 仅启用 `B2ON` 时的 Chromium 默认参数：ProbeDown gain 0.91、loss threshold 2%、ACK aggregation 1× 且不启用 A0 overestimate avoidance；Startup 不叠加 extra-ACK，full-bandwidth 后才把窗口化 ACK height 纳入 target。ProbeBW 默认 Up 忽略 `inflight_hi` 并移除实验性逐轮增长，Down/Refill 使用完整 upper bound、Cruise 使用 15% headroom；探测 loss bound 改取 send-time physical inflight 与 70% target，不再误用 delivered maximum。随机 wait 改为微秒粒度并随机化 Reno coexistence 初始轮次，risky probe 在下一 Down 首轮快速重探，queue threshold 使用固定 1460-byte TCP MSS。新增默认边界/周期回归；完整测试为 1639 unit（1630 通过、9 忽略）与 50 library integration，默认 1680 项零失败；固定 Go 2 MiB 有损 H3 复验与严格 Clippy 通过，连同已实测现场项合计 1689 项零失败。总体估算保持 99.9%。
 - ProbeBW 补齐 Reno coexistence 探测调度：独立保存整个 probe cycle 的起点，按 `min(63, target_inflight / 1460)` 个 round 或严格超过随机 wait duration 进入 Refill；判断同时覆盖 Cruise 和 ProbeDown，后者可直接开始下一次探测并仍保留同事件的 ProbeRTT 到期判断。Down/Refill/Up 进入时会像上游一样重启 round 边界，避免把旧 flight 错计入新 phase。新增轮次与纳秒级时间边界回归；23 项 BBR 定向测试、2 MiB 有损 Go 互操作、1637 unit（1628 通过、9 忽略）、50 library integration 和严格 Clippy 全部通过，默认 1678 项、合计实际 1687 项零失败。总体估算保持 99.9%。
 - 继续校准 Naive QUIC BBRv2 的 Chromium/sing-quic 状态机：初始 RTT/2.885 pacing gain 与首 ACK pacing、整轮 loss 聚合和持久 `bandwidth_lo`/`inflight_lo`、Startup/Drain/Cruise/ProbeRTT 的不同 `inflight_hi` 限制、ProbeUp 动态增长斜率与 queue/risk/loss 退出、ProbeRTT 到期及 quiescence 返回均已逐项实现。delivery sampler 新增精确 send-time state、sample inflight 与 delivered-in-round 传递，loss 阈值及 `inflight_hi/lo` 不再使用 event prior-inflight 近似。22 项 BBR 定向测试、Rust→固定 Go 2 MiB 有损 H3、1636 unit（1627 通过、9 忽略）、50 library integration 和严格 Clippy 全部通过；默认 1677 项、连同已实际执行的 9 个现场项合计 1686 项零失败。总体估算保持 99.9%。
 - BBRv2 补齐 ACK aggregation 数值模型：复用 sing-quic 对齐的 10-round ACK-height filter，在同批 ACK 事件中维护 epoch/带宽增长，startup 使用当前 excess、full-bandwidth 使用窗口最大值，并将有界 `extra_acked` 叠加到 BDP 目标后再受 `inflight_lo/hi` 限制；没有新 ACK 的 loss-timer 事件保持 epoch 与预算不变。精确 1 ms burst/纯 loss 数值向量及 Rust→固定 Go 2 MiB 有损 H3 复验通过；稳定基线为 1632 unit 中 1623 通过、9 忽略，加 50 library integration 共 1673 项默认零失败，合计实际执行 1682 项零失败，严格 Clippy 通过。总体估算保持 99.9%。
