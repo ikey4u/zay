@@ -5,7 +5,6 @@ edition = "2021"
 authors = ["sunsijie@buaa.edu.cn"]
 description = "Safe bindings for KCP transport protocol"
 repository = "https://github.com/EasyTier/kcp-sys"
-readme = "README.md"
 license = "MIT"
 keywords = ["kcp", "bindings"]
 
