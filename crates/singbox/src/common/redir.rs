@@ -1,11 +1,10 @@
 //! Platform original-destination helpers used by redirect and TProxy.
 
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd as _;
 use std::{io, net::SocketAddr};
 
 use tokio::net::TcpStream;
-
-#[cfg(target_os = "linux")]
-use std::os::fd::AsRawFd as _;
 
 #[cfg(target_os = "linux")]
 pub fn original_destination(stream: &TcpStream) -> io::Result<SocketAddr> {
@@ -163,8 +162,9 @@ pub fn original_destination(_stream: &TcpStream) -> io::Result<SocketAddr> {
 pub fn transparent_tcp_listener(
     address: SocketAddr,
 ) -> io::Result<std::net::TcpListener> {
-    use socket2::{Domain, Protocol, Socket, Type};
     use std::os::fd::AsRawFd as _;
+
+    use socket2::{Domain, Protocol, Socket, Type};
 
     let domain = if address.is_ipv4() {
         Domain::IPV4

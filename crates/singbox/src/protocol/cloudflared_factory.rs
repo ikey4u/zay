@@ -5,16 +5,6 @@ use std::{net::IpAddr, sync::Arc, time::Duration};
 use async_trait::async_trait;
 use quinn::{ClientConfig, Endpoint, crypto::rustls::QuicClientConfig};
 
-use crate::{
-    adapter::{Dialer, stream_local_addr},
-    common::{
-        network::SocksAddr,
-        quic::PacketUdpSocket,
-        tls::{ClientTlsConfig, build_client_config},
-    },
-    option::{CurvePreference, Listable, OutboundTlsOptions},
-};
-
 use super::{
     cloudflared::{
         CLOUDFLARED_HTTP2_EDGE_SNI, CLOUDFLARED_QUIC_EDGE_ALPN,
@@ -31,6 +21,15 @@ use super::{
         CloudflaredConnectionAttempt, CloudflaredConnectionFactory,
         CloudflaredManagedConnection, CloudflaredQuicManagedConnection,
     },
+};
+use crate::{
+    adapter::{Dialer, stream_local_addr},
+    common::{
+        network::SocksAddr,
+        quic::PacketUdpSocket,
+        tls::{ClientTlsConfig, build_client_config},
+    },
+    option::{CurvePreference, Listable, OutboundTlsOptions},
 };
 
 pub const CLOUDFLARED_EDGE_TLS_HANDSHAKE_TIMEOUT: Duration =
@@ -347,22 +346,6 @@ impl CloudflaredConnectionFactory for CloudflaredEdgeConnectionFactory {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::{
-        adapter::{DialFuture, Stream},
-        common::tls::build_server_config_with_default_alpn,
-        option::InboundTlsOptions,
-        protocol::cloudflared::{
-            CloudflaredConfigurationUpdate, CloudflaredConnectRequest,
-            CloudflaredCredentials, CloudflaredMetadata,
-        },
-        protocol::cloudflared_http2::{
-            CloudflaredHttp2ResponseWriter, CloudflaredHttp2Stream,
-        },
-        protocol::cloudflared_quic::{
-            CloudflaredQuicDatagramSender, CloudflaredQuicStream,
-        },
-    };
     use bytes::Bytes;
     use http::{Method, Request, StatusCode};
     use http_body_util::{BodyExt as _, Full};
@@ -373,6 +356,25 @@ mod tests {
     use tokio_rustls::TlsAcceptor;
     use tokio_util::sync::CancellationToken;
     use uuid::Uuid;
+
+    use super::*;
+    use crate::{
+        adapter::{DialFuture, Stream},
+        common::tls::build_server_config_with_default_alpn,
+        option::InboundTlsOptions,
+        protocol::{
+            cloudflared::{
+                CloudflaredConfigurationUpdate, CloudflaredConnectRequest,
+                CloudflaredCredentials, CloudflaredMetadata,
+            },
+            cloudflared_http2::{
+                CloudflaredHttp2ResponseWriter, CloudflaredHttp2Stream,
+            },
+            cloudflared_quic::{
+                CloudflaredQuicDatagramSender, CloudflaredQuicStream,
+            },
+        },
+    };
 
     #[test]
     fn production_tls_configs_pin_edge_names_curves_alpn_and_ca_bundle() {

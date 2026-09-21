@@ -8,7 +8,10 @@
 use std::{
     io,
     pin::Pin,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     task::{Context, Poll},
 };
 
@@ -16,8 +19,6 @@ use hmac::{Hmac, Mac as _};
 use sha1::Sha1;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio_rustls::TlsConnector;
-
-use std::sync::Arc;
 
 use crate::{
     adapter::{DialFuture, Dialer, Stream},

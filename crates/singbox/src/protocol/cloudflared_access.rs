@@ -14,6 +14,7 @@ use http::HeaderMap;
 use serde::Deserialize;
 use tokio::sync::Mutex;
 
+use super::cloudflared_ingress::CloudflaredAccessConfig;
 use crate::{
     adapter::Dialer,
     common::{
@@ -23,8 +24,6 @@ use crate::{
     },
     option::{HttpClientOptions, OutboundTlsOptions},
 };
-
-use super::cloudflared_ingress::CloudflaredAccessConfig;
 
 pub const CLOUDFLARED_ACCESS_JWT_ASSERTION_HEADER: &str =
     "Cf-Access-Jwt-Assertion";

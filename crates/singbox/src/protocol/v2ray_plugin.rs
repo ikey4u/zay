@@ -320,17 +320,16 @@ where
 
 #[cfg(test)]
 mod tests {
+    use rcgen::{CertifiedKey, generate_simple_self_signed};
     use tokio::net::TcpListener;
 
+    use super::*;
     use crate::{
         common::tls::build_server_config_with_default_alpn,
         option::{DirectOutboundOptions, InboundTlsOptions},
         protocol::direct::DirectOutbound,
         transport::{quic::server_config, v2ray::accept_websocket},
     };
-    use rcgen::{CertifiedKey, generate_simple_self_signed};
-
-    use super::*;
 
     #[test]
     fn parses_upstream_defaults_tls_certificate_and_modes() {

@@ -26,8 +26,10 @@ use quinn::{
     Endpoint, EndpointConfig, TokioRuntime, VarInt,
     crypto::rustls::QuicClientConfig,
 };
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
-use tokio::sync::Mutex;
+use tokio::{
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf},
+    sync::Mutex,
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::{

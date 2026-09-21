@@ -1,12 +1,13 @@
+use std::{
+    ops::{Deref, DerefMut},
+    sync::Arc,
+};
+
 use parking_lot::Mutex;
 use smoltcp::{
     iface::{SocketHandle as InnerSocketHandle, SocketSet},
     socket::{icmp, tcp, udp},
     time::Duration,
-};
-use std::{
-    ops::{Deref, DerefMut},
-    sync::Arc,
 };
 
 /// `BufferSize` is used to configure the size of the socket buffer.

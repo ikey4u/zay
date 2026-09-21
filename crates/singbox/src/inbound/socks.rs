@@ -30,11 +30,13 @@ use crate::{
     },
     option::SocksInboundOptions,
     outbound::OutboundManager,
-    protocol::socks::{
-        SocksCommand, SocksVersion, decode_udp_packet, encode_udp_packet,
-        server_request, write_reply_for_version,
+    protocol::{
+        socks::{
+            SocksCommand, SocksVersion, decode_udp_packet, encode_udp_packet,
+            server_request, write_reply_for_version,
+        },
+        uot,
     },
-    protocol::uot,
     route::{Action, Metadata, Router},
 };
 

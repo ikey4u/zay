@@ -2,21 +2,51 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    future::Future,
     io,
     path::Path,
     pin::Pin,
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
-    sync::{Arc, Mutex, RwLock},
+    sync::{
+        Arc, Mutex, RwLock,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
     task::{Context, Poll},
     time::SystemTime,
 };
 
 use futures_util::future::join_all;
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::sync::broadcast;
+use tokio::{
+    io::{AsyncRead, AsyncWrite, ReadBuf},
+    sync::broadcast,
+};
 use tokio_util::sync::CancellationToken;
 
-use crate::common::platform_network::RouteDialerDefaults;
+tokio::task_local! {
+    static TRAFFIC_ATTRIBUTION: TrafficAttribution;
+}
+
+const MAX_PROCESS_TRAFFIC_RECORDS: usize = 2048;
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TrafficAttribution {
+    pub source: Option<SocksAddr>,
+    pub domain: String,
+    pub rule: String,
+    pub process_name: String,
+    pub process_path: String,
+    pub process_lookup: String,
+}
+
+pub(crate) async fn with_traffic_attribution<F, T>(
+    attribution: TrafficAttribution,
+    future: F,
+) -> T
+where
+    F: Future<Output = T>,
+{
+    TRAFFIC_ATTRIBUTION.scope(attribution, future).await
+}
+
 #[cfg(any(target_os = "android", target_os = "ios", target_os = "macos"))]
 use crate::common::platform_network::{
     PlatformNetworkDefaults, PlatformNetworkProvider,
@@ -30,6 +60,7 @@ use crate::{
     common::{
         network::SocksAddr,
         ntp::NtpClock,
+        platform_network::RouteDialerDefaults,
         tls::{ClientTlsDialer, build_client_config_with_runtime_context},
     },
     dns::{
@@ -381,6 +412,10 @@ struct TrafficCounters {
     upload: AtomicU64,
     download: AtomicU64,
     connections: Mutex<HashMap<String, ActiveConnection>>,
+    process_traffic_enabled: AtomicBool,
+    process_traffic_generation: AtomicU64,
+    process_traffic: Mutex<HashMap<String, ProcessTrafficEntry>>,
+    process_traffic_started_at: Mutex<Option<SystemTime>>,
     events: broadcast::Sender<TrafficConnectionEvent>,
 }
 
@@ -391,6 +426,10 @@ impl Default for TrafficCounters {
             upload: AtomicU64::new(0),
             download: AtomicU64::new(0),
             connections: Mutex::new(HashMap::new()),
+            process_traffic_enabled: AtomicBool::new(false),
+            process_traffic_generation: AtomicU64::new(0),
+            process_traffic: Mutex::new(HashMap::new()),
+            process_traffic_started_at: Mutex::new(None),
             events,
         }
     }
@@ -414,6 +453,9 @@ impl TrafficCounters {
         let upload = Arc::new(AtomicU64::new(0));
         let download = Arc::new(AtomicU64::new(0));
         let cancellation = CancellationToken::new();
+        let attribution = TRAFFIC_ATTRIBUTION
+            .try_with(Clone::clone)
+            .unwrap_or_default();
         let connection = ActiveConnection {
             id: id.clone(),
             outbound: outbound.to_owned(),
@@ -423,6 +465,7 @@ impl TrafficCounters {
             download: download.clone(),
             created_at: SystemTime::now(),
             cancellation: cancellation.clone(),
+            attribution: attribution.clone(),
         };
         let snapshot = connection.snapshot();
         let mut connections = self
@@ -437,6 +480,116 @@ impl TrafficCounters {
             upload,
             download,
             cancellation,
+            attribution,
+            process_traffic_generation: AtomicU64::new(0),
+        }
+    }
+
+    fn count_upload(&self, active: &ActiveHandle, size: u64) {
+        self.upload.fetch_add(size, Ordering::Relaxed);
+        active.upload.fetch_add(size, Ordering::Relaxed);
+        self.record_process_traffic(active, size, 0);
+    }
+
+    fn count_download(&self, active: &ActiveHandle, size: u64) {
+        self.download.fetch_add(size, Ordering::Relaxed);
+        active.download.fetch_add(size, Ordering::Relaxed);
+        self.record_process_traffic(active, 0, size);
+    }
+
+    fn record_process_traffic(
+        &self,
+        active: &ActiveHandle,
+        upload: u64,
+        download: u64,
+    ) {
+        if !self.process_traffic_enabled.load(Ordering::Relaxed) {
+            return;
+        }
+        let attribution = &active.attribution;
+        let key = if !attribution.process_path.is_empty() {
+            &attribution.process_path
+        } else if !attribution.process_name.is_empty() {
+            &attribution.process_name
+        } else {
+            return;
+        };
+        let now = SystemTime::now();
+        let generation =
+            self.process_traffic_generation.load(Ordering::Acquire);
+        let new_connection = active
+            .process_traffic_generation
+            .swap(generation, Ordering::AcqRel)
+            != generation;
+        let mut records = self
+            .process_traffic
+            .lock()
+            .expect("process traffic lock poisoned");
+        if records.len() >= MAX_PROCESS_TRAFFIC_RECORDS
+            && !records.contains_key(key)
+            && let Some(oldest) = records
+                .iter()
+                .min_by_key(|(_, record)| record.last_seen)
+                .map(|(key, _)| key.clone())
+        {
+            records.remove(&oldest);
+        }
+        let record = records.entry(key.to_owned()).or_insert_with(|| {
+            ProcessTrafficEntry {
+                process_name: attribution.process_name.clone(),
+                process_path: attribution.process_path.clone(),
+                process_lookup: attribution.process_lookup.clone(),
+                upload: 0,
+                download: 0,
+                connections: 0,
+                first_seen: now,
+                last_seen: now,
+            }
+        });
+        record.upload = record.upload.saturating_add(upload);
+        record.download = record.download.saturating_add(download);
+        if new_connection {
+            record.connections = record.connections.saturating_add(1);
+        }
+        record.last_seen = now;
+    }
+
+    fn set_process_traffic_enabled(&self, enabled: bool) {
+        self.process_traffic_enabled
+            .store(enabled, Ordering::Release);
+        self.process_traffic_generation
+            .fetch_add(1, Ordering::AcqRel);
+        self.process_traffic
+            .lock()
+            .expect("process traffic lock poisoned")
+            .clear();
+        *self
+            .process_traffic_started_at
+            .lock()
+            .expect("process traffic start lock poisoned") =
+            enabled.then(SystemTime::now);
+    }
+
+    fn process_traffic_snapshot(&self) -> ProcessTrafficState {
+        let enabled = self.process_traffic_enabled.load(Ordering::Acquire);
+        let started_at = *self
+            .process_traffic_started_at
+            .lock()
+            .expect("process traffic start lock poisoned");
+        let mut records = self
+            .process_traffic
+            .lock()
+            .expect("process traffic lock poisoned")
+            .values()
+            .map(ProcessTrafficEntry::snapshot)
+            .collect::<Vec<_>>();
+        records.sort_by_key(|record| {
+            std::cmp::Reverse(record.upload.saturating_add(record.download))
+        });
+        ProcessTrafficState {
+            enabled,
+            started_at,
+            records,
         }
     }
 
@@ -477,6 +630,7 @@ struct ActiveConnection {
     download: Arc<AtomicU64>,
     created_at: SystemTime,
     cancellation: CancellationToken,
+    attribution: TrafficAttribution,
 }
 
 impl ActiveConnection {
@@ -489,6 +643,12 @@ impl ActiveConnection {
             upload: self.upload.load(Ordering::Relaxed),
             download: self.download.load(Ordering::Relaxed),
             created_at: self.created_at,
+            source: self.attribution.source.clone(),
+            domain: self.attribution.domain.clone(),
+            rule: self.attribution.rule.clone(),
+            process_name: self.attribution.process_name.clone(),
+            process_path: self.attribution.process_path.clone(),
+            process_lookup: self.attribution.process_lookup.clone(),
         }
     }
 }
@@ -498,6 +658,34 @@ struct ActiveHandle {
     upload: Arc<AtomicU64>,
     download: Arc<AtomicU64>,
     cancellation: CancellationToken,
+    attribution: TrafficAttribution,
+    process_traffic_generation: AtomicU64,
+}
+
+struct ProcessTrafficEntry {
+    process_name: String,
+    process_path: String,
+    process_lookup: String,
+    upload: u64,
+    download: u64,
+    connections: usize,
+    first_seen: SystemTime,
+    last_seen: SystemTime,
+}
+
+impl ProcessTrafficEntry {
+    fn snapshot(&self) -> ProcessTrafficSnapshot {
+        ProcessTrafficSnapshot {
+            process_name: self.process_name.clone(),
+            process_path: self.process_path.clone(),
+            process_lookup: self.process_lookup.clone(),
+            upload: self.upload,
+            download: self.download,
+            connections: self.connections,
+            first_seen: self.first_seen,
+            last_seen: self.last_seen,
+        }
+    }
 }
 
 pub(crate) struct PacketFlowTracker {
@@ -508,15 +696,11 @@ pub(crate) struct PacketFlowTracker {
 
 impl PacketFlowTracker {
     pub(crate) fn count_forward(&self, size: usize) {
-        let size = size as u64;
-        self.traffic.upload.fetch_add(size, Ordering::Relaxed);
-        self.active.upload.fetch_add(size, Ordering::Relaxed);
+        self.traffic.count_upload(&self.active, size as u64);
     }
 
     pub(crate) fn count_reverse(&self, size: usize) {
-        let size = size as u64;
-        self.traffic.download.fetch_add(size, Ordering::Relaxed);
-        self.active.download.fetch_add(size, Ordering::Relaxed);
+        self.traffic.count_download(&self.active, size as u64);
     }
 
     pub(crate) fn cancelled(&self) -> bool {
@@ -558,6 +742,31 @@ pub struct ConnectionSnapshot {
     pub upload: u64,
     pub download: u64,
     pub created_at: SystemTime,
+    pub source: Option<SocksAddr>,
+    pub domain: String,
+    pub rule: String,
+    pub process_name: String,
+    pub process_path: String,
+    pub process_lookup: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProcessTrafficSnapshot {
+    pub process_name: String,
+    pub process_path: String,
+    pub process_lookup: String,
+    pub upload: u64,
+    pub download: u64,
+    pub connections: usize,
+    pub first_seen: SystemTime,
+    pub last_seen: SystemTime,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProcessTrafficState {
+    pub enabled: bool,
+    pub started_at: Option<SystemTime>,
+    pub records: Vec<ProcessTrafficSnapshot>,
 }
 
 #[derive(Debug, Clone)]
@@ -1619,6 +1828,14 @@ impl OutboundManager {
         self.traffic.totals()
     }
 
+    pub fn process_traffic(&self) -> ProcessTrafficState {
+        self.traffic.process_traffic_snapshot()
+    }
+
+    pub fn set_process_traffic_enabled(&self, enabled: bool) {
+        self.traffic.set_process_traffic_enabled(enabled);
+    }
+
     pub(crate) fn register_packet_flow(
         &self,
         outbound: &str,
@@ -1829,10 +2046,8 @@ impl Dialer for MeteredDialer {
             if let Ok(response) = &result {
                 let upload = packet.len() as u64;
                 let download = response.packet.len() as u64;
-                self.traffic.upload.fetch_add(upload, Ordering::Relaxed);
-                self.traffic.download.fetch_add(download, Ordering::Relaxed);
-                active.upload.fetch_add(upload, Ordering::Relaxed);
-                active.download.fetch_add(download, Ordering::Relaxed);
+                self.traffic.count_upload(&active, upload);
+                self.traffic.count_download(&active, download);
             }
             result
         })
@@ -1866,10 +2081,8 @@ impl Dialer for MeteredDialer {
             if let Ok(response) = &result {
                 let upload = packet.len() as u64;
                 let download = response.packet.len() as u64;
-                self.traffic.upload.fetch_add(upload, Ordering::Relaxed);
-                self.traffic.download.fetch_add(download, Ordering::Relaxed);
-                active.upload.fetch_add(upload, Ordering::Relaxed);
-                active.download.fetch_add(download, Ordering::Relaxed);
+                self.traffic.count_upload(&active, upload);
+                self.traffic.count_download(&active, download);
             }
             result
         })
@@ -1900,8 +2113,7 @@ impl AsyncRead for MeteredStream {
         let result = Pin::new(&mut self.inner).poll_read(context, buffer);
         if result.is_ready() {
             let size = buffer.filled().len().saturating_sub(before) as u64;
-            self.traffic.download.fetch_add(size, Ordering::Relaxed);
-            self.active.download.fetch_add(size, Ordering::Relaxed);
+            self.traffic.count_download(&self.active, size);
         }
         result
     }
@@ -1915,12 +2127,7 @@ impl AsyncWrite for MeteredStream {
     ) -> Poll<io::Result<usize>> {
         let result = Pin::new(&mut self.inner).poll_write(context, buffer);
         if let Poll::Ready(Ok(size)) = &result {
-            self.traffic
-                .upload
-                .fetch_add(*size as u64, Ordering::Relaxed);
-            self.active
-                .upload
-                .fetch_add(*size as u64, Ordering::Relaxed);
+            self.traffic.count_upload(&self.active, *size as u64);
         }
         result
     }
@@ -1969,10 +2176,7 @@ impl PacketConnection for MeteredPacketConnection {
                 }
                 result = self.inner.send_to(data, destination) => result?,
             };
-            self.traffic
-                .upload
-                .fetch_add(size as u64, Ordering::Relaxed);
-            self.active.upload.fetch_add(size as u64, Ordering::Relaxed);
+            self.traffic.count_upload(&self.active, size as u64);
             Ok(size)
         })
     }
@@ -1988,12 +2192,7 @@ impl PacketConnection for MeteredPacketConnection {
                 }
                 result = self.inner.recv_from(data) => result?,
             };
-            self.traffic
-                .download
-                .fetch_add(size as u64, Ordering::Relaxed);
-            self.active
-                .download
-                .fetch_add(size as u64, Ordering::Relaxed);
+            self.traffic.count_download(&self.active, size as u64);
             Ok((size, source))
         })
     }
@@ -4176,25 +4375,71 @@ mod tests {
     };
     use tokio_rustls::TlsAcceptor;
 
-    use super::OutboundManager;
+    use super::{
+        OutboundManager, TrafficAttribution, TrafficCounters,
+        with_traffic_attribution,
+    };
     use crate::{
         adapter::{Dialer, PacketConnection},
         common::network::SocksAddr,
         option::{DialerOptions, Options},
-        protocol::socks::{
-            SocksCommand, SocksVersion, client_accept_bind, server_request,
-            write_reply, write_reply_for_version,
-        },
-        protocol::trojan::{
-            Command as TrojanCommand, TrojanPacketConnection,
-            key as trojan_key, read_request as read_trojan_request,
-        },
-        protocol::vless::{
-            Command as VlessCommand, read_request as read_vless_request,
-            write_response as write_vless_response,
+        protocol::{
+            socks::{
+                SocksCommand, SocksVersion, client_accept_bind, server_request,
+                write_reply, write_reply_for_version,
+            },
+            trojan::{
+                Command as TrojanCommand, TrojanPacketConnection,
+                key as trojan_key, read_request as read_trojan_request,
+            },
+            vless::{
+                Command as VlessCommand, read_request as read_vless_request,
+                write_response as write_vless_response,
+            },
         },
         route::{Metadata, Router},
     };
+
+    #[tokio::test]
+    async fn process_traffic_is_opt_in_and_cleared_when_disabled() {
+        let traffic = TrafficCounters::default();
+        let destination: SocksAddr = "example.com:443".parse().unwrap();
+        let attribution = TrafficAttribution {
+            process_name: "curl".into(),
+            process_path: "/usr/bin/curl".into(),
+            process_lookup: "socket_snapshot".into(),
+            ..TrafficAttribution::default()
+        };
+
+        with_traffic_attribution(attribution.clone(), async {
+            let active = traffic.register("Proxy", &destination, "tcp");
+            traffic.count_upload(&active, 64);
+            traffic.count_download(&active, 128);
+        })
+        .await;
+        assert!(!traffic.process_traffic_snapshot().enabled);
+        assert!(traffic.process_traffic_snapshot().records.is_empty());
+
+        traffic.set_process_traffic_enabled(true);
+        with_traffic_attribution(attribution, async {
+            let active = traffic.register("Proxy", &destination, "tcp");
+            traffic.count_upload(&active, 256);
+            traffic.count_download(&active, 512);
+        })
+        .await;
+        let state = traffic.process_traffic_snapshot();
+        assert!(state.enabled);
+        assert_eq!(state.records.len(), 1);
+        assert_eq!(state.records[0].process_name, "curl");
+        assert_eq!(state.records[0].process_path, "/usr/bin/curl");
+        assert_eq!(state.records[0].upload, 256);
+        assert_eq!(state.records[0].download, 512);
+
+        traffic.set_process_traffic_enabled(false);
+        let state = traffic.process_traffic_snapshot();
+        assert!(!state.enabled);
+        assert!(state.records.is_empty());
+    }
 
     #[tokio::test]
     async fn dns_reverse_mapping_enriches_ip_destination_before_route_match() {

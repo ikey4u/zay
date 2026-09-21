@@ -11,7 +11,6 @@ use ipnet::IpNet;
 use network_interface::{
     Addr as InterfaceAddr, NetworkInterface, NetworkInterfaceConfig as _,
 };
-
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
     process::Command,

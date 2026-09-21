@@ -26,15 +26,27 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+use super::{
+    tokio_smoltcp::{
+        BufferSize, Net, NetConfig, UdpSocket as SmoltcpUdpSocket,
+        channel_device::ChannelDevice,
+        smoltcp::{
+            iface::Config as SmoltcpInterfaceConfig,
+            phy::{DeviceCapabilities, Medium},
+            wire::{HardwareAddress, IpAddress, IpCidr},
+        },
+    },
+    userspace_router::UserspaceEndpointRouter,
+};
 use crate::{
     adapter::{
         DialFuture, Dialer, IcmpResponse, IpPacketPort, IpPacketReturn,
         PacketConnection, PacketFuture, PacketStream, Stream,
     },
-    common::lifecycle::{
-        Lifecycle, LifecycleError, LifecycleFuture, StartStage,
+    common::{
+        lifecycle::{Lifecycle, LifecycleError, LifecycleFuture, StartStage},
+        network::SocksAddr,
     },
-    common::network::SocksAddr,
     dns::tailscale::TailscaleNetmapProvider,
     option::{OutboundTlsOptions, TailscaleEndpointOptions, UdpNatBehavior},
     outbound::OutboundManager,
@@ -94,19 +106,6 @@ use crate::{
         },
     },
     route::Router,
-};
-
-use super::{
-    tokio_smoltcp::{
-        BufferSize, Net, NetConfig, UdpSocket as SmoltcpUdpSocket,
-        channel_device::ChannelDevice,
-        smoltcp::{
-            iface::Config as SmoltcpInterfaceConfig,
-            phy::{DeviceCapabilities, Medium},
-            wire::{HardwareAddress, IpAddress, IpCidr},
-        },
-    },
-    userspace_router::UserspaceEndpointRouter,
 };
 
 const EVENT_QUEUE_DEPTH: usize = 64;
@@ -2249,12 +2248,13 @@ fn canonical_domain(domain: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{collections::VecDeque, sync::Mutex};
 
     use boringtun::x25519::{PublicKey, StaticSecret};
     use russh::{client, keys::PublicKey as SshPublicKey};
-    use std::{collections::VecDeque, sync::Mutex};
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    use super::*;
 
     struct AcceptSshHostKey;
 

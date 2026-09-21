@@ -1,9 +1,11 @@
 // Adapted from sing-quic/congestion_meta2's bandwidth sampler (MIT) and
 // quinn-proto's BBR bandwidth estimator (MIT OR Apache-2.0).
 
-use std::collections::{BTreeMap, VecDeque};
-use std::fmt::{Debug, Display, Formatter};
-use std::time::{Duration, Instant};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    fmt::{Debug, Display, Formatter},
+    time::{Duration, Instant},
+};
 
 use super::min_max::MinMax;
 

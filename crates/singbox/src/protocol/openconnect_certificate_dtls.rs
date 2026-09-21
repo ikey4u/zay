@@ -323,9 +323,8 @@ impl Conn for RoutedPacketConn {
 mod tests {
     use tokio::sync::{Mutex, mpsc};
 
-    use crate::adapter::{DialFuture, PacketConnection, PacketFuture};
-
     use super::*;
+    use crate::adapter::{DialFuture, PacketConnection, PacketFuture};
 
     #[test]
     fn computes_conservative_data_mtu() {

@@ -6,12 +6,6 @@
 
 use std::{io, net::IpAddr, sync::Arc};
 
-use crate::{
-    adapter::{IpPacketPort, IpPacketReturn},
-    common::lifecycle::{
-        Lifecycle, LifecycleError, LifecycleFuture, StartStage,
-    },
-};
 use network_interface::{NetworkInterface, NetworkInterfaceConfig as _};
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
@@ -34,6 +28,12 @@ use super::{tun::create_tun_device, tun_route::TunRoutePlan};
 use super::{
     tun_route::TunRouteLease,
     tun_route_darwin::{DarwinRouteBackend, configure_additional_addresses},
+};
+use crate::{
+    adapter::{IpPacketPort, IpPacketReturn},
+    common::lifecycle::{
+        Lifecycle, LifecycleError, LifecycleFuture, StartStage,
+    },
 };
 
 const PACKET_QUEUE_DEPTH: usize = 256;

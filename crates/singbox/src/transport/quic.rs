@@ -17,9 +17,11 @@ use quinn::{
     ClientConfig, Connection, Endpoint, RecvStream, SendStream, ServerConfig,
     crypto::rustls::{QuicClientConfig, QuicServerConfig},
 };
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::sync::Mutex;
-use tokio::task::JoinSet;
+use tokio::{
+    io::{AsyncRead, AsyncWrite, ReadBuf},
+    sync::Mutex,
+    task::JoinSet,
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -377,6 +379,10 @@ async fn resolve_server(
 
 #[cfg(test)]
 mod tests {
+    use rcgen::{CertifiedKey, generate_simple_self_signed};
+    use serde_json::json;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
     use super::*;
     use crate::{
         common::tls::{
@@ -384,9 +390,6 @@ mod tests {
         },
         option::{InboundTlsOptions, OutboundTlsOptions},
     };
-    use rcgen::{CertifiedKey, generate_simple_self_signed};
-    use serde_json::json;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[tokio::test]
     async fn quic_dialer_opens_reusable_bidirectional_streams() {

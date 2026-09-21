@@ -1026,8 +1026,6 @@ fn cloudflared_client_arch() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::dns::{LookupFuture, MessageFuture};
     use hickory_proto::rr::{
         Record,
         rdata::{SRV, TXT},
@@ -1037,6 +1035,9 @@ mod tests {
         io::{AsyncReadExt, AsyncWriteExt},
         net::{TcpListener, UdpSocket},
     };
+
+    use super::*;
+    use crate::dns::{LookupFuture, MessageFuture};
 
     struct UnusedResolver;
 

@@ -549,9 +549,10 @@ fn truncated() -> io::Error {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use hickory_proto::rr::{RData, RecordType};
     use system_configuration::core_foundation::base::TCFType;
+
+    use super::*;
 
     #[test]
     fn scoped_dns_dictionary_preserves_servers_search_and_timeout() {

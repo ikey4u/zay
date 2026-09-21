@@ -28,13 +28,15 @@ use crate::{
     },
     option::{SnellInboundOptions, SnellUser},
     outbound::OutboundManager,
-    protocol::snell::{
-        COMMAND_CONNECT, COMMAND_CONNECT_V2, COMMAND_PING, COMMAND_UDP,
-        ObfsMode, SaltReplayCache, V5ServerSession, accept_v5_server_session,
-        wrap_obfs_server,
-    },
-    protocol::snell_v6::{
-        Mode as SnellV6Mode, V6ServerSession, accept_v6_server_session,
+    protocol::{
+        snell::{
+            COMMAND_CONNECT, COMMAND_CONNECT_V2, COMMAND_PING, COMMAND_UDP,
+            ObfsMode, SaltReplayCache, V5ServerSession,
+            accept_v5_server_session, wrap_obfs_server,
+        },
+        snell_v6::{
+            Mode as SnellV6Mode, V6ServerSession, accept_v6_server_session,
+        },
     },
     route::{Action, Metadata, Router},
 };
@@ -630,8 +632,10 @@ fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::UdpSocket;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::UdpSocket,
+    };
 
     use super::*;
     use crate::{

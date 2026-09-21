@@ -161,7 +161,7 @@ pub fn build_selector_groups(
 }
 
 fn shadowsocks_outbound(map: &serde_yaml::Mapping, tag: &str) -> Result<Value> {
-    Ok(json!({
+    let mut outbound = json!({
         "type": "shadowsocks",
         "tag": tag,
         "server": yaml_str(map, "server")?,
@@ -169,7 +169,51 @@ fn shadowsocks_outbound(map: &serde_yaml::Mapping, tag: &str) -> Result<Value> {
         "method": yaml_str(map, "cipher")?,
         "password": yaml_str(map, "password")?,
         "udp_over_tcp": yaml_bool(map, "udp-over-tcp").unwrap_or(false)
-    }))
+    });
+    apply_shadowsocks_plugin(map, &mut outbound)?;
+    Ok(outbound)
+}
+
+fn apply_shadowsocks_plugin(
+    map: &serde_yaml::Mapping,
+    outbound: &mut Value,
+) -> Result<()> {
+    let Some(plugin) = yaml_optional_str(map, "plugin") else {
+        return Ok(());
+    };
+    match plugin.as_str() {
+        "" => Ok(()),
+        "obfs" | "obfs-local" => {
+            let options = map
+                .get(YamlValue::from("plugin-opts"))
+                .and_then(YamlValue::as_mapping)
+                .context("Shadowsocks obfs plugin requires `plugin-opts`")?;
+            let mode = yaml_mapping_str(options, "mode")
+                .or_else(|| yaml_mapping_str(options, "obfs"))
+                .unwrap_or_else(|| "http".into());
+            if !matches!(mode.as_str(), "http" | "tls") {
+                bail!("unsupported Shadowsocks obfs mode `{mode}`");
+            }
+            let host = yaml_mapping_str(options, "host")
+                .or_else(|| yaml_mapping_str(options, "obfs-host"))
+                .unwrap_or_default();
+            outbound["plugin"] = json!("obfs-local");
+            outbound["plugin_opts"] = json!(format!(
+                "obfs={};obfs-host={}",
+                sip003_escape(&mode),
+                sip003_escape(&host)
+            ));
+            Ok(())
+        }
+        other => bail!("unsupported Shadowsocks plugin `{other}`"),
+    }
+}
+
+fn sip003_escape(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace(';', "\\;")
+        .replace('=', "\\=")
 }
 
 fn vmess_outbound(map: &serde_yaml::Mapping, tag: &str) -> Result<Value> {
@@ -225,11 +269,17 @@ fn hysteria_outbound(
         "tag": tag,
         "server": yaml_str(map, "server")?,
         "server_port": yaml_u16(map, "port")?,
-        "password": yaml_optional_str(map, "password").or_else(|| yaml_optional_str(map, "auth")),
-        "up_mbps": yaml_u64(map, "up"),
-        "down_mbps": yaml_u64(map, "down")
+        "password": yaml_optional_str(map, "password").or_else(|| yaml_optional_str(map, "auth"))
     });
     if let Some(obj) = out.as_object_mut() {
+        // Optional sing-box fields must be absent, not JSON null. The native
+        // config schema rejects `up_mbps: null` / `down_mbps: null`.
+        if let Some(up) = yaml_u64(map, "up") {
+            obj.insert("up_mbps".into(), json!(up));
+        }
+        if let Some(down) = yaml_u64(map, "down") {
+            obj.insert("down_mbps".into(), json!(down));
+        }
         if yaml_bool(map, "tls").unwrap_or(true) {
             obj.insert("tls".into(), build_outbound_tls(map, true)?);
         }
@@ -524,6 +574,26 @@ password: secret
     }
 
     #[test]
+    fn converts_shadowsocks_obfs_plugin() {
+        let raw = r#"
+name: test-obfs
+type: ss
+server: edge.example
+port: 443
+cipher: aes-128-gcm
+password: secret
+plugin: obfs
+plugin-opts:
+  mode: http
+  host: cover.example
+"#;
+        let proxy: Value = serde_yaml::from_str(raw).unwrap();
+        let out = convert_proxy(&proxy, None).unwrap().unwrap();
+        assert_eq!(out["plugin"], "obfs-local");
+        assert_eq!(out["plugin_opts"], "obfs=http;obfs-host=cover.example");
+    }
+
+    #[test]
     fn converts_anytls_proxy() {
         let raw = r#"
 name: jp-anytls
@@ -546,6 +616,40 @@ skip-cert-verify: true
         assert_eq!(out["tls"]["server_name"], "example.com");
         assert_eq!(out["tls"]["utls"]["fingerprint"], "chrome");
         assert!(out["tls"]["insecure"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn hysteria2_omits_unset_bandwidth() {
+        let raw = r#"
+name: hy2
+type: hysteria2
+server: example.com
+port: 443
+password: secret
+tls: true
+"#;
+        let proxy: Value = serde_yaml::from_str(raw).unwrap();
+        let out = convert_proxy(&proxy, None).unwrap().unwrap();
+        assert_eq!(out["type"], "hysteria2");
+        assert!(out.get("up_mbps").is_none());
+        assert!(out.get("down_mbps").is_none());
+    }
+
+    #[test]
+    fn hysteria2_keeps_configured_bandwidth() {
+        let raw = r#"
+name: hy2
+type: hysteria2
+server: example.com
+port: 443
+password: secret
+up: 100
+down: 200
+"#;
+        let proxy: Value = serde_yaml::from_str(raw).unwrap();
+        let out = convert_proxy(&proxy, None).unwrap().unwrap();
+        assert_eq!(out["up_mbps"], 100);
+        assert_eq!(out["down_mbps"], 200);
     }
 
     #[test]

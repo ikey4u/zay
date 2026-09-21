@@ -15,8 +15,10 @@ use quinn::{
     ClientConfig, Connection, Endpoint, RecvStream, SendStream,
     TransportConfig, VarInt,
 };
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
-use tokio::task::JoinSet;
+use tokio::{
+    io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf},
+    task::JoinSet,
+};
 use tokio_util::sync::CancellationToken;
 
 use super::cloudflared::{
@@ -544,6 +546,15 @@ impl Drop for CloudflaredQuicEdge {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use quinn::crypto::rustls::QuicClientConfig;
+    use rcgen::{CertifiedKey, generate_simple_self_signed};
+    use serde_json::json;
+    use tokio::io::AsyncReadExt;
+    use tokio_util::compat::TokioAsyncReadCompatExt;
+    use uuid::Uuid;
+
     use super::*;
     use crate::{
         cloudflared_quic_metadata_capnp as metadata_capnp,
@@ -557,13 +568,6 @@ mod tests {
         },
         transport::quic::server_config,
     };
-    use quinn::crypto::rustls::QuicClientConfig;
-    use rcgen::{CertifiedKey, generate_simple_self_signed};
-    use serde_json::json;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use tokio::io::AsyncReadExt;
-    use tokio_util::compat::TokioAsyncReadCompatExt;
-    use uuid::Uuid;
 
     struct QuicRegistrationServer {
         registered: Arc<tokio::sync::Notify>,

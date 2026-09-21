@@ -9,11 +9,13 @@ mod http;
 mod logging;
 #[cfg(unix)]
 mod native_tun_worker;
+mod platform;
 mod runtime;
 mod settings;
 mod singbox;
 mod ssh;
 mod stack;
+mod webui;
 #[cfg(windows)]
 mod windows_tun_worker;
 mod yaml;
@@ -25,26 +27,14 @@ use clap::{Args, CommandFactory, Parser, Subcommand};
 
 const LONG_ABOUT: &str = r#"Zay – network stack and connection tools.
 
-Network stack:
-  sudo zay run proxy -s "https://..."
-  zay run proxy --mesh relay --mesh-auth 'net:secret' --mesh-ip 10.126.126.1/24
-  zay run proxy --help
+Web control plane:
+  zay webui
+  zay webui --listen 0.0.0.0:8787 --token 'a-long-random-token'
 
-Configuration:
-  zay config dump
-  zay config set mixed_port 7891
-  zay config edit
-
-One-off tasks:
-  zay run fwd --to tcp://0.0.0.0:8080 --from tcp://127.0.0.1:80
-  zay run ssh -L 3307:10.0.0.5:3306 myserver
-  zay run http --root dist --spa
-
-Persistent services:
-  zay service start
-  zay service status
-  zay service logs --follow
-  zay service stop
+Experimental/internal commands:
+  zay x run proxy --help
+  zay x config dump
+  zay x service status
 
 "#;
 
@@ -72,9 +62,9 @@ pub struct Cli {
     #[arg(short = 'c', long, value_name = "FILE", hide = true)]
     config: Option<std::path::PathBuf>,
 
-    /// Internal re-exec entry used by the detached service runtime.
+    /// Internal foreground core child supervised by `zay webui`.
     #[arg(long, hide = true)]
-    run_daemon: bool,
+    run_core: bool,
 
     /// Internal elevated TUN worker owned by zay.
     #[arg(long, hide = true)]
@@ -96,6 +86,20 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
+    /// Start the browser-based control plane
+    Webui(webui::WebUiCli),
+    /// Experimental and internal commands (unstable)
+    X(ExperimentalCli),
+}
+
+#[derive(Args, Debug)]
+pub struct ExperimentalCli {
+    #[command(subcommand)]
+    command: ExperimentalCommand,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ExperimentalCommand {
     /// Run one-off foreground tasks
     Run(RunCli),
     /// Inspect and edit zay.toml
@@ -133,7 +137,7 @@ pub struct ServiceCli {
 
 #[derive(Subcommand, Debug)]
 pub enum ServiceCommand {
-    /// Start all enabled components from zay.toml in the background
+    /// Start all enabled components from zay.toml in the foreground
     Start,
     /// Show persistent service status
     Status,
@@ -147,11 +151,11 @@ pub enum ServiceCommand {
 pub struct ServiceOpts {
     /// Data directory for the persistent service runtime
     #[arg(short, long, value_name = "DIR", global = true)]
-    data_dir: Option<std::path::PathBuf>,
+    pub(crate) data_dir: Option<std::path::PathBuf>,
 
     /// Path to zay.toml for the persistent service runtime
     #[arg(short = 'c', long, value_name = "FILE", global = true)]
-    config: Option<std::path::PathBuf>,
+    pub(crate) config: Option<std::path::PathBuf>,
 }
 
 // Internal filter shape retained for unit-tested event matching. It is no
@@ -180,7 +184,7 @@ pub enum ServiceProxyCommand {
     List,
 }
 
-/// Options for `zay run proxy`.
+/// Options for `zay x run proxy`.
 #[derive(clap::Args, Debug, Default)]
 pub struct ProxyOpts {
     /// Remote proxy subscription URL (repeatable)
@@ -216,7 +220,7 @@ pub struct ProxyOpts {
     #[clap(long, value_name = "LEVEL")]
     pub log_level: Option<String>,
 
-    /// Disable system TUN (default: TUN on for `zay run proxy`)
+    /// Disable system TUN (default: TUN on for `zay x run proxy`)
     #[clap(long = "no-tun", action = clap::ArgAction::SetTrue)]
     pub no_tun: bool,
 
@@ -255,18 +259,10 @@ fn main() -> Result<()> {
             token: cli.tun_worker_token.context("missing TUN worker token")?,
         });
     }
-    if cli.run_daemon {
-        let guard =
-            daemon::enter(cli.data_dir.as_deref(), cli.config.as_deref())?;
-        let sudo_password = daemon::take_sudo_password()?;
+    if cli.run_core {
         return tokio::runtime::Runtime::new()
-            .context("creating tokio runtime")?
-            .block_on(runtime::run_daemon(
-                cli.data_dir,
-                cli.config,
-                &guard,
-                sudo_password,
-            ));
+            .context("creating core tokio runtime")?
+            .block_on(runtime::run_foreground_core(cli.data_dir, cli.config));
     }
     let Some(command) = cli.command else {
         Cli::command().print_help().context("printing help")?;
@@ -274,31 +270,26 @@ fn main() -> Result<()> {
         return Ok(());
     };
     match command {
-        Command::Run(run) => match run.command {
-            RunCommand::Proxy(stack) => stack::run(stack),
-            RunCommand::Http(http) => run_http(http),
-            RunCommand::Fwd(fwd) => run_fwd(fwd),
-            RunCommand::Ssh(ssh) => run_ssh(ssh),
+        Command::Webui(webui) => webui::run(webui),
+        Command::X(experimental) => match experimental.command {
+            ExperimentalCommand::Run(run) => match run.command {
+                RunCommand::Proxy(stack) => stack::run(stack),
+                RunCommand::Http(http) => run_http(http),
+                RunCommand::Fwd(fwd) => run_fwd(fwd),
+                RunCommand::Ssh(ssh) => run_ssh(ssh),
+            },
+            ExperimentalCommand::Config(config) => config::run(config),
+            ExperimentalCommand::Service(service) => run_service(service),
         },
-        Command::Config(config) => config::run(config),
-        Command::Service(service) => run_service(service),
     }
 }
 
 fn run_service(service: ServiceCli) -> Result<()> {
     let opts = service.opts;
     match service.command {
-        ServiceCommand::Start => {
-            daemon::ensure_not_running(
-                opts.data_dir.as_deref(),
-                opts.config.as_deref(),
-            )?;
-            #[cfg(unix)]
-            let sudo_password = preflight_persistent_tun(&opts)?;
-            #[cfg(not(unix))]
-            let sudo_password = None;
-            daemon::spawn(opts.data_dir, opts.config, sudo_password)
-        }
+        ServiceCommand::Start => tokio::runtime::Runtime::new()
+            .context("creating core tokio runtime")?
+            .block_on(runtime::run_foreground_core(opts.data_dir, opts.config)),
         ServiceCommand::Status => run_status(opts.data_dir, opts.config),
         ServiceCommand::Stop => run_stop(opts.data_dir, opts.config),
         ServiceCommand::Proxy(proxy) => match proxy.command {
@@ -346,32 +337,6 @@ fn subscription_proxy_tags(config: &serde_json::Value) -> Result<Vec<String>> {
         .collect())
 }
 
-/// Keep the persistent supervisor unprivileged when only sing-box needs TUN.
-/// Mesh **node** elevates the whole daemon so in-process EasyTier can create its
-/// kernel TUN; sing-box then inherits root and skips a nested sudo.
-#[cfg(unix)]
-fn preflight_persistent_tun(opts: &ServiceOpts) -> Result<Option<String>> {
-    let cfg = settings::load_persistent_config(
-        opts.data_dir.as_deref(),
-        opts.config.as_deref(),
-    )?;
-    let mesh_node_needs_root = cfg
-        .mesh
-        .as_ref()
-        .is_some_and(|mesh| mesh.enabled && mesh.is_node());
-    let relay_forces_tun_off = cfg
-        .mesh
-        .as_ref()
-        .is_some_and(|mesh| mesh.role == settings::MeshRole::Relay);
-    let singbox_needs_root = (cfg.stack.enabled || cfg.mesh.is_some())
-        && cfg.stack.tun.enabled
-        && !relay_forces_tun_off;
-    if mesh_node_needs_root || singbox_needs_root {
-        return privilege::daemon_tun_password();
-    }
-    Ok(None)
-}
-
 fn print_stack_status(response: &str) -> Result<()> {
     let value: serde_json::Value = serde_json::from_str(response)
         .context("parsing proxy status response")?;
@@ -397,6 +362,16 @@ fn print_stack_status(response: &str) -> Result<()> {
         }
         crate::stack::controller::StackRunState::Starting => {
             println!("proxy: starting");
+        }
+        crate::stack::controller::StackRunState::Degraded => {
+            eprintln!(
+                "proxy: unavailable{}",
+                status
+                    .proxy_error
+                    .as_deref()
+                    .map(|error| format!(" ({error})"))
+                    .unwrap_or_default()
+            );
         }
         crate::stack::controller::StackRunState::Stopping => {
             println!("proxy: stopping");
@@ -632,7 +607,10 @@ impl LogFilters {
             .unwrap_or("");
         let domain_source = field("domain_source");
         let direct_domain = match domain_source {
-            "dns" | "destination" => field("domain"),
+            "destination" | "fakeip" | "sniff" | "resolved" | "dns_reverse" => {
+                field("domain")
+            }
+            "dns" if event_name == "dns" => field("domain"),
             // Historical records do not have provenance. DNS records are
             // safe; connection records are not, because old fields could
             // have been populated from IP correlation.
@@ -784,6 +762,25 @@ mod tests {
         assert!(filters.matches(with_port));
         assert!(!filters.matches(with_alias));
         assert!(!filters.matches(unrelated));
+    }
+
+    #[test]
+    fn domain_filter_accepts_native_exact_and_correlated_evidence() {
+        let filters = LogFilters::from_cli(&LogsCli {
+            follow: false,
+            domain: Some(r"^github\.com$".into()),
+            app: None,
+            ip: None,
+            node: None,
+            level: None,
+            regex: None,
+            text: None,
+        })
+        .unwrap();
+        let sniff = r#"{"source":"singbox","level":"info","component":"proxy","event":"connection","message":"x","fields":{"destination":"140.82.112.4:443","domain":"github.com","domain_source":"sniff","domain_confidence":"exact"}}"#;
+        let reverse = r#"{"source":"singbox","level":"info","component":"proxy","event":"connection","message":"x","fields":{"destination":"140.82.112.4:443","domain":"github.com","domain_source":"dns_reverse","domain_confidence":"correlated"}}"#;
+        assert!(filters.matches(sniff));
+        assert!(filters.matches(reverse));
     }
 
     #[test]

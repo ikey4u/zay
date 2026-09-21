@@ -4,6 +4,8 @@
 //! chains use a degenerate PKCS#7 SignedData object, matching OpenConnect and
 //! `sing-openconnect` rather than a TLS certificate-list encoding.
 
+use std::fmt;
+
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use openssl::{
     hash::MessageDigest,
@@ -13,15 +15,14 @@ use openssl::{
     stack::Stack,
     x509::X509,
 };
-use std::fmt;
 use thiserror::Error;
 
-use super::auth::{
-    auth_writer, write_capabilities, write_end, write_identity, write_opaque,
-    write_root_start, write_start, write_text,
-};
 use super::{
     AnyConnectAuthClientIdentity, AnyConnectAuthError, AnyConnectAuthForm,
+    auth::{
+        auth_writer, write_capabilities, write_end, write_identity,
+        write_opaque, write_root_start, write_start, write_text,
+    },
 };
 
 #[derive(Clone, PartialEq, Eq)]

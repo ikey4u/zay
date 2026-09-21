@@ -395,7 +395,7 @@ mod imp {
                 if !crate::privilege::is_root() {
                     anyhow::bail!(
                         "mesh node uses EasyTier kernel TUN and requires root \
-                         (run `sudo zay run …`, or `zay service start` which elevates the daemon)"
+                         (run `sudo zay x run …`, or `zay x service start` which elevates the daemon)"
                     );
                 }
                 eprintln!(

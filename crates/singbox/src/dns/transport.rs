@@ -29,9 +29,11 @@ use hyper::{
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use n0_watcher::Watcher as _;
 use quinn::{Endpoint, crypto::rustls::QuicClientConfig};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::{Mutex, mpsc, oneshot};
-use tokio::time::timeout;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    sync::{Mutex, mpsc, oneshot},
+    time::timeout,
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::{

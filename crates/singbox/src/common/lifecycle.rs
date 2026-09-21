@@ -1,7 +1,6 @@
 //! Lifecycle stages shared by the eventual DNS, route, endpoint and service graph.
 
-use std::future::Future;
-use std::pin::Pin;
+use std::{future::Future, pin::Pin};
 
 pub type LifecycleFuture<'a> =
     Pin<Box<dyn Future<Output = Result<(), LifecycleError>> + Send + 'a>>;

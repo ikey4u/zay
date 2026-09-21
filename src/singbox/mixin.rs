@@ -128,6 +128,7 @@ mod tests {
     fn mesh_settings() -> Settings {
         Settings {
             subscriptions: Vec::new(),
+            active_nodes: Vec::new(),
             data_dir: PathBuf::from("/tmp"),
             mixed_port: 7890,
             allow_lan: false,

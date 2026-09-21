@@ -1,10 +1,11 @@
-use futures::{Sink, Stream};
-use smoltcp::phy::DeviceCapabilities;
 use std::{
     io,
     pin::Pin,
     task::{Context, Poll},
 };
+
+use futures::{Sink, Stream};
+use smoltcp::phy::DeviceCapabilities;
 use tokio::sync::{
     broadcast,
     mpsc::{Receiver, Sender, channel},

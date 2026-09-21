@@ -6,6 +6,8 @@
 //! master secret injected by CSTP and protecting records for the exact cipher
 //! suite selected by the AnyConnect gateway.
 
+use std::fmt;
+
 use aes_gcm::{
     Aes128Gcm, Aes256Gcm,
     aead::{Aead, KeyInit as _, Payload},
@@ -24,7 +26,6 @@ use openssl::{
 };
 use sha1_11::Sha1;
 use sha2::{Digest as _, Sha256, Sha384};
-use std::fmt;
 use thiserror::Error;
 
 pub const DTLS12_VERSION: u16 = 0xfefd;

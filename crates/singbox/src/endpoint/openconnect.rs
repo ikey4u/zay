@@ -15,11 +15,26 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use http::{Method, StatusCode};
 use network_interface::{NetworkInterface, NetworkInterfaceConfig as _};
 use openssl::{pkey::PKey, x509::X509};
-use tokio::io::AsyncWriteExt;
-use tokio::sync::{Notify, mpsc, oneshot};
-use tokio::task::JoinHandle;
+use tokio::{
+    io::AsyncWriteExt,
+    sync::{Notify, mpsc, oneshot},
+    task::JoinHandle,
+};
+use tokio_rustls::{TlsConnector, client::TlsStream};
 use tokio_util::sync::CancellationToken;
 
+use super::{
+    tokio_smoltcp::{
+        BufferSize, Net, NetConfig, UdpSocket as SmoltcpUdpSocket,
+        channel_device::ChannelDevice,
+        smoltcp::{
+            iface::Config as SmoltcpInterfaceConfig,
+            phy::{DeviceCapabilities, Medium},
+            wire::{HardwareAddress, IpAddress, IpCidr},
+        },
+    },
+    userspace_router::{EndpointFlowContext, UserspaceEndpointRouter},
+};
 use crate::{
     adapter::{
         DialFuture, Dialer, IcmpResponse, IpPacketPort, IpPacketReturn,
@@ -130,18 +145,6 @@ use crate::{
         write_pulse_inner_eap,
     },
 };
-use tokio_rustls::{TlsConnector, client::TlsStream};
-
-use super::tokio_smoltcp::{
-    BufferSize, Net, NetConfig, UdpSocket as SmoltcpUdpSocket,
-    channel_device::ChannelDevice,
-    smoltcp::{
-        iface::Config as SmoltcpInterfaceConfig,
-        phy::{DeviceCapabilities, Medium},
-        wire::{HardwareAddress, IpAddress, IpCidr},
-    },
-};
-use super::userspace_router::{EndpointFlowContext, UserspaceEndpointRouter};
 
 #[derive(Default)]
 pub struct OpenConnectEndpointDialer {
@@ -8582,8 +8585,7 @@ mod tests {
             ServerConfig,
             pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer},
         };
-        use tokio::io::AsyncReadExt as _;
-        use tokio::net::TcpListener;
+        use tokio::{io::AsyncReadExt as _, net::TcpListener};
         use tokio_rustls::TlsAcceptor;
 
         fn server_kmp(message_type: u16, payload: &[u8]) -> Vec<u8> {
@@ -8782,8 +8784,7 @@ mod tests {
             ServerConfig,
             pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer},
         };
-        use tokio::io::AsyncReadExt as _;
-        use tokio::net::TcpListener;
+        use tokio::{io::AsyncReadExt as _, net::TcpListener};
         use tokio_rustls::TlsAcceptor;
 
         let certified =
@@ -8873,8 +8874,7 @@ mod tests {
             ServerConfig,
             pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer},
         };
-        use tokio::io::AsyncReadExt as _;
-        use tokio::net::TcpListener;
+        use tokio::{io::AsyncReadExt as _, net::TcpListener};
         use tokio_rustls::TlsAcceptor;
 
         let certified =
@@ -9127,8 +9127,7 @@ mod tests {
             ServerConfig,
             pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer},
         };
-        use tokio::io::AsyncReadExt as _;
-        use tokio::net::TcpListener;
+        use tokio::{io::AsyncReadExt as _, net::TcpListener};
         use tokio_rustls::TlsAcceptor;
 
         let certified =
@@ -9215,8 +9214,7 @@ mod tests {
             ServerConfig,
             pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer},
         };
-        use tokio::io::AsyncReadExt as _;
-        use tokio::net::TcpListener;
+        use tokio::{io::AsyncReadExt as _, net::TcpListener};
         use tokio_rustls::TlsAcceptor;
 
         let certified =

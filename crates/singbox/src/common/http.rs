@@ -15,8 +15,10 @@ use hyper::{
     header::{AUTHORIZATION, HeaderMap, LOCATION},
 };
 use hyper_util::rt::{TokioExecutor, TokioIo};
-use quinn::crypto::rustls::QuicClientConfig;
-use quinn::{Endpoint, EndpointConfig, TokioRuntime, VarInt};
+use quinn::{
+    Endpoint, EndpointConfig, TokioRuntime, VarInt,
+    crypto::rustls::QuicClientConfig,
+};
 use tokio::sync::Mutex;
 
 #[cfg(target_vendor = "apple")]
@@ -2125,6 +2127,7 @@ mod tests {
     #[tokio::test]
     async fn cancelling_apple_request_cancels_native_url_session_task() {
         use std::time::Duration;
+
         use tokio::io::AsyncReadExt as _;
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

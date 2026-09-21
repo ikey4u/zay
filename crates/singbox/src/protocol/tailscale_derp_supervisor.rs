@@ -10,16 +10,15 @@ use async_trait::async_trait;
 use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    adapter::{Dialer, Stream},
-    common::network::SocksAddr,
-};
-
 use super::tailscale::{
     TAILSCALE_DERP_KEY_LENGTH, TAILSCALE_DERP_RECEIVE_QUEUE_DEPTH,
     TAILSCALE_DERP_WRITE_QUEUE_DEPTH, TailscaleDerpClient,
     TailscaleDerpConnectOptions, TailscaleDerpError,
     TailscaleDerpReceivedMessage, dial_tailscale_derp,
+};
+use crate::{
+    adapter::{Dialer, Stream},
+    common::network::SocksAddr,
 };
 
 const DEFAULT_INITIAL_BACKOFF: Duration = Duration::from_millis(100);

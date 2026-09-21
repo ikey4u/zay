@@ -22,17 +22,6 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    adapter::{PacketConnection, PacketFuture},
-    common::{
-        network::SocksAddr,
-        stun::{
-            TransactionId, build_binding_request_message,
-            mapped_address_from_response, transaction_id_from_message,
-        },
-    },
-};
-
 use super::{
     tailscale::{
         TAILSCALE_DERP_KEY_LENGTH, TAILSCALE_DERP_MAX_PACKET_SIZE,
@@ -54,6 +43,16 @@ use super::{
         TAILSCALE_PATH_SESSION_ACTIVE_TIMEOUT, TailscaleDiscoTransactionId,
         TailscalePathEndpointSnapshot, TailscalePathQuality,
         TailscalePeerPathState,
+    },
+};
+use crate::{
+    adapter::{PacketConnection, PacketFuture},
+    common::{
+        network::SocksAddr,
+        stun::{
+            TransactionId, build_binding_request_message,
+            mapped_address_from_response, transaction_id_from_message,
+        },
     },
 };
 

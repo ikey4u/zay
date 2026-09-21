@@ -1,0 +1,62 @@
+name: ZayMac
+options:
+  bundleIdPrefix: dev.zay
+  deploymentTarget:
+    macOS: "13.0"
+  createIntermediateGroups: true
+  xcodeVersion: "16.0"
+
+# Keep personal signing values out of source control. Copy
+# project.local.yml.example to project.local.yml when a team is available.
+include:
+  - path: project.local.yml
+    optional: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MACOSX_DEPLOYMENT_TARGET: "13.0"
+    CODE_SIGN_STYLE: Automatic
+    ENABLE_HARDENED_RUNTIME: YES
+
+targets:
+  ZayMac:
+    type: application
+    platform: macOS
+    sources:
+      - path: ZayMacApp
+      - path: Shared
+    dependencies:
+      - target: ZayProcessFilter
+        embed: true
+        codeSign: true
+      - sdk: NetworkExtension.framework
+      - sdk: SystemExtensions.framework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.zay.macos
+        PRODUCT_NAME: Zay
+        INFOPLIST_FILE: ZayMacApp/Info.plist
+        CODE_SIGN_ENTITLEMENTS: ZayMacApp/ZayMacApp.entitlements
+        GENERATE_INFOPLIST_FILE: NO
+    scheme:
+      testTargets: []
+
+  ZayProcessFilter:
+    type: system-extension
+    platform: macOS
+    sources:
+      - path: ZayProcessFilter
+      - path: Shared
+    dependencies:
+      - sdk: NetworkExtension.framework
+      - sdk: Network.framework
+      - sdk: Security.framework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.zay.macos.process-filter
+        PRODUCT_NAME: ZayProcessFilter
+        INFOPLIST_FILE: ZayProcessFilter/Info.plist
+        CODE_SIGN_ENTITLEMENTS: ZayProcessFilter/ZayProcessFilter.entitlements
+        GENERATE_INFOPLIST_FILE: NO
+        SKIP_INSTALL: YES

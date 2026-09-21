@@ -36,21 +36,20 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::{adapter::Dialer, common::network::SocksAddr};
-
-use super::tailscale_control_types::{
-    TailscaleNetmapState, TailscaleSshAction, TailscaleSshPolicy,
-    TailscaleSshPrincipal,
-};
 use super::{
     tailscale_control::decode_tailscale_control_json_response,
     tailscale_control_supervisor::TailscaleTs2021DialConnector,
+    tailscale_control_types::{
+        TailscaleNetmapState, TailscaleSshAction, TailscaleSshPolicy,
+        TailscaleSshPrincipal,
+    },
     tailscale_ssh_recording::{
         TailscaleSshCastHeader, TailscaleSshOutputRecording,
         TailscaleSshRecordingAttempt, TailscaleSshRecordingEventType,
         TailscaleSshRecordingNotification, connect_tailscale_ssh_recorder,
     },
 };
+use crate::{adapter::Dialer, common::network::SocksAddr};
 
 pub const TAILSCALE_SSH_MAXIMUM_DELEGATION_HOPS: usize = 10;
 pub const TAILSCALE_SSH_DELEGATION_TIMEOUT: Duration =
@@ -3628,20 +3627,25 @@ fn environment_glob_matches(pattern: &str, name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::protocol::tailscale_control_types::{
-        TailscaleNode, TailscaleSshRecorderFailureAction, TailscaleSshRule,
-        TailscaleUserProfile,
-    };
-    use crate::{
-        option::DirectOutboundOptions, protocol::direct::DirectOutbound,
-    };
+    use std::collections::VecDeque;
+
     use russh::{
         client,
         keys::{Algorithm, PrivateKey},
     };
-    use std::collections::VecDeque;
     use tokio::net::TcpStream;
+
+    use super::*;
+    use crate::{
+        option::DirectOutboundOptions,
+        protocol::{
+            direct::DirectOutbound,
+            tailscale_control_types::{
+                TailscaleNode, TailscaleSshRecorderFailureAction,
+                TailscaleSshRule, TailscaleUserProfile,
+            },
+        },
+    };
 
     struct AcceptHostKey;
 

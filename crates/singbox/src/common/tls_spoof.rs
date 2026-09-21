@@ -509,10 +509,9 @@ fn finalize_checksum(mut sum: u32) -> u16 {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod platform {
-    use std::{mem, os::fd::RawFd};
-
     #[cfg(target_os = "macos")]
     use std::{ffi::CString, ptr};
+    use std::{mem, os::fd::RawFd};
 
     use super::*;
     use crate::adapter::stream_socket;

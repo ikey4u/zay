@@ -10,6 +10,8 @@ enum ZayTheme {
     static let inkSecondary = Color(uiColor: .secondaryLabel)
     static let inkTertiary = Color(uiColor: .tertiaryLabel)
     static let hairline = Color(uiColor: .separator)
+    static let logoBackground = Color(red: 7 / 255, green: 23 / 255, blue: 19 / 255)
+    static let logoMint = Color(red: 45 / 255, green: 212 / 255, blue: 163 / 255)
 
     static let accent = Color(uiColor: UIColor { tc in
         switch tc.userInterfaceStyle {

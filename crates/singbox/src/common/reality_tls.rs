@@ -30,11 +30,6 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, copy_bidirectional};
 use tokio_rustls::{TlsAcceptor, server::TlsStream as ServerTlsStream};
 use zeroize::Zeroizing;
 
-use crate::{
-    adapter::{Dialer, Stream, replay_stream},
-    common::network::SocksAddr,
-};
-
 use super::{
     reality::{
         RealityCertificateVerification, RealityClientParameters,
@@ -43,6 +38,10 @@ use super::{
         prepare_reality_client_hello, verify_reality_certificate_der,
     },
     utls::SingBoxUtlsCustomizer,
+};
+use crate::{
+    adapter::{Dialer, Stream, replay_stream},
+    common::network::SocksAddr,
 };
 
 const MAX_PENDING_AUTH_KEYS: usize = 1_024;

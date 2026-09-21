@@ -424,10 +424,12 @@ mod tests {
     use tokio::sync::{Mutex as TokioMutex, mpsc};
 
     use super::*;
-    use crate::adapter::{PacketConnection, PacketFuture};
-    use crate::protocol::openconnect::{
-        Dtls12Record, derive_dtls12_keys, encrypt_dtls12_record,
-        parse_dtls12_records,
+    use crate::{
+        adapter::{PacketConnection, PacketFuture},
+        protocol::openconnect::{
+            Dtls12Record, derive_dtls12_keys, encrypt_dtls12_record,
+            parse_dtls12_records,
+        },
     };
 
     struct MemoryPacket {

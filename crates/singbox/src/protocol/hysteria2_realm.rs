@@ -30,14 +30,17 @@ use sha2::{Digest as _, Sha256};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::adapter::Dialer;
-use crate::common::{
-    http::{DownloadClient, DownloadOptions, StreamingResponse},
-    network::SocksAddr,
-    ntp::NtpClock,
-    tls::build_client_config,
+use crate::{
+    adapter::Dialer,
+    common::{
+        http::{DownloadClient, DownloadOptions, StreamingResponse},
+        network::SocksAddr,
+        ntp::NtpClock,
+        tls::build_client_config,
+    },
+    dns::manager::SharedResolver,
+    option::HttpClientOptions,
 };
-use crate::{dns::manager::SharedResolver, option::HttpClientOptions};
 
 const SALT_LENGTH: usize = 8;
 const MAGIC_LENGTH: usize = 8;

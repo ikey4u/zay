@@ -3,6 +3,7 @@
 # [proxy]
 # enabled = true
 # subscriptions = ["https://subscription.example/clash"]
+# active_nodes = [] # empty = all subscription nodes; WebUI stores selected tags here
 # gateway = true
 # mixed_port = 7890
 # update_interval = 3600

@@ -113,15 +113,15 @@ impl instant_acme::HttpClient for CertificateHttpClient {
 mod tests {
     use std::{convert::Infallible, sync::Arc};
 
-    use crate::{
-        option::{DirectOutboundOptions, HttpClientOptions},
-        protocol::direct::DirectOutbound,
-    };
     use http_body_util::{BodyExt as _, Full};
     use hyper::{Request, Response, body::Incoming, service::service_fn};
     use hyper_util::rt::TokioIo;
 
     use super::CertificateHttpClient;
+    use crate::{
+        option::{DirectOutboundOptions, HttpClientOptions},
+        protocol::direct::DirectOutbound,
+    };
 
     #[tokio::test]
     async fn translates_instant_acme_requests_through_the_shared_dialer() {

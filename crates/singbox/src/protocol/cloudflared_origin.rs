@@ -31,15 +31,6 @@ use tokio_tungstenite::{
     tungstenite::{Message, protocol::Role},
 };
 
-use crate::{
-    adapter::{Dialer, Stream},
-    common::{
-        certificate_store::CertificateStore, network::SocksAddr, ntp::NtpClock,
-        tls::build_client_config,
-    },
-    option::OutboundTlsOptions,
-};
-
 use super::{
     cloudflared::{
         CLOUDFLARED_METADATA_HTTP_HOST, CLOUDFLARED_METADATA_HTTP_STATUS,
@@ -64,6 +55,14 @@ use super::{
         CloudflaredQuicDatagramSender, CloudflaredQuicHandler,
         CloudflaredQuicStream,
     },
+};
+use crate::{
+    adapter::{Dialer, Stream},
+    common::{
+        certificate_store::CertificateStore, network::SocksAddr, ntp::NtpClock,
+        tls::build_client_config,
+    },
+    option::OutboundTlsOptions,
 };
 
 enum ConnectResponse {
@@ -129,6 +128,7 @@ mod tests {
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    use super::*;
     use crate::{
         adapter::{DialFuture, Dialer},
         protocol::cloudflared::{
@@ -136,8 +136,6 @@ mod tests {
             CLOUDFLARED_METADATA_HTTP_HOST,
         },
     };
-
-    use super::*;
 
     struct MemoryDialer {
         origin: Mutex<Option<tokio::io::DuplexStream>>,

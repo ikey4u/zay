@@ -4,9 +4,8 @@ use std::net::SocketAddr;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::common::{certificate_store::CertificateStore, ntp::NtpClock};
-
 use super::{DialerOptions, Listable, Prefix, UdpTimeout};
+use crate::common::{certificate_store::CertificateStore, ntp::NtpClock};
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TailscaleEndpointOptions {

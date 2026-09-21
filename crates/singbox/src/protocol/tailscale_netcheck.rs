@@ -311,11 +311,12 @@ fn push_unique(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
     use crate::protocol::tailscale_control_types::{
         TailscaleDerpMap, TailscaleDerpNode, TailscaleDerpRegion,
     };
-    use std::collections::BTreeMap;
 
     #[test]
     fn selects_deduplicated_stun_servers_and_preserves_wire_types() {

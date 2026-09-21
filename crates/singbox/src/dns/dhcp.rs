@@ -1,14 +1,5 @@
 //! DHCPv4-discovered DNS transport.
 
-use std::{
-    io,
-    net::{IpAddr, Ipv4Addr, SocketAddr},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-};
-
 #[cfg(any(
     target_os = "android",
     target_os = "ios",
@@ -21,6 +12,14 @@ use std::{
     target_os = "solaris"
 ))]
 use std::num::NonZeroU32;
+use std::{
+    io,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use futures_util::{StreamExt as _, stream::FuturesUnordered};
 use hickory_proto::op::Message;

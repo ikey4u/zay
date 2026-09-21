@@ -18,16 +18,22 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest as _, Sha256};
+use tokio::{sync::watch, task::JoinHandle};
+use tokio_util::sync::CancellationToken;
 
 use crate::{
-    adapter::{NeighborResolver, NetworkDialOptions, ProcessResolver},
-    common::network::{Network, SocksAddr, is_private_address},
-    common::sniff::{PacketSniffer, StreamSniffer},
+    adapter::{
+        NeighborResolver, NetworkDialOptions, ProcessLookupResult,
+        ProcessLookupStatus, ProcessResolver,
+    },
     common::{
         http::{DownloadClient, DownloadOptions},
         json::strip_comments,
+        network::{Network, SocksAddr, is_private_address},
+        sniff::{PacketSniffer, StreamSniffer},
     },
     dns::persistent::{PersistentDnsCache, PersistentRuleSetEntry},
+    log::Logger,
     option::{
         AbstractDialerOptions, DnsQueryType, DomainStrategy,
         Duration as ConfigDuration, HeadlessRuleOptions, HttpClient,
@@ -37,9 +43,6 @@ use crate::{
     },
     outbound::OutboundManager,
 };
-use tokio::sync::watch;
-use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Metadata {
@@ -76,6 +79,8 @@ pub struct Metadata {
     pub client: String,
     pub process_name: String,
     pub process_path: String,
+    /// Diagnostic outcome from the native connection-owner lookup.
+    pub process_lookup: String,
     pub package_name: String,
     pub user: String,
     pub user_id: Option<i32>,
@@ -2067,7 +2072,7 @@ fn format_hardware_address(address: &[u8]) -> String {
         .join(":")
 }
 
-fn describe_action(action: Option<&Action>) -> String {
+pub(crate) fn describe_action(action: Option<&Action>) -> String {
     match action {
         Some(Action::Route { outbound, .. }) => format!("route({outbound})"),
         Some(Action::RouteOptions(_)) => "route-options()".into(),
@@ -2110,6 +2115,7 @@ pub struct Router {
     preferred_outbounds: Option<std::sync::Weak<OutboundManager>>,
     neighbor_resolver: Option<Arc<dyn NeighborResolver>>,
     process_resolver: Option<Arc<dyn ProcessResolver>>,
+    flow_logger: Option<Logger>,
 }
 
 impl fmt::Debug for Router {
@@ -2127,6 +2133,7 @@ impl fmt::Debug for Router {
             )
             .field("has_neighbor_resolver", &self.neighbor_resolver.is_some())
             .field("has_process_resolver", &self.process_resolver.is_some())
+            .field("has_flow_logger", &self.flow_logger.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -2181,7 +2188,90 @@ impl Router {
             preferred_outbounds: None,
             neighbor_resolver: None,
             process_resolver: None,
+            flow_logger: None,
         })
+    }
+
+    pub(crate) fn configure_flow_logger(&mut self, logger: Logger) {
+        self.flow_logger = Some(logger);
+    }
+
+    /// Emit one structured observation for a routed flow.  Domain provenance
+    /// matters here: payload/FakeIP evidence is exact, while a DNS reverse
+    /// mapping is deliberately labelled as correlation because an IP can be
+    /// shared by many unrelated hostnames.
+    pub(crate) fn observe_flow(
+        &self,
+        metadata: &Metadata,
+        decision: &RouteDecision<'_>,
+    ) {
+        let Some(logger) = &self.flow_logger else {
+            return;
+        };
+        if matches!(decision.action(), Some(Action::HijackDns)) {
+            return;
+        }
+
+        let had_runtime_domain = !metadata.domain.is_empty();
+        let current = self.enriched_flow_metadata(metadata);
+        let destination = metadata.destination.as_ref();
+        let domain = current
+            .domain()
+            .map(|domain| domain.trim_end_matches('.').to_ascii_lowercase());
+        let (domain_source, domain_confidence) =
+            if metadata.fake_ip && domain.is_some() {
+                ("fakeip", "exact")
+            } else if had_runtime_domain && !metadata.protocol.is_empty() {
+                ("sniff", "exact")
+            } else if destination.is_some_and(SocksAddr::is_domain) {
+                ("destination", "exact")
+            } else if had_runtime_domain {
+                ("resolved", "exact")
+            } else if domain.is_some() {
+                ("dns_reverse", "correlated")
+            } else {
+                ("none", "none")
+            };
+        let outbound = match decision.action() {
+            Some(Action::Direct) | Some(Action::DirectOptions { .. }) => {
+                "direct"
+            }
+            Some(Action::Reject { .. }) => "reject",
+            _ => decision.outbound().unwrap_or("direct"),
+        };
+        let routed_destination = destination
+            .map(|destination| decision.destination(destination).to_string())
+            .unwrap_or_default();
+        let event = serde_json::json!({
+            "event": "flow",
+            "network": current.network.map(Network::as_str).unwrap_or(""),
+            "inbound": current.inbound,
+            "source": current.source.as_ref().map(ToString::to_string).unwrap_or_default(),
+            "destination": destination.map(ToString::to_string).unwrap_or_default(),
+            "original_destination": current.origin_destination.as_ref().map(ToString::to_string).unwrap_or_default(),
+            "routed_destination": routed_destination,
+            "domain": domain.unwrap_or_default(),
+            "domain_source": domain_source,
+            "domain_confidence": domain_confidence,
+            "protocol": current.protocol,
+            "rule": describe_action(decision.action()),
+            "outbound": outbound,
+            "process_name": current.process_name,
+            "process_path": current.process_path,
+            "process_lookup": current.process_lookup,
+        });
+        let _ = logger.info(event.to_string());
+    }
+
+    /// Resolve process and domain attribution for diagnostics and optional
+    /// per-process traffic accounting without mutating routing metadata.
+    pub(crate) fn enriched_flow_metadata(
+        &self,
+        metadata: &Metadata,
+    ) -> Metadata {
+        let mut current = metadata.clone();
+        self.apply_runtime_metadata(&mut current, false);
+        current
     }
 
     pub(crate) fn configure_preferred_outbounds(
@@ -2231,6 +2321,27 @@ impl Router {
         resolver: Option<Arc<dyn ProcessResolver>>,
     ) {
         self.process_resolver = resolver;
+    }
+
+    /// Resolve a local socket owner at the earliest point an endpoint sees a
+    /// flow. Userspace TUN endpoints call this for the initial TCP SYN so a
+    /// process that exits immediately after connect cannot disappear before
+    /// normal route evaluation begins.
+    pub(crate) fn lookup_process_owner(
+        &self,
+        network: Network,
+        source: std::net::SocketAddr,
+        destination: Option<std::net::SocketAddr>,
+    ) -> ProcessLookupResult {
+        self.process_resolver
+            .as_ref()
+            .map(|resolver| {
+                resolver.lookup_detailed(network, source, destination)
+            })
+            .unwrap_or(ProcessLookupResult {
+                process: None,
+                status: ProcessLookupStatus::SocketSnapshotMiss,
+            })
     }
 
     /// Build one direct dialer per configured direct rule action.
@@ -2374,8 +2485,9 @@ impl Router {
                         }
                     })
                 });
-            if let Some(process) = resolver.lookup(network, source, destination)
-            {
+            let lookup = resolver.lookup_detailed(network, source, destination);
+            metadata.process_lookup = lookup.status.as_str().to_string();
+            if let Some(process) = lookup.process {
                 metadata.process_name = process.process_name;
                 metadata.process_path = process.process_path;
                 metadata.package_name = process.package_name;

@@ -25,17 +25,20 @@ use hyper_util::rt::TokioIo;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
-use tokio::io::{
-    AsyncRead, AsyncReadExt as _, AsyncSeek, AsyncSeekExt as _,
-    AsyncWriteExt as _, ReadBuf, SeekFrom,
+use tokio::{
+    io::{
+        AsyncRead, AsyncReadExt as _, AsyncSeek, AsyncSeekExt as _,
+        AsyncWriteExt as _, ReadBuf, SeekFrom,
+    },
+    sync::{Mutex, broadcast},
 };
-use tokio::sync::{Mutex, broadcast};
-use tokio_util::io::{ReaderStream, StreamReader};
-use tokio_util::sync::CancellationToken;
-
-use crate::{adapter::Dialer, common::network::SocksAddr};
+use tokio_util::{
+    io::{ReaderStream, StreamReader},
+    sync::CancellationToken,
+};
 
 use super::tailscale_control_types::{TailscaleNetmapState, TailscaleNode};
+use crate::{adapter::Dialer, common::network::SocksAddr};
 
 pub const TAILSCALE_TAILDROP_BLOCK_SIZE: usize = 64 << 10;
 pub const TAILSCALE_TAILDROP_PARTIAL_SUFFIX: &str = ".partial";
@@ -1445,17 +1448,18 @@ impl<R: AsyncRead + Unpin> AsyncRead for TaildropProgressReader<R> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::sync::{
         Mutex,
         atomic::{AtomicUsize, Ordering as AtomicOrdering},
     };
 
-    use crate::protocol::tailscale_control_types::{
-        TailscaleHostinfo, TailscaleService,
-    };
+    use super::*;
     use crate::{
-        option::DirectOutboundOptions, protocol::direct::DirectOutbound,
+        option::DirectOutboundOptions,
+        protocol::{
+            direct::DirectOutbound,
+            tailscale_control_types::{TailscaleHostinfo, TailscaleService},
+        },
     };
 
     #[test]

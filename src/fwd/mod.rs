@@ -1,4 +1,4 @@
-//! TCP / WebSocket forwarding (`zay run fwd`).
+//! TCP / WebSocket forwarding (`zay x run fwd`).
 
 mod server;
 
@@ -16,7 +16,7 @@ static RUSTLS_PROVIDER: Once = Once::new();
 #[command(
     about = "Forward TCP streams directly or over WebSocket (TCP/WS relay)",
     long_about = concat!(
-        "zay run fwd forwards TCP streams directly, TCP streams to WebSocket streams, or WebSocket streams to TCP.\n",
+        "zay x run fwd forwards TCP streams directly, TCP streams to WebSocket streams, or WebSocket streams to TCP.\n",
         "\n",
         "  --to    where clients connect (local listener)\n",
         "  --from  upstream zay dials for each accepted connection\n",
@@ -27,8 +27,8 @@ static RUSTLS_PROVIDER: Once = Once::new();
         "  --token optional bearer token for WebSocket authorization\n",
         "\n",
         "EXAMPLES:\n",
-        "  zay run fwd --to tcp://0.0.0.0:8080 --from tcp://127.0.0.1:80\n",
-        "  zay run fwd --to tcp://127.0.0.1:3306 --from wss://public.com:443/wss"
+        "  zay x run fwd --to tcp://0.0.0.0:8080 --from tcp://127.0.0.1:80\n",
+        "  zay x run fwd --to tcp://127.0.0.1:3306 --from wss://public.com:443/wss"
     )
 )]
 pub struct FwdCli {

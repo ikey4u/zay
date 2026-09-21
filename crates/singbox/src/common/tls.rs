@@ -23,10 +23,12 @@ use openssl::{
 use rustls::{
     CipherSuite, ClientConfig, DigitallySignedStruct, DistinguishedName,
     NamedGroup, RootCertStore, ServerConfig, SignatureScheme,
-    client::danger::{
-        HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
+    client::{
+        EchConfig, EchMode, WebPkiServerVerifier,
+        danger::{
+            HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
+        },
     },
-    client::{EchConfig, EchMode, WebPkiServerVerifier},
     crypto::{
         ActiveKeyExchange, CryptoProvider, SharedSecret, SupportedKxGroup,
         verify_tls12_signature, verify_tls13_signature,
@@ -35,8 +37,10 @@ use rustls::{
         CertificateDer, EchConfigListBytes, PrivateKeyDer, PrivatePkcs8KeyDer,
         ServerName, UnixTime,
     },
-    server::danger::{ClientCertVerified, ClientCertVerifier},
-    server::{ClientHello, EchServerKey, FixedEchKeys, ResolvesServerCert},
+    server::{
+        ClientHello, EchServerKey, FixedEchKeys, ResolvesServerCert,
+        danger::{ClientCertVerified, ClientCertVerifier},
+    },
     sign::CertifiedKey,
 };
 use sha1_11::Sha1;
@@ -47,6 +51,12 @@ use tokio::{
 };
 use tokio_rustls::{TlsAcceptor, TlsConnector, TlsStream};
 
+use super::{
+    certificate_store::CertificateStore,
+    ntp::NtpClock,
+    reality_tls::{RealityServerRuntime, install_reality_client},
+    utls::SingBoxUtlsCustomizer,
+};
 use crate::{
     adapter::{
         DialFuture, Dialer, Stream, VisionDialFuture, VisionDirectSwitch,
@@ -57,10 +67,6 @@ use crate::{
         ServerCertificateFingerprint, ServerCertificateFingerprintAlgorithm,
     },
 };
-
-use super::reality_tls::{RealityServerRuntime, install_reality_client};
-use super::utls::SingBoxUtlsCustomizer;
-use super::{certificate_store::CertificateStore, ntp::NtpClock};
 
 #[derive(Debug, thiserror::Error)]
 pub enum TlsError {
@@ -4225,11 +4231,9 @@ mod tests {
         ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, PKCS_ED25519,
         generate_simple_self_signed,
     };
-    use rustls::pki_types::{
-        CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer,
-    };
     use rustls::{
         ClientConnection, ServerConfig, SignatureAlgorithm, SignatureScheme,
+        pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
         sign::{
             CertifiedKey as RustlsCertifiedKey, Signer, SigningKey,
             SingleCertAndKey,
@@ -4315,33 +4319,35 @@ mod tests {
             Box::pin(std::future::ready(Ok(self.record.clone())))
         }
     }
-    use crate::option::{
-        Base64Bytes, ClientAuthType, CurvePreference, InboundTlsOptions,
-        Listable, OutboundEchOptions, OutboundRealityOptions,
-        OutboundTlsOptions, OutboundUtlsOptions,
+    use serde_json::json;
+    use tokio::{
+        io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf},
+        net::TcpStream,
     };
+    use tokio_rustls::{TlsAcceptor, TlsConnector};
+
     use crate::{
         adapter::{Dialer, replay_stream},
-        common::certificate_store::CertificateStore,
-        common::network::SocksAddr,
-        common::reality::{
-            REALITY_PROTOCOL_VERSION, derive_reality_auth_key_from_x25519,
-            open_reality_session_id, parse_reality_client_hello,
-        },
-        common::reality_tls::{
-            spawn_reality_cover_stub, spawn_reality_cover_stub_with_record_lens,
+        common::{
+            certificate_store::CertificateStore,
+            network::SocksAddr,
+            reality::{
+                REALITY_PROTOCOL_VERSION, derive_reality_auth_key_from_x25519,
+                open_reality_session_id, parse_reality_client_hello,
+            },
+            reality_tls::{
+                spawn_reality_cover_stub,
+                spawn_reality_cover_stub_with_record_lens,
+            },
         },
         option::{
-            CertificateOptions, CertificateStoreKind, DirectOutboundOptions,
+            Base64Bytes, CertificateOptions, CertificateStoreKind,
+            ClientAuthType, CurvePreference, DirectOutboundOptions,
+            InboundTlsOptions, Listable, OutboundEchOptions,
+            OutboundRealityOptions, OutboundTlsOptions, OutboundUtlsOptions,
         },
         protocol::direct::DirectOutbound,
     };
-    use serde_json::json;
-    use tokio::io::{
-        AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf,
-    };
-    use tokio::net::TcpStream;
-    use tokio_rustls::{TlsAcceptor, TlsConnector};
 
     /// REALITY deliberately signs TLS 1.3 with Ed25519 even when the imitated
     /// browser did not advertise Ed25519.  Its Go server bypasses the normal

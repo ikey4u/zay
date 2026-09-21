@@ -20,18 +20,17 @@ use hyper::{
     service::service_fn,
 };
 use hyper_util::rt::{TokioExecutor, TokioIo};
+use n0_watcher::Watcher as _;
 use tokio::{
     io::{
         AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf,
     },
     sync::{Mutex, mpsc, oneshot},
 };
-use tokio_util::compat::{
-    FuturesAsyncReadCompatExt as _, TokioAsyncReadCompatExt as _,
+use tokio_util::{
+    compat::{FuturesAsyncReadCompatExt as _, TokioAsyncReadCompatExt as _},
+    sync::CancellationToken,
 };
-use tokio_util::sync::CancellationToken;
-
-use n0_watcher::Watcher as _;
 
 use crate::{
     adapter::{

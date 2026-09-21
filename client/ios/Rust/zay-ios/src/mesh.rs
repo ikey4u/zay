@@ -7,12 +7,12 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use easytier::common::config::{
-    ConfigFileControl, ConfigLoader as _, TomlConfigLoader,
-};
-use easytier::instance::factory::{
-    NativeInstanceManager, NativeProcessManagement,
-    native_instance_manager_with_runtime, native_process_management,
+use easytier::{
+    common::config::{ConfigFileControl, ConfigLoader as _, TomlConfigLoader},
+    instance::factory::{
+        NativeInstanceManager, NativeProcessManagement,
+        native_instance_manager_with_runtime, native_process_management,
+    },
 };
 use once_cell::sync::Lazy;
 use serde_json::json;

@@ -1,19 +1,21 @@
-use super::{reactor::Reactor, socket_allocator::SocketHandle};
-use futures::future::{self, poll_fn};
-use smoltcp::socket::icmp;
-pub use smoltcp::socket::tcp;
-use smoltcp::socket::udp;
-use smoltcp::wire::{IpAddress, IpEndpoint};
-use std::mem::replace;
-use std::net::IpAddr;
 use std::{
     io,
-    net::SocketAddr,
+    mem::replace,
+    net::{IpAddr, SocketAddr},
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
 };
+
+use futures::future::{self, poll_fn};
+pub use smoltcp::socket::tcp;
+use smoltcp::{
+    socket::{icmp, udp},
+    wire::{IpAddress, IpEndpoint},
+};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+
+use super::{reactor::Reactor, socket_allocator::SocketHandle};
 
 /// An ICMP socket bound to one echo identifier.
 pub struct IcmpSocket {

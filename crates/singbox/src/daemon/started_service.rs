@@ -1253,17 +1253,17 @@ mod tests {
         DAEMON_API_VERSION, GO_ZERO_TIME_UNIX_MILLIS, StartedDaemonService,
         StartedServiceOptions, proto,
     };
-    use crate::daemon::{
-        RemoteClientOptions, ServerAuthInterceptor,
-        proto::{
-            started_service_client::StartedServiceClient,
-            started_service_server::StartedServiceServer,
-        },
-    };
     use crate::{
         Options, Runtime,
         adapter::Dialer as _,
         common::{network::SocksAddr, stun},
+        daemon::{
+            RemoteClientOptions, ServerAuthInterceptor,
+            proto::{
+                started_service_client::StartedServiceClient,
+                started_service_server::StartedServiceServer,
+            },
+        },
     };
 
     fn stun_binding_response(

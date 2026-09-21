@@ -1369,8 +1369,9 @@ fn add_default_routes(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
+
+    use super::*;
 
     fn append(
         headers: &mut HeaderMap,

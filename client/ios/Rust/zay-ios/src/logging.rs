@@ -1,11 +1,7 @@
-use std::fs::OpenOptions;
-use std::io::Write;
-use std::path::PathBuf;
-use std::sync::Mutex;
+use std::{fs::OpenOptions, io::Write, path::PathBuf, sync::Mutex};
 
 use once_cell::sync::OnceCell;
-use tracing_subscriber::EnvFilter;
-use tracing_subscriber::fmt::MakeWriter;
+use tracing_subscriber::{EnvFilter, fmt::MakeWriter};
 
 static LOG_PATH: OnceCell<Mutex<Option<PathBuf>>> = OnceCell::new();
 

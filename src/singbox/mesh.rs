@@ -28,6 +28,7 @@ pub fn easytier_process_bypass_route_rules(settings: &Settings) -> Vec<Value> {
     }
     vec![json!({
         "action": "route",
+        "inbound": ["tun-in"],
         "process_name": names,
         "outbound": "direct"
     })]

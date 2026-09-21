@@ -4,12 +4,11 @@
 //! Route installation is transactional platform state and must not be treated
 //! as active until its add/rollback paths have been implemented and tested.
 
-use std::{io, net::IpAddr, sync::Arc};
-
 #[cfg(target_os = "macos")]
 use std::os::fd::IntoRawFd as _;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 use std::os::fd::{IntoRawFd as _, OwnedFd};
+use std::{io, net::IpAddr, sync::Arc};
 
 #[cfg(target_os = "linux")]
 use futures_util::{StreamExt as _, stream};
@@ -23,27 +22,6 @@ use tokio::{
 use tokio_stream::wrappers::WatchStream;
 use tokio_util::sync::CancellationToken;
 use tun::{AbstractDevice as _, Configuration, Layer};
-
-use crate::{
-    common::lifecycle::{
-        Lifecycle, LifecycleError, LifecycleFuture, StartStage,
-    },
-    endpoint::{
-        tokio_smoltcp::{
-            BufferSize, Net, NetConfig,
-            channel_device::ChannelDevice,
-            smoltcp::{
-                iface::Config as SmoltcpInterfaceConfig,
-                phy::{DeviceCapabilities, Medium},
-                wire::{HardwareAddress, IpAddress, IpCidr},
-            },
-        },
-        userspace_router::UserspaceEndpointRouter,
-    },
-    option::TunInboundOptions,
-    outbound::OutboundManager,
-    route::Router,
-};
 
 #[cfg(target_os = "linux")]
 use super::tun_auto_redirect_linux::{
@@ -74,6 +52,26 @@ use super::{
         DarwinRouteBackend, configure_additional_addresses,
         configure_utun_interface, flush_dns_cache, open_utun,
     },
+};
+use crate::{
+    common::lifecycle::{
+        Lifecycle, LifecycleError, LifecycleFuture, StartStage,
+    },
+    endpoint::{
+        tokio_smoltcp::{
+            BufferSize, Net, NetConfig,
+            channel_device::ChannelDevice,
+            smoltcp::{
+                iface::Config as SmoltcpInterfaceConfig,
+                phy::{DeviceCapabilities, Medium},
+                wire::{HardwareAddress, IpAddress, IpCidr},
+            },
+        },
+        userspace_router::UserspaceEndpointRouter,
+    },
+    option::TunInboundOptions,
+    outbound::OutboundManager,
+    route::Router,
 };
 
 const DEFAULT_TUN_MTU: u32 = 65_535;
@@ -1142,11 +1140,8 @@ fn linux_route_index(value: i32, name: &str, default: u32) -> io::Result<u32> {
 mod tests {
     use serde_json::json;
 
-    use super::TunConfig;
-    use crate::option::TunInboundOptions;
-
-    use super::TunRoutePlatform;
-    use crate::route::Router;
+    use super::{TunConfig, TunRoutePlatform};
+    use crate::{option::TunInboundOptions, route::Router};
 
     fn supported_options() -> TunInboundOptions {
         serde_json::from_value(json!({

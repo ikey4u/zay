@@ -640,8 +640,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::super::pulse_ift::PULSE_EAP_TYPE_EXPANDED;
-    use super::*;
+    use super::{super::pulse_ift::PULSE_EAP_TYPE_EXPANDED, *};
 
     fn ttls_packet(identifier: u8, flags: u8, body: &[u8]) -> PulseEapPacket {
         let mut payload = vec![flags];

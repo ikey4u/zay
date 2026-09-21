@@ -5,12 +5,11 @@ use rustls::server::ResolvesServerCert;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use serde_json::{Map, Value};
 
-use crate::common::{certificate_store::CertificateStore, ntp::NtpClock};
-
 use super::{
     AcmeCertificateProviderOptions, DialerOptions, Duration, Listable,
     ServerOptions,
 };
+use crate::common::{certificate_store::CertificateStore, ntp::NtpClock};
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Base64Bytes(pub Vec<u8>);

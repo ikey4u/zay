@@ -1978,6 +1978,15 @@ fn netlink_error_kind(error: &rtnetlink::Error) -> io::ErrorKind {
 
 #[cfg(test)]
 mod tests {
+    use rtnetlink::{
+        RouteMessageBuilder,
+        packet_route::{
+            route::{RouteAttribute, RouteHeader},
+            rule::{RuleAction, RuleAttribute, RuleFlags},
+        },
+    };
+    use serde_json::json;
+
     use super::{
         DEFAULT_AUTO_REDIRECT_FALLBACK_RULE_PRIORITY, DEFAULT_ROUTE_TABLE,
         DEFAULT_RULE_PRIORITY, LinuxPolicyOptions, RedirectInterface,
@@ -1988,14 +1997,6 @@ mod tests {
         route_table, rp_filter_path, set_bridge_route_table,
     };
     use crate::option::TunInboundOptions;
-    use rtnetlink::{
-        RouteMessageBuilder,
-        packet_route::{
-            route::{RouteAttribute, RouteHeader},
-            rule::{RuleAction, RuleAttribute, RuleFlags},
-        },
-    };
-    use serde_json::json;
 
     #[test]
     fn rp_filter_path_is_interface_scoped_and_rejects_traversal() {

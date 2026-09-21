@@ -4,6 +4,8 @@
 //! it can be tested against fixed Go/OpenConnect vectors and embedded by the
 //! eventual AnyConnect DTLS channel.
 
+use std::fmt;
+
 use getrandom::fill as random_fill;
 use hmac13::{Hmac, KeyInit, Mac};
 use md5::Md5;
@@ -13,7 +15,6 @@ use openssl::{
     symm::{Cipher, Crypter, Mode},
 };
 use sha1_11::Sha1;
-use std::fmt;
 use thiserror::Error;
 
 pub const LEGACY_DTLS_RECORD_HEADER_LENGTH: usize = 13;

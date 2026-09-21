@@ -4,8 +4,9 @@
 //! exactly that session, omit normal TLS extensions, and reject a server which
 //! falls back to a full handshake.
 
-use openssl::memcmp;
 use std::{io, time::Duration};
+
+use openssl::memcmp;
 use thiserror::Error;
 use tokio::time::{Instant, timeout_at};
 use tokio_util::sync::CancellationToken;
@@ -767,9 +768,8 @@ fn read_u24(input: &[u8]) -> usize {
 mod tests {
     use std::{collections::VecDeque, sync::Arc};
 
-    use crate::adapter::{PacketConnection, PacketFuture};
-
     use super::*;
+    use crate::adapter::{PacketConnection, PacketFuture};
 
     fn suite() -> Dtls12Suite {
         Dtls12Suite::from_name("OC-DTLS1_2-AES128-GCM", true).unwrap()

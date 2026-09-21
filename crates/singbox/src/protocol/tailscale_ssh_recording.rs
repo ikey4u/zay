@@ -675,15 +675,18 @@ fn parse_http_status(header: &[u8]) -> io::Result<u16> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex as StdMutex;
+
+    use http_body_util::Full;
+    use hyper::{
+        Response, server::conn::http2 as server_http2, service::service_fn,
+    };
+    use tokio::net::TcpListener;
+
     use super::*;
     use crate::{
         option::DirectOutboundOptions, protocol::direct::DirectOutbound,
     };
-    use http_body_util::Full;
-    use hyper::service::service_fn;
-    use hyper::{Response, server::conn::http2 as server_http2};
-    use std::sync::Mutex as StdMutex;
-    use tokio::net::TcpListener;
 
     struct HangingDialer;
 

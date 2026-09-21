@@ -16,14 +16,13 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::adapter::Stream;
-
 use super::{
     AnyConnectDeflateState, CSTP_MAX_PAYLOAD_SIZE, CstpCompression, CstpError,
     CstpPacketType, CstpRekeyMethod, compress_anyconnect_stateless,
     decompress_anyconnect_stateless, read_cstp_packet, write_cstp_disconnect,
     write_cstp_packet,
 };
+use crate::adapter::Stream;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CstpSessionOptions {

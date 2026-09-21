@@ -21,12 +21,6 @@ use tokio::sync::{Mutex, mpsc};
 use tokio_util::{compat::TokioAsyncReadCompatExt, sync::CancellationToken};
 use uuid::Uuid;
 
-use crate::{
-    adapter::{Dialer, PacketConnection, Stream},
-    cloudflared_tunnelrpc_capnp as tunnelrpc,
-    common::network::SocksAddr,
-};
-
 use super::{
     cloudflared::{
         CLOUDFLARED_MAX_V3_UDP_PAYLOAD, CLOUDFLARED_V3_DEFAULT_IDLE_TIMEOUT,
@@ -48,6 +42,11 @@ use super::{
         CLOUDFLARED_REGISTRATION_TIMEOUT, CloudflaredQuicDatagramSender,
         CloudflaredQuicStream,
     },
+};
+use crate::{
+    adapter::{Dialer, PacketConnection, Stream},
+    cloudflared_tunnelrpc_capnp as tunnelrpc,
+    common::network::SocksAddr,
 };
 
 pub const CLOUDFLARED_DATAGRAM_V2_QUEUE_SIZE: usize = 256;
@@ -894,9 +893,8 @@ async fn unregister_remote_v2(
 mod tests {
     use std::sync::atomic::AtomicU8;
 
-    use crate::adapter::{DialFuture, PacketFuture, PacketStream};
-
     use super::*;
+    use crate::adapter::{DialFuture, PacketFuture, PacketStream};
 
     type CapturedPacket = (Vec<u8>, SocksAddr);
     type MemoryPacketParts = (

@@ -13,8 +13,6 @@ use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use crate::option::OpenVpnServerEndpointOptions;
-
 use super::{
     ActiveDataSessionError, CompressionSettings, IncomingControlEvent, IpPool,
     IpPoolError, OpenVpnActiveDataSession, OpenVpnEndpointBuildError,
@@ -29,6 +27,7 @@ use super::{
     negotiate_tls_server_data_channel_with_async_assignment,
     negotiate_tls_server_renegotiation_data_channel,
 };
+use crate::option::OpenVpnServerEndpointOptions;
 
 pub const OPENVPN_DEFAULT_SERVER_MAX_CLIENTS: usize = 1024;
 pub const OPENVPN_DEFAULT_SERVER_MTU: u32 = 1500;

@@ -19,7 +19,6 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::common::sniff::{SniffError, sniff_stream};
 use crate::{
     adapter::Stream,
     common::{
@@ -27,6 +26,7 @@ use crate::{
         lifecycle::{Lifecycle, LifecycleError, LifecycleFuture, StartStage},
         network::{Network, SocksAddr},
         ntp::NtpClock,
+        sniff::{SniffError, sniff_stream},
         tls::{
             TlsError, build_client_config,
             build_server_config_with_default_alpn,
@@ -43,18 +43,21 @@ use crate::{
         Hysteria2MasqueradeObject, Hysteria2Obfs,
     },
     outbound::OutboundManager,
-    protocol::hysteria::HysteriaBrutalServerConfig,
-    protocol::hysteria2::{
-        Hysteria2MasqueradeHandler, Hysteria2MasqueradeResponse,
-        Hysteria2ObfsConfig, Hysteria2QuicOptions, Hysteria2ServerSession,
-        Hysteria2TcpStream, UdpDefragmenter, UdpMessage, encode_tcp_response,
-        fragment_udp_message, hysteria2_server_endpoint_with_transport_obfs,
-        hysteria2_server_endpoint_with_transport_obfs_socket,
-        server_brutal_bps,
-    },
-    protocol::hysteria2_realm::{
-        RealmControlClient, RealmPacketSocket, RealmPortMappingOptions,
-        RealmServerConnector,
+    protocol::{
+        hysteria::HysteriaBrutalServerConfig,
+        hysteria2::{
+            Hysteria2MasqueradeHandler, Hysteria2MasqueradeResponse,
+            Hysteria2ObfsConfig, Hysteria2QuicOptions, Hysteria2ServerSession,
+            Hysteria2TcpStream, UdpDefragmenter, UdpMessage,
+            encode_tcp_response, fragment_udp_message,
+            hysteria2_server_endpoint_with_transport_obfs,
+            hysteria2_server_endpoint_with_transport_obfs_socket,
+            server_brutal_bps,
+        },
+        hysteria2_realm::{
+            RealmControlClient, RealmPacketSocket, RealmPortMappingOptions,
+            RealmServerConnector,
+        },
     },
     route::{Action, Metadata, Router},
 };

@@ -681,15 +681,14 @@ mod tests {
     use hickory_resolver::config::{
         NameServerConfig, ResolverConfig, ResolverOpts,
     };
+    use tokio::net::UdpSocket;
 
+    use super::{LocalServer, LocalTransport};
     use crate::{
         dns::client::{ExchangeFuture, Transport},
         option::DirectOutboundOptions,
         protocol::direct::DirectOutbound,
     };
-    use tokio::net::UdpSocket;
-
-    use super::{LocalServer, LocalTransport};
 
     struct FailingTransport;
 

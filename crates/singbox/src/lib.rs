@@ -39,7 +39,8 @@ pub mod cloudflared_tunnelrpc_capnp {
 
 pub use adapter::{
     IpPacketPort, IpPacketReturn, NeighborResolver, ProcessInfo,
-    ProcessResolver, dns_response_addresses,
+    ProcessLookupResult, ProcessLookupStatus, ProcessResolver,
+    dns_response_addresses,
 };
 #[cfg(any(target_os = "android", target_os = "ios", target_os = "macos"))]
 pub use common::platform_network::{
@@ -51,6 +52,15 @@ pub use option::{ConfigEntry, ConfigLoader, Options};
 pub use protocol::quic_bbr::{BbrProfile, BbrProfileError};
 pub use runtime::{Runtime, RuntimeError, RuntimeHandle, RuntimeHost};
 pub use service::{Box, BoxBuilder, BoxError, BoxState};
+
+/// Construct the operating system's built-in best-effort process resolver.
+///
+/// Embedding applications can wrap this resolver with a platform monitor and
+/// retain the native socket-table implementation as a fallback.
+pub fn native_process_resolver() -> Option<std::sync::Arc<dyn ProcessResolver>>
+{
+    common::process::native_process_resolver()
+}
 
 /// Upstream source revision this migration is tested against.
 pub const UPSTREAM_REVISION: &str = "4bc15be97c25fa34453dbeab553f2a0c29a75539";

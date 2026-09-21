@@ -2,9 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::common::{certificate_store::CertificateStore, ntp::NtpClock};
-
 use super::{DialerOptions, Duration, Listable, UdpNatBehavior};
+use crate::common::{certificate_store::CertificateStore, ntp::NtpClock};
 
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OpenConnectEndpointOptions {

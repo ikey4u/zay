@@ -34,6 +34,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+use super::tun_nfqueue_linux::NfQueueLease;
 use crate::{
     common::{
         redir::original_destination,
@@ -43,8 +44,6 @@ use crate::{
     outbound::OutboundManager,
     route::Router,
 };
-
-use super::tun_nfqueue_linux::NfQueueLease;
 
 const NFPROTO_INET: u8 = 1;
 const NFPROTO_IPV4: u8 = 2;

@@ -2,27 +2,25 @@
 
 See `zay --help` for usage.
 
-## Persistent runtime
+## WebUI
 
-`zay service start` starts components enabled in `zay.toml` after detaching
-from the terminal. It writes logs to
-`<data-dir>/logs/zay.log` and provides `zay service status` and `zay service stop`.
-Inspect `zay.log`, `events.jsonl`, or `singbox.raw.log` directly.
+`zay webui` starts the React control plane and all enabled components in the
+foreground. It never daemonizes or installs a system service; use systemd,
+launchd, or your preferred process manager when persistence is required.
 
-The supervisor always runs as the invoking user. On macOS/Linux, if
-`[proxy].tun` is enabled, `zay service start` requests administrator authorization
-before detaching, then elevates only its sing-box TUN worker. User
-configuration and service control files therefore stay editable without running
-the whole service through `sudo`. Use `zay service start`, not `sudo zay service start`.
+By default the WebUI listens on `127.0.0.1:8787` and does not try to open a
+desktop browser, so the same command works on headless Linux. Use `--open` on a
+desktop. A non-loopback `--listen` requires a bearer `--token` (or
+`ZAY_WEBUI_TOKEN`).
 
-On Windows, the TUN worker opens the normal UAC prompt and is tracked through
-its launcher process. It does not inherit the supervisor's stdout/stderr.
+On macOS/Linux, if the enabled configuration needs TUN or a Mesh node,
+`zay webui` requests sudo authorization in the launching terminal before the
+HTTP server starts. Only the supervised core child is elevated. Passwords never
+pass through the browser or HTTP API.
 
-`zay run proxy`, `zay run ssh`, `zay run fwd`, and `zay run http` remain foreground,
-one-off commands. They do not read or create `zay.toml`; `zay run proxy` stores
-its generated runtime files in the system temporary directory. Configure
-`[proxy]`, `[proxy.mesh]`, `[[ssh]]`, `[[fwd]]`, or `[[http]]` when an
-equivalent component should persist.
+The former command-line interfaces are retained under the unstable `zay x`
+namespace: `zay x run`, `zay x config`, and `zay x service`. They are internal
+and may change without compatibility guarantees.
 
 # PREBUILT FILES NOTICE
 

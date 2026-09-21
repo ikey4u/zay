@@ -31,21 +31,26 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use super::cloudflared::{
-    CLOUDFLARED_H2_HEADER_RESPONSE_META, CLOUDFLARED_H2_HEADER_RESPONSE_USER,
-    CLOUDFLARED_H2_HEADER_TCP_SOURCE, CLOUDFLARED_H2_HEADER_UPGRADE,
-    CLOUDFLARED_H2_RESPONSE_META_ORIGIN, CLOUDFLARED_H2_UPGRADE_CONFIGURATION,
-    CLOUDFLARED_H2_UPGRADE_CONTROL_STREAM, CLOUDFLARED_H2_UPGRADE_WEBSOCKET,
-    CLOUDFLARED_METADATA_HTTP_HEADER_PREFIX, CLOUDFLARED_METADATA_HTTP_HOST,
-    CLOUDFLARED_METADATA_HTTP_METHOD, CLOUDFLARED_METADATA_HTTP_STATUS,
-    CloudflaredConnectRequest, CloudflaredConnectionType, CloudflaredError,
-    CloudflaredMetadata, CloudflaredRegistrationOptions,
-    CloudflaredRegistrationResult, cloudflared_has_flow_connect_rate_limited,
-    cloudflared_registration_rpc, is_cloudflared_control_response_header,
-    is_cloudflared_websocket_client_header, serialize_cloudflared_headers,
+use super::{
+    cloudflared::{
+        CLOUDFLARED_H2_HEADER_RESPONSE_META,
+        CLOUDFLARED_H2_HEADER_RESPONSE_USER, CLOUDFLARED_H2_HEADER_TCP_SOURCE,
+        CLOUDFLARED_H2_HEADER_UPGRADE, CLOUDFLARED_H2_RESPONSE_META_ORIGIN,
+        CLOUDFLARED_H2_UPGRADE_CONFIGURATION,
+        CLOUDFLARED_H2_UPGRADE_CONTROL_STREAM,
+        CLOUDFLARED_H2_UPGRADE_WEBSOCKET,
+        CLOUDFLARED_METADATA_HTTP_HEADER_PREFIX,
+        CLOUDFLARED_METADATA_HTTP_HOST, CLOUDFLARED_METADATA_HTTP_METHOD,
+        CLOUDFLARED_METADATA_HTTP_STATUS, CloudflaredConnectRequest,
+        CloudflaredConnectionType, CloudflaredError, CloudflaredMetadata,
+        CloudflaredRegistrationOptions, CloudflaredRegistrationResult,
+        cloudflared_has_flow_connect_rate_limited,
+        cloudflared_registration_rpc, is_cloudflared_control_response_header,
+        is_cloudflared_websocket_client_header, serialize_cloudflared_headers,
+    },
+    cloudflared_quic::CLOUDFLARED_REGISTRATION_TIMEOUT,
+    cloudflared_supervisor::CloudflaredManagedConnection,
 };
-use super::cloudflared_quic::CLOUDFLARED_REGISTRATION_TIMEOUT;
-use super::cloudflared_supervisor::CloudflaredManagedConnection;
 
 pub const CLOUDFLARED_H2_RESPONSE_META_EDGE: &str = r#"{"src":"cloudflared"}"#;
 pub const CLOUDFLARED_H2_RESPONSE_META_EDGE_RATE_LIMITED: &str =
@@ -878,6 +883,13 @@ async fn dispatch_cloudflared_http2_data(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicBool;
+
+    use serde_json::json;
+    use tokio::io::AsyncWriteExt as _;
+    use tokio_util::compat::TokioAsyncReadCompatExt as _;
+    use uuid::Uuid;
+
     use super::*;
     use crate::{
         cloudflared_tunnelrpc_capnp as tunnelrpc,
@@ -887,11 +899,6 @@ mod tests {
             CloudflaredCredentials,
         },
     };
-    use serde_json::json;
-    use std::sync::atomic::AtomicBool;
-    use tokio::io::AsyncWriteExt as _;
-    use tokio_util::compat::TokioAsyncReadCompatExt as _;
-    use uuid::Uuid;
 
     #[tokio::test(flavor = "current_thread")]
     async fn response_writer_emits_origin_trailers_after_body() {

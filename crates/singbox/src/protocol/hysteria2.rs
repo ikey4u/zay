@@ -2957,7 +2957,6 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-
     use crate::{
         common::tls::{
             build_client_config, build_server_config_with_default_alpn,

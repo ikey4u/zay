@@ -953,6 +953,11 @@ fn bind_http01_listeners(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use p256::pkcs8::DecodePrivateKey as _;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
     use super::{
         CertificateProviderManager, normalize_acme_account_key,
         uses_advanced_acme, validate_acme_options,
@@ -965,9 +970,6 @@ mod tests {
         outbound::OutboundManager,
         service::Box as ServiceBox,
     };
-    use p256::pkcs8::DecodePrivateKey as _;
-    use std::sync::Arc;
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     #[test]
     fn acme_account_key_normalizes_p256_and_routes_rsa_to_advanced() {

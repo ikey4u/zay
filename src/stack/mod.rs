@@ -1,4 +1,4 @@
-//! `zay run proxy` — sing-box TUN + optional EasyTier mesh (WireGuard portal).
+//! `zay x run proxy` — sing-box TUN + optional EasyTier mesh (WireGuard portal).
 
 pub mod controller;
 pub mod easytier;
@@ -106,6 +106,9 @@ pub fn run(cli: StackCli) -> Result<()> {
         "sing-box dir → {}",
         prepared.settings.singbox_dir().display()
     );
+    crate::singbox::tun_route::ensure_no_conflicting_full_tun(
+        &prepared.settings,
+    )?;
 
     let mesh_started = if flags.mesh_enabled() {
         let cfg = prepared
@@ -150,7 +153,7 @@ pub fn run(cli: StackCli) -> Result<()> {
         if cfg.is_node() {
             eprintln!(
                 "mesh tip: reach a peer service with `curl http://<mesh-ip>:<port>/` from another node; \
-                 the server must run `zay run proxy --mesh node` and listen on 0.0.0.0 or 127.0.0.1"
+                 the server must run `zay x run proxy --mesh node` and listen on 0.0.0.0 or 127.0.0.1"
             );
         }
         if std::env::var("ZAY_EASYTIER_DEBUG").is_err() {
@@ -198,30 +201,40 @@ pub fn run(cli: StackCli) -> Result<()> {
 
     let state = Arc::new(api::AppState::from(prepared));
 
-    let listen_host = if flags.gateway {
-        "0.0.0.0"
+    if state.tun_enabled {
+        eprintln!(
+            "stack – system TUN proxy (no Mixed listener; gateway={}, mesh={})",
+            flags.gateway,
+            flags
+                .mesh
+                .map(|m| format!("{m:?}"))
+                .unwrap_or_else(|| "off".into()),
+        );
     } else {
-        "127.0.0.1"
-    };
-    let proxy_scope = if flags.gateway {
-        "gateway proxy"
-    } else {
-        "local proxy"
-    };
-    eprintln!(
-        "stack – {proxy_scope} on {listen_host}:{} (gateway={}, mesh={}, tun={})",
-        state.settings.mixed_port,
-        flags.gateway,
-        flags
-            .mesh
-            .map(|m| format!("{m:?}"))
-            .unwrap_or_else(|| "off".into()),
-        state.tun_enabled,
-    );
+        let listen_host = if flags.gateway {
+            "0.0.0.0"
+        } else {
+            "127.0.0.1"
+        };
+        let proxy_scope = if flags.gateway {
+            "gateway proxy"
+        } else {
+            "local proxy"
+        };
+        eprintln!(
+            "stack – {proxy_scope} on {listen_host}:{} (gateway={}, mesh={}, tun=false)",
+            state.settings.mixed_port,
+            flags.gateway,
+            flags
+                .mesh
+                .map(|m| format!("{m:?}"))
+                .unwrap_or_else(|| "off".into()),
+        );
+    }
     if state.tun_enabled && !state.settings.subscriptions.is_empty() {
         eprintln!(
             "tip: desktop Firefox (RDP) — Settings → Network → **No proxy** when TUN is on; \
-             do NOT use Manual proxy localhost:7890 (curl uses tun0, not mixed). \
+             do NOT use Manual proxy localhost:7890 (TUN mode has no Mixed listener). \
              If system proxy is stuck: gsettings set org.gnome.system.proxy mode 'none'"
         );
     }
@@ -324,6 +337,7 @@ fn dump_config(cli: &StackCli, mesh: Option<MeshConfig>) -> Result<String> {
         proxy: zay_settings::PersistentProxyFile {
             enabled: true,
             subscriptions: cli.common.subscriptions.clone(),
+            active_nodes: Vec::new(),
             gateway: cli.gateway,
             mixed_port: Some(cli.common.mixed_port.unwrap_or(7890)),
             update_interval: Some(cli.common.update_interval.unwrap_or(3600)),
@@ -356,7 +370,6 @@ pub(crate) fn spawn_tun_worker(
     config_path: &std::path::Path,
     sudo_password: Option<&str>,
 ) -> Result<crate::singbox::assets::NativeTunWorker> {
-    crate::singbox::assets::ensure_mixed_port_free(settings.mixed_port)?;
     #[cfg(unix)]
     {
         assets::spawn_native_tun_worker(
@@ -599,7 +612,7 @@ fn build_mesh_config_from_cli(
             MeshRole::Relay => "relay",
             MeshRole::Node => "node",
         };
-        format!("--mesh-auth is required when creating [proxy.mesh] (see `zay run proxy --mesh {label}`)")
+        format!("--mesh-auth is required when creating [proxy.mesh] (see `zay x run proxy --mesh {label}`)")
     })?;
     let auth = mesh::parse_mesh_auth(auth_raw, role)?;
     match role {
@@ -628,7 +641,7 @@ fn build_mesh_config_from_cli(
         }
         MeshRole::Node => {
             let ipv4 = cli.mesh_ip.as_deref().with_context(
-                || "`zay run proxy --mesh node` requires --mesh-ip IP/MASK",
+                || "`zay x run proxy --mesh node` requires --mesh-ip IP/MASK",
             )?;
             Ok(MeshConfig {
                 enabled: true,
@@ -775,7 +788,7 @@ pub fn validate(settings: &Settings) -> Result<()> {
 
     if mesh.role != cli_role {
         bail!(
-            "[proxy.mesh].role = {:?} does not match `zay run proxy --mesh {}`",
+            "[proxy.mesh].role = {:?} does not match `zay x run proxy --mesh {}`",
             mesh.role,
             match cli_role {
                 MeshRole::Relay => "relay",
@@ -831,7 +844,7 @@ pub fn validate(settings: &Settings) -> Result<()> {
                 && !crate::singbox::tun_route::mesh_only_no_proxy(settings)
             {
                 bail!(
-                    "`zay run proxy --mesh node` with a subscription (or --gateway) \
+                    "`zay x run proxy --mesh node` with a subscription (or --gateway) \
                      requires sing-box TUN (omit --no-tun); mesh-only may use --no-tun"
                 );
             }

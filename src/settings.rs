@@ -135,9 +135,9 @@ struct ZayFile {
     ssh: Vec<PersistentSshFile>,
 }
 
-/// Configuration of the persistent proxy started by `zay` / `zay service start`.
+/// Configuration of the persistent proxy started by `zay` / `zay x service start`.
 ///
-/// The existing `zay run proxy …` command remains an explicit, foreground override. This
+/// The existing `zay x run proxy …` command remains an explicit, foreground override. This
 /// section is deliberately separate from the generated proxy configuration.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
@@ -145,6 +145,8 @@ struct ZayFile {
 pub struct PersistentProxyFile {
     pub enabled: bool,
     pub subscriptions: Vec<String>,
+    /// Subscription node tags allowed to carry proxy traffic. Empty means all.
+    pub active_nodes: Vec<String>,
     pub gateway: bool,
     pub mixed_port: Option<u16>,
     pub update_interval: Option<u64>,
@@ -163,12 +165,23 @@ pub struct PersistentProxyFile {
 #[serde(default)]
 #[serde(deny_unknown_fields)]
 pub struct DomainRuleFile {
+    #[serde(default = "domain_rule_enabled")]
+    pub enabled: bool,
     pub name: String,
+    /// Legacy suffix-only matches. Kept for config compatibility.
     pub by_suffix: Vec<String>,
+    pub host: Vec<String>,
+    pub process: Vec<String>,
+    pub source: Vec<String>,
+    pub destination: Vec<String>,
     pub outbounds: Vec<String>,
     pub health_check_url: Option<String>,
     pub interval: Option<u64>,
     pub tolerance: Option<u16>,
+}
+
+fn domain_rule_enabled() -> bool {
+    true
 }
 
 /// Persistent proxy TUN configuration.
@@ -256,6 +269,26 @@ pub struct PersistentConfig {
     pub ssh: Vec<PersistentSshFile>,
 }
 
+impl PersistentConfig {
+    /// Whether the enabled proxy/mesh stack needs a privileged process on Unix.
+    /// Process managers should satisfy this up front; the WebUI never daemonizes
+    /// or retains administrator credentials.
+    pub fn requires_root(&self) -> bool {
+        let mesh_node = self
+            .mesh
+            .as_ref()
+            .is_some_and(|mesh| mesh.enabled && mesh.is_node());
+        let relay_forces_tun_off = self
+            .mesh
+            .as_ref()
+            .is_some_and(|mesh| mesh.role == MeshRole::Relay);
+        let singbox_tun = (self.stack.enabled || self.mesh.is_some())
+            && self.stack.tun.enabled
+            && !relay_forces_tun_off;
+        mesh_node || singbox_tun
+    }
+}
+
 impl Default for ZayFile {
     fn default() -> Self {
         Self {
@@ -274,7 +307,7 @@ pub struct BootstrapProxy {
     pub proxy: Value,
 }
 
-/// `[proxy.mesh].role` and `zay run proxy --mesh <relay|node>`.
+/// `[proxy.mesh].role` and `zay x run proxy --mesh <relay|node>`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MeshRole {
@@ -284,7 +317,7 @@ pub enum MeshRole {
     Node,
 }
 
-/// Flags passed to `zay run proxy`.
+/// Flags passed to `zay x run proxy`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct StackFlags {
     pub mesh: Option<MeshRole>,
@@ -311,6 +344,7 @@ impl StackFlags {
 #[derive(Clone)]
 pub struct Settings {
     pub subscriptions: Vec<String>,
+    pub active_nodes: Vec<String>,
     pub data_dir: PathBuf,
     pub mixed_port: u16,
     pub allow_lan: bool,
@@ -467,6 +501,19 @@ fn load_zay_toml(path: &Path) -> Result<ZayFile> {
     toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))
 }
 
+/// Validate an in-memory persistent configuration before a control plane writes it.
+/// This intentionally uses the same strict schema as the daemon so a WebUI save
+/// cannot leave the next core restart with an unreadable configuration.
+pub fn validate_persistent_toml(raw: &str) -> Result<()> {
+    let mut file: ZayFile = toml::from_str(raw).context("parsing zay.toml")?;
+    derive_node_mesh_routes(&mut file.proxy.mesh)?;
+    if let Some(mesh) = file.proxy.mesh.as_ref().filter(|mesh| mesh.enabled) {
+        crate::stack::easytier::to_easytier_toml(mesh)
+            .context("validating [proxy.mesh]")?;
+    }
+    Ok(())
+}
+
 pub fn stack_config_paths(
     data_dir: Option<&Path>,
     config: Option<&Path>,
@@ -551,7 +598,7 @@ pub fn resolve_stack(cli: &ProxyOpts, stack: StackFlags) -> Result<Settings> {
     resolve_inner(cli, stack)
 }
 
-/// Resolve a one-off `zay run proxy` invocation without accessing zay.toml.
+/// Resolve a one-off `zay x run proxy` invocation without accessing zay.toml.
 pub fn resolve_transient_stack(
     cli: &ProxyOpts,
     stack: StackFlags,
@@ -565,6 +612,7 @@ pub fn resolve_transient_stack(
         .join(format!("zay-run-{}-{nonce}", std::process::id()));
     Settings {
         subscriptions: cli.subscriptions.clone(),
+        active_nodes: Vec::new(),
         data_dir,
         mixed_port: cli.mixed_port.unwrap_or(7890),
         allow_lan: stack.gateway,
@@ -616,6 +664,11 @@ fn resolve_inner(cli: &ProxyOpts, stack: StackFlags) -> Result<Settings> {
             file.proxy.subscriptions.clone()
         } else {
             cli.subscriptions.clone()
+        },
+        active_nodes: if cli.subscriptions.is_empty() {
+            file.proxy.active_nodes.clone()
+        } else {
+            Vec::new()
         },
         data_dir,
         mixed_port: cli.mixed_port.or(file.proxy.mixed_port).unwrap_or(7890),

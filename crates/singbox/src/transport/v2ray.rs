@@ -1705,8 +1705,9 @@ impl AsyncWrite for PrefixedStream {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    use super::*;
 
     #[tokio::test]
     async fn websocket_client_and_server_form_a_byte_stream() {

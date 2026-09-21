@@ -437,13 +437,13 @@ fn override_destination(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use hickory_proto::{
         op::{Message, MessageType, OpCode, Query},
         rr::{Name, RData, RecordType},
         serialize::binary::{BinDecodable, BinEncodable, BinEncoder},
     };
-    use std::sync::Arc;
-
     use serde_json::json;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},

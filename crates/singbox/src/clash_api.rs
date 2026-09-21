@@ -340,6 +340,17 @@ async fn dispatch(
             (&Method::GET, "/traffic") => {
                 traffic(&mut request, outbounds.clone(), cancellation)
             }
+            (&Method::GET, "/zay/process-traffic") => {
+                json_response(StatusCode::OK, process_traffic_value(&outbounds))
+            }
+            (&Method::POST, "/zay/process-traffic/enable") => {
+                outbounds.set_process_traffic_enabled(true);
+                json_response(StatusCode::OK, process_traffic_value(&outbounds))
+            }
+            (&Method::POST, "/zay/process-traffic/disable") => {
+                outbounds.set_process_traffic_enabled(false);
+                json_response(StatusCode::OK, process_traffic_value(&outbounds))
+            }
             (&Method::GET, "/memory") => memory(&mut request, cancellation),
             (&Method::POST, "/upgrade/ui" | "/upgrade/ui/") => {
                 if options.external_ui.is_empty() {
@@ -1119,6 +1130,15 @@ fn connections_value(outbounds: &OutboundManager) -> Value {
         .connections()
         .into_iter()
         .map(|connection| {
+            let (source_ip, source_port) = match &connection.source {
+                Some(crate::common::network::SocksAddr::Ip(address)) => {
+                    (address.ip().to_string(), address.port().to_string())
+                }
+                Some(crate::common::network::SocksAddr::Domain { host, port }) => {
+                    (host.clone(), port.to_string())
+                }
+                None => (String::new(), "0".to_owned()),
+            };
             let (destination_ip, host, destination_port) = match &connection
                 .destination
             {
@@ -1137,19 +1157,21 @@ fn connections_value(outbounds: &OutboundManager) -> Value {
                 "metadata": {
                     "network": connection.network,
                     "type": "",
-                    "sourceIP": "",
+                    "sourceIP": source_ip,
                     "destinationIP": destination_ip,
-                    "sourcePort": "0",
+                    "sourcePort": source_port,
                     "destinationPort": destination_port.to_string(),
-                    "host": host,
+                    "host": if connection.domain.is_empty() { host } else { connection.domain.clone() },
                     "dnsMode": "normal",
-                    "processPath": ""
+                    "process": connection.process_name,
+                    "processPath": connection.process_path,
+                    "processLookup": connection.process_lookup
                 },
                 "upload": connection.upload,
                 "download": connection.download,
                 "start": start,
                 "chains": [connection.outbound],
-                "rule": "final",
+                "rule": if connection.rule.is_empty() { "final" } else { &connection.rule },
                 "rulePayload": ""
             })
         })
@@ -1160,6 +1182,38 @@ fn connections_value(outbounds: &OutboundManager) -> Value {
         "connections": connections,
         "memory": inuse_memory()
     })
+}
+
+fn process_traffic_value(outbounds: &OutboundManager) -> Value {
+    let state = outbounds.process_traffic();
+    let started_at = state.started_at.and_then(format_system_time);
+    let records = state
+        .records
+        .into_iter()
+        .map(|record| {
+            json!({
+                "process_name": record.process_name,
+                "process_path": record.process_path,
+                "process_lookup": record.process_lookup,
+                "upload": record.upload,
+                "download": record.download,
+                "connections": record.connections,
+                "first_seen": format_system_time(record.first_seen).unwrap_or_default(),
+                "last_seen": format_system_time(record.last_seen).unwrap_or_default(),
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "enabled": state.enabled,
+        "started_at": started_at,
+        "records": records,
+    })
+}
+
+fn format_system_time(value: std::time::SystemTime) -> Option<String> {
+    time::OffsetDateTime::from(value)
+        .format(&time::format_description::well_known::Rfc3339)
+        .ok()
 }
 
 fn groups(outbounds: &OutboundManager) -> Response<ApiBody> {

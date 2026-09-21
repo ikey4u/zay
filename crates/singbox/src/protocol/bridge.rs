@@ -15,9 +15,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use tokio::sync::{mpsc, oneshot};
-
 use network_interface::{NetworkInterface, NetworkInterfaceConfig};
+use tokio::sync::{mpsc, oneshot};
 
 use crate::{
     adapter::{

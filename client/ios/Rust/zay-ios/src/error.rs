@@ -1,5 +1,7 @@
-use std::cell::RefCell;
-use std::ffi::{CStr, CString, c_char};
+use std::{
+    cell::RefCell,
+    ffi::{CStr, CString, c_char},
+};
 
 thread_local! {
     static LAST_ERROR: RefCell<Option<CString>> = const { RefCell::new(None) };

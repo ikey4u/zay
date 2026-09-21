@@ -1,5 +1,11 @@
 //! Runtime-switchable outbound selector.
 
+use std::{
+    collections::HashMap,
+    io,
+    sync::{Arc, RwLock},
+};
+
 use crate::{
     adapter::{
         DialFuture, Dialer, IcmpResponse, InterruptGenerations, IpPacketPort,
@@ -9,11 +15,6 @@ use crate::{
     common::network::SocksAddr,
     dns::persistent::PersistentDnsCache,
     protocol::urltest::GroupRegistry,
-};
-use std::{
-    collections::HashMap,
-    io,
-    sync::{Arc, RwLock},
 };
 
 pub struct SelectorOutbound {
@@ -283,13 +284,14 @@ mod tests {
         sync::{Arc, Mutex},
     };
 
+    use tokio::io::AsyncReadExt;
+
     use super::SelectorOutbound;
     use crate::{
         adapter::{DialFuture, Dialer, NetworkDialOptions, Stream},
         common::network::SocksAddr,
         constant::NetworkStrategy,
     };
-    use tokio::io::AsyncReadExt;
 
     struct RecordingDialer(&'static str, Arc<Mutex<Vec<&'static str>>>);
 

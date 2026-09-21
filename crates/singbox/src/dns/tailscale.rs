@@ -1054,9 +1054,12 @@ mod tests {
     use std::sync::Mutex as StdMutex;
 
     use super::*;
-    use crate::adapter::{PacketConnection, Stream};
-    use crate::protocol::tailscale_control_types::{
-        TailscaleDnsRecord, TailscaleHostinfo, TailscaleNode, TailscaleService,
+    use crate::{
+        adapter::{PacketConnection, Stream},
+        protocol::tailscale_control_types::{
+            TailscaleDnsRecord, TailscaleHostinfo, TailscaleNode,
+            TailscaleService,
+        },
     };
 
     struct StaticProvider(Arc<TailscaleNetmapState>);

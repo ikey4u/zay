@@ -5,7 +5,6 @@ use std::{
     io::Read,
     time::Duration,
 };
-
 #[cfg(unix)]
 use std::{io, os::fd::OwnedFd, path::PathBuf, process::Stdio};
 

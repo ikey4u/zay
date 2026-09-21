@@ -17,9 +17,10 @@ use hickory_proto::{
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
 
-use crate::common::network::Network;
-use crate::common::network::SocksAddr;
-use crate::constant::{InterfaceType, NetworkStrategy};
+use crate::{
+    common::network::{Network, SocksAddr},
+    constant::{InterfaceType, NetworkStrategy},
+};
 
 /// Per-connection dial hints produced by route actions.
 ///
@@ -76,6 +77,42 @@ pub struct ProcessInfo {
     pub user_id: Option<i32>,
 }
 
+/// Outcome of a best-effort connection-owner lookup.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessLookupStatus {
+    #[default]
+    Found,
+    /// The owning platform supplied flow identity at connection creation.
+    PlatformMonitor,
+    UdpCache,
+    SocketSnapshotMiss,
+    KernelSocket,
+    ProcessExited,
+    PermissionDenied,
+    ResolverError,
+}
+
+impl ProcessLookupStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Found => "found",
+            Self::PlatformMonitor => "platform_monitor",
+            Self::UdpCache => "udp_cache",
+            Self::SocketSnapshotMiss => "socket_snapshot_miss",
+            Self::KernelSocket => "kernel_socket",
+            Self::ProcessExited => "process_exited",
+            Self::PermissionDenied => "permission_denied",
+            Self::ResolverError => "resolver_error",
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ProcessLookupResult {
+    pub process: Option<ProcessInfo>,
+    pub status: ProcessLookupStatus,
+}
+
 /// Runtime-scoped connection-owner lookup supplied by an embedding host.
 ///
 /// Mobile platforms normally implement this through their VPN API. Desktop
@@ -88,6 +125,23 @@ pub trait ProcessResolver: Send + Sync {
         source: std::net::SocketAddr,
         destination: Option<std::net::SocketAddr>,
     ) -> Option<ProcessInfo>;
+
+    fn lookup_detailed(
+        &self,
+        network: Network,
+        source: std::net::SocketAddr,
+        destination: Option<std::net::SocketAddr>,
+    ) -> ProcessLookupResult {
+        let process = self.lookup(network, source, destination);
+        ProcessLookupResult {
+            status: if process.is_some() {
+                ProcessLookupStatus::Found
+            } else {
+                ProcessLookupStatus::SocketSnapshotMiss
+            },
+            process,
+        }
+    }
 }
 
 #[derive(Default)]

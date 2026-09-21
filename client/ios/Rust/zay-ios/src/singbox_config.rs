@@ -6,17 +6,20 @@
 //! Routing matches desktop Loyalsoldier **blacklist** when embedded rules are
 //! present under `working_dir/ruleset-embedded/` (`final` → `direct`).
 
-use anyhow::{Context, Result, bail};
-use serde::Deserialize;
-use serde_json::json;
 use std::{
     collections::BTreeSet,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     path::Path,
 };
 
-use crate::proxy_url::{OutboundSpec, redacted_proxy_url, resolve_proxy};
-use crate::rules::{self, CustomRuleSet, RulesStage};
+use anyhow::{Context, Result, bail};
+use serde::Deserialize;
+use serde_json::json;
+
+use crate::{
+    proxy_url::{OutboundSpec, redacted_proxy_url, resolve_proxy},
+    rules::{self, CustomRuleSet, RulesStage},
+};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct SingboxInput {

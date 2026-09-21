@@ -2366,6 +2366,14 @@ fn advance_response_packet_id(response: &mut UdpSocketControlData) {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use serde_json::json;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::{TcpListener, UdpSocket},
+    };
+
     use super::ShadowsocksInbound;
     use crate::{
         adapter::Dialer,
@@ -2384,12 +2392,6 @@ mod tests {
             shadowsocks::ShadowsocksOutbound,
         },
         route::Router,
-    };
-    use serde_json::json;
-    use std::sync::Arc;
-    use tokio::{
-        io::{AsyncReadExt, AsyncWriteExt},
-        net::{TcpListener, UdpSocket},
     };
 
     #[tokio::test]

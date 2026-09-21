@@ -1,7 +1,6 @@
 //! Route-level dialer defaults and runtime-scoped mobile network selection.
 
 use std::io;
-
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 use std::{net::SocketAddr, sync::Arc};
 

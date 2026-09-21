@@ -9,15 +9,6 @@ use std::{
 use async_trait::async_trait;
 use thiserror::Error;
 
-use crate::{
-    adapter::Dialer,
-    common::{
-        network::SocksAddr,
-        tls::{ClientTlsDialer, build_client_config},
-    },
-    option::OutboundTlsOptions,
-};
-
 use super::{
     tailscale::{TailscaleDerpConnectOptions, TailscaleDerpError},
     tailscale_control_supervisor::TailscaleNetmapConsumer,
@@ -28,6 +19,14 @@ use super::{
         TailscaleDerpConnector, TailscaleDerpDialConnector,
     },
     tailscale_wireguard::{TailscaleWireGuardError, TailscaleWireGuardHandle},
+};
+use crate::{
+    adapter::Dialer,
+    common::{
+        network::SocksAddr,
+        tls::{ClientTlsDialer, build_client_config},
+    },
+    option::OutboundTlsOptions,
 };
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

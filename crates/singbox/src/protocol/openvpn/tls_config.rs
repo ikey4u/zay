@@ -629,8 +629,7 @@ pub enum OpenVpnTlsError {
 mod tests {
     use std::pin::Pin;
 
-    use openssl::sha::sha256;
-    use openssl::ssl::Ssl;
+    use openssl::{sha::sha256, ssl::Ssl};
     use rcgen::{CertifiedKey, generate_simple_self_signed};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio_openssl::SslStream;

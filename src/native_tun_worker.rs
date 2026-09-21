@@ -11,6 +11,8 @@ use tokio::signal::unix::{SignalKind, signal};
 
 use crate::singbox::native::NativeRuntime;
 
+pub const READY_MESSAGE: &str = "zay native TUN worker ready";
+
 pub struct Args {
     pub runtime_dir: PathBuf,
     pub config_path: PathBuf,
@@ -19,6 +21,7 @@ pub struct Args {
 pub fn run(args: Args) -> Result<()> {
     let mut runtime =
         NativeRuntime::start(&args.config_path, &args.runtime_dir)?;
+    eprintln!("{READY_MESSAGE}");
     let control = runtime.handle();
     let executor = tokio::runtime::Builder::new_current_thread()
         .enable_all()

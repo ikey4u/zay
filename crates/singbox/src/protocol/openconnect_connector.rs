@@ -14,18 +14,17 @@ use tokio::io::{
     ReadBuf,
 };
 
-use crate::{
-    adapter::{Dialer, Stream},
-    common::{network::SocksAddr, tls::build_client_config},
-    option::OutboundTlsOptions,
-};
-
 use super::{
     AnyConnectAuthenticatedSession, CstpConnectOptions, CstpDtlsNegotiation,
     CstpDtlsNegotiationOptions, CstpError, CstpNegotiatedState,
     CstpResponseOptions, CstpSession, CstpSessionOptions,
     build_cstp_connect_request, parse_cstp_dtls_negotiation,
     parse_cstp_response, read_cstp_http_response,
+};
+use crate::{
+    adapter::{Dialer, Stream},
+    common::{network::SocksAddr, tls::build_client_config},
+    option::OutboundTlsOptions,
 };
 
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);

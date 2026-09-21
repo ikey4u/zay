@@ -1,12 +1,13 @@
 //! Programmatic proxy lifecycle for the persistent runtime.
 
 use std::{
+    net::{SocketAddr, TcpStream},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU32, Ordering},
     },
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail};
@@ -31,6 +32,7 @@ pub enum StackRunState {
     Stopped,
     Starting,
     Running,
+    Degraded,
     Failed,
     Stopping,
 }
@@ -43,6 +45,10 @@ pub struct StackStatus {
     pub tun_enabled: bool,
     pub mesh_enabled: bool,
     pub gateway: bool,
+    #[serde(default)]
+    pub proxy_ready: bool,
+    #[serde(default)]
+    pub proxy_error: Option<String>,
     pub error: Option<String>,
 }
 
@@ -55,6 +61,8 @@ impl Default for StackStatus {
             tun_enabled: false,
             mesh_enabled: false,
             gateway: false,
+            proxy_ready: false,
+            proxy_error: None,
             error: None,
         }
     }
@@ -226,12 +234,37 @@ fn run_stack_managed(
     let state = Arc::new(api::AppState::from(prepared));
     {
         let mut st = status.lock().expect("stack status");
-        st.state = StackRunState::Running;
-        st.mixed_port = Some(state.settings.mixed_port);
+        st.mixed_port =
+            (!state.tun_enabled).then_some(state.settings.mixed_port);
         st.tun_enabled = state.tun_enabled;
         st.mesh_enabled = flags.mesh_enabled();
         st.gateway = flags.gateway;
+        st.proxy_ready = false;
+        st.proxy_error = None;
         st.error = None;
+    }
+
+    if let Err(error) =
+        crate::singbox::tun_route::ensure_no_conflicting_full_tun(
+            &state.settings,
+        )
+    {
+        let message = format!("{error:#}");
+        {
+            let mut st = status.lock().expect("stack status");
+            st.state = StackRunState::Degraded;
+            st.proxy_error = Some(message.clone());
+            st.error = Some(message.clone());
+        }
+        crate::logging::emit_error("proxy", "tun_conflict", &message);
+        logs.push(format!("proxy unavailable: {message}"));
+        while !stop_requested.load(Ordering::SeqCst) {
+            thread::sleep(Duration::from_millis(200));
+        }
+        if mesh_started {
+            easytier::stop_all()?;
+        }
+        return Ok(());
     }
 
     let config_path = state.settings.config_path();
@@ -261,6 +294,12 @@ fn run_stack_managed(
         }
         logs.push("sing-box started in-process (Rust library)".to_string());
         drop(sudo_password);
+
+        let _health_monitor = ProxyHealthMonitor::start(
+            state.settings.clone(),
+            status.clone(),
+            logs.clone(),
+        );
 
         if !flags.no_rules {
             rules::spawn_background_download(
@@ -302,6 +341,12 @@ fn run_stack_managed(
         pipe_singbox_to_buffer(stderr, logs.clone(), singbox_logs);
     }
 
+    let _health_monitor = ProxyHealthMonitor::start(
+        state.settings.clone(),
+        status.clone(),
+        logs.clone(),
+    );
+
     if !flags.no_rules {
         rules::spawn_background_download(
             state.settings.clone(),
@@ -327,12 +372,215 @@ fn run_stack_managed(
     }
 
     let code = status_wait.code().unwrap_or(1);
+    if stop_requested.load(Ordering::SeqCst) {
+        return Ok(());
+    }
     if code != 0 {
-        // Let the stderr pipe copy FATAL lines into the log buffer first.
+        // Let the stderr pipe copy the final diagnostic lines into the buffer.
         thread::sleep(Duration::from_millis(150));
+        let detail = worker_failure_detail(&logs.recent());
+        if let Some(detail) = detail {
+            bail!("native TUN worker exited with status {code}: {detail}");
+        }
         bail!("native TUN worker exited with status {code}");
     }
     Ok(())
+}
+
+struct ProxyHealthMonitor {
+    stop: Arc<AtomicBool>,
+    join: Option<JoinHandle<()>>,
+}
+
+impl ProxyHealthMonitor {
+    fn start(
+        settings: Settings,
+        status: Arc<Mutex<StackStatus>>,
+        logs: LogBuffer,
+    ) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let monitor_stop = stop.clone();
+        let join = thread::spawn(move || {
+            let initial =
+                wait_for_initial_proxy_health(&settings, &logs, &monitor_stop);
+            if monitor_stop.load(Ordering::SeqCst) {
+                return;
+            }
+            apply_proxy_health(initial, &settings, &status, &logs);
+            while !monitor_stop.load(Ordering::SeqCst) {
+                for _ in 0..120 {
+                    if monitor_stop.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    thread::sleep(Duration::from_millis(250));
+                }
+                update_proxy_health(&settings, &status, &logs);
+            }
+        });
+        Self {
+            stop,
+            join: Some(join),
+        }
+    }
+}
+
+impl Drop for ProxyHealthMonitor {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
+fn update_proxy_health(
+    settings: &Settings,
+    status: &Arc<Mutex<StackStatus>>,
+    logs: &LogBuffer,
+) {
+    let result = probe_proxy_health(settings, Duration::from_secs(8));
+    apply_proxy_health(result, settings, status, logs);
+}
+
+fn wait_for_initial_proxy_health(
+    settings: &Settings,
+    logs: &LogBuffer,
+    stop: &AtomicBool,
+) -> Result<()> {
+    if crate::singbox::tun_route::singbox_tun_enabled(settings) {
+        let ready_deadline = Instant::now() + Duration::from_secs(45);
+        while !logs
+            .recent()
+            .iter()
+            .any(|line| line.trim() == crate::native_tun_worker::READY_MESSAGE)
+        {
+            if stop.load(Ordering::SeqCst) {
+                bail!("proxy health monitor stopped before TUN became ready");
+            }
+            if Instant::now() >= ready_deadline {
+                bail!("native TUN worker did not become ready after 45s");
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+    let deadline = Instant::now() + Duration::from_secs(12);
+    loop {
+        if stop.load(Ordering::SeqCst) {
+            bail!("proxy health monitor stopped");
+        }
+        let timeout = deadline
+            .saturating_duration_since(Instant::now())
+            .min(Duration::from_secs(4));
+        match probe_proxy_health(settings, timeout) {
+            Ok(()) => return Ok(()),
+            Err(error) if Instant::now() >= deadline => return Err(error),
+            Err(_) => thread::sleep(Duration::from_millis(250)),
+        }
+    }
+}
+
+fn probe_proxy_health(settings: &Settings, timeout: Duration) -> Result<()> {
+    if crate::singbox::tun_route::singbox_tun_enabled(settings) {
+        return crate::singbox::subscription::probe_tun_proxy(
+            &settings.health_check_url,
+            timeout,
+        );
+    }
+    if settings.subscriptions.is_empty() {
+        let address = SocketAddr::from(([127, 0, 0, 1], settings.mixed_port));
+        TcpStream::connect_timeout(&address, timeout).with_context(|| {
+            format!("connecting to local mixed proxy at {address}")
+        })?;
+        return Ok(());
+    }
+    crate::singbox::subscription::probe_mixed_proxy(
+        settings.mixed_port,
+        &settings.health_check_url,
+        timeout,
+    )
+}
+
+fn apply_proxy_health(
+    result: Result<()>,
+    settings: &Settings,
+    status: &Arc<Mutex<StackStatus>>,
+    logs: &LogBuffer,
+) {
+    let mut st = status.lock().expect("stack status");
+    if matches!(
+        st.state,
+        StackRunState::Stopped
+            | StackRunState::Failed
+            | StackRunState::Stopping
+    ) {
+        return;
+    }
+    let was_ready = st.proxy_ready;
+    match result {
+        Ok(()) => {
+            st.proxy_ready = true;
+            st.proxy_error = None;
+            st.error = None;
+            if matches!(
+                st.state,
+                StackRunState::Starting | StackRunState::Degraded
+            ) {
+                st.state = StackRunState::Running;
+            }
+            if !was_ready {
+                if crate::singbox::tun_route::singbox_tun_enabled(settings) {
+                    logs.push("proxy health check passed through system TUN");
+                } else {
+                    logs.push(format!(
+                        "proxy health check passed via 127.0.0.1:{}",
+                        settings.mixed_port
+                    ));
+                }
+            }
+        }
+        Err(error) => {
+            let message = format!("proxy health check failed: {error:#}");
+            st.proxy_ready = false;
+            st.proxy_error = Some(message.clone());
+            st.error = Some(message.clone());
+            st.state = StackRunState::Degraded;
+            if was_ready || !logs.recent().iter().any(|line| line == &message) {
+                crate::logging::emit_error(
+                    "proxy",
+                    "health_check_failed",
+                    &message,
+                );
+                logs.push(message);
+            }
+        }
+    }
+}
+
+fn worker_failure_detail(lines: &[String]) -> Option<String> {
+    let worker_start = lines
+        .iter()
+        .rposition(|line| line.starts_with("native TUN worker started pid="))
+        .map_or(0, |index| index + 1);
+    let diagnostics = &lines[worker_start..];
+    let error_start = diagnostics.iter().rposition(|line| {
+        let lower = line.trim_start().to_ascii_lowercase();
+        lower.starts_with("error:")
+            || lower.contains("fatal")
+            || lower.contains("address already in use")
+    })?;
+    let mut detail = diagnostics[error_start..]
+        .iter()
+        .take(8)
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" | ");
+    const MAX_DETAIL_CHARS: usize = 1600;
+    if detail.chars().count() > MAX_DETAIL_CHARS {
+        detail = detail.chars().take(MAX_DETAIL_CHARS).collect();
+        detail.push('…');
+    }
+    Some(detail)
 }
 
 fn start_mesh_if_needed(
@@ -380,6 +628,20 @@ mod tests {
         ));
         fs::create_dir_all(&directory).unwrap();
         directory
+    }
+
+    #[test]
+    fn worker_failure_includes_config_diagnostic() {
+        let lines = vec![
+            "native TUN worker started pid=42".to_string(),
+            "Error: loading native sing-box config /tmp/config.json"
+                .to_string(),
+            "Caused by:".to_string(),
+            "decode config: /outbounds/7 is invalid".to_string(),
+        ];
+        let detail = worker_failure_detail(&lines).unwrap();
+        assert!(detail.contains("loading native sing-box config"));
+        assert!(detail.contains("/outbounds/7 is invalid"));
     }
 
     #[test]

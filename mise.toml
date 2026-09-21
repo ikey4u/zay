@@ -140,6 +140,65 @@ BIN="target/${TARGET_MACOS_ARM64}/release/zay"
 test -f "$BIN"
 """
 
+[tasks."macos:package:release"]
+description = "Archive and package the macOS app + process system extension"
+alias = ["macos:release"]
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="${MISE_PROJECT_ROOT:-$PWD}"
+MACOS_DIR="${ROOT}/client/macos"
+DERIVED_DATA="${MACOS_DERIVED_DATA:-${ROOT}/target/macos-release}"
+ARCHIVE="${DERIVED_DATA}/ZayMac.xcarchive"
+VERSION="$(sed -n 's/^version = "\\(.*\\)"/\\1/p' "${ROOT}/Cargo.toml" | head -1)"
+PACKAGE="${ROOT}/${DIST_DIR}/zay-macos-app-v${VERSION}.zip"
+SIGNING_ALLOWED="${MACOS_CODE_SIGNING_ALLOWED:-YES}"
+
+command -v xcodegen >/dev/null || {
+  echo "Missing xcodegen. Install it with: brew install xcodegen" >&2
+  exit 1
+}
+command -v xcodebuild >/dev/null || {
+  echo "xcodebuild requires Xcode command line tools." >&2
+  exit 1
+}
+
+"${MACOS_DIR}/Scripts/generate-project.sh"
+rm -rf "${ARCHIVE}"
+
+xcode_args=(
+  -project "${MACOS_DIR}/ZayMac.xcodeproj"
+  -scheme ZayMac
+  -configuration Release
+  -destination "generic/platform=macOS"
+  -derivedDataPath "${DERIVED_DATA}"
+  -archivePath "${ARCHIVE}"
+  "CODE_SIGNING_ALLOWED=${SIGNING_ALLOWED}"
+)
+if [[ -n "${MACOS_TEAM_ID:-}" ]]; then
+  xcode_args+=("DEVELOPMENT_TEAM=${MACOS_TEAM_ID}")
+fi
+if [[ "${SIGNING_ALLOWED}" == "NO" ]]; then
+  xcode_args+=(CODE_SIGNING_REQUIRED=NO)
+fi
+
+xcodebuild "${xcode_args[@]}" archive
+APP="${ARCHIVE}/Products/Applications/Zay.app"
+EXTENSION="${APP}/Contents/Library/SystemExtensions/ZayProcessFilter.systemextension"
+test -d "${APP}"
+test -d "${EXTENSION}"
+EXTENSION_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${EXTENSION}/Contents/Info.plist")"
+test "${EXTENSION_ID}" = "dev.zay.macos.process-filter"
+if [[ "${SIGNING_ALLOWED}" != "NO" ]]; then
+  codesign --verify --deep --strict "${APP}"
+fi
+
+mkdir -p "${ROOT}/${DIST_DIR}"
+rm -f "${PACKAGE}"
+ditto -c -k --sequesterRsrc --keepParent "${APP}" "${PACKAGE}"
+echo "packaged: ${PACKAGE}" >&2
+"""
+
 [tasks."macos:build:all"]
 description = "macOS host: release macOS/Linux/Windows without embedding $HOME paths"
 # Requires: zig, cargo-zigbuild, mingw-w64, ripgrep.

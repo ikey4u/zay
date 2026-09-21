@@ -1,7 +1,5 @@
 //! Platform socket options shared by direct and underlay dialers.
 
-use std::{io, net::SocketAddr};
-
 #[cfg(any(
     target_os = "android",
     target_os = "ios",
@@ -13,6 +11,7 @@ use std::{io, net::SocketAddr};
     windows
 ))]
 use std::num::NonZeroU32;
+use std::{io, net::SocketAddr};
 
 use socket2::{SockRef, Socket, TcpKeepalive};
 use tokio::net::{TcpListener, TcpSocket, UdpSocket};
@@ -930,7 +929,8 @@ mod tests {
     #[test]
     fn passes_socket_descriptor_to_protect_path() {
         use std::{
-            io::Write as _, os::fd::AsRawFd as _, os::unix::net::UnixListener,
+            io::Write as _,
+            os::{fd::AsRawFd as _, unix::net::UnixListener},
         };
 
         let directory = tempfile::tempdir().unwrap();

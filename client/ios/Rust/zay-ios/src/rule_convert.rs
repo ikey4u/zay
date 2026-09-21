@@ -7,11 +7,10 @@
 mod clash_rules_convert;
 
 use anyhow::{Context, Result, bail};
-use serde_json::json;
-
 pub use clash_rules_convert::{
     is_valid_singbox_ruleset_json, rule_text_to_singbox_source,
 };
+use serde_json::json;
 
 /// Detect format + convert. Returns `{ "format", "rule_count", "json" }`.
 pub fn convert_rule_text(raw: &str, hint: Option<&str>) -> Result<String> {

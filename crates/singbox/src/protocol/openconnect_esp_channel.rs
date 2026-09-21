@@ -18,14 +18,13 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    adapter::{Dialer, PacketConnection},
-    common::network::SocksAddr,
-};
-
 use super::{
     GlobalProtectEspProbe, OPENCONNECT_ESP_LZO_NEXT_HEADER,
     OpenConnectEspError, OpenConnectEspKeySet,
+};
+use crate::{
+    adapter::{Dialer, PacketConnection},
+    common::network::SocksAddr,
 };
 
 const ESP_CHANNEL_TIMER_RESOLUTION: Duration = Duration::from_millis(250);
@@ -541,6 +540,10 @@ fn invalid_configuration(message: &str) -> OpenConnectEspChannelError {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
+    use tokio::sync::mpsc;
+
     use super::*;
     use crate::{
         adapter::{DialFuture, PacketFuture, PacketStream},
@@ -549,8 +552,6 @@ mod tests {
             OpenConnectEspKeyMaterial, OpenConnectEspKeySetConfig,
         },
     };
-    use std::sync::Mutex;
-    use tokio::sync::mpsc;
 
     struct MemoryPacketConnection {
         incoming: tokio::sync::Mutex<mpsc::Receiver<(Vec<u8>, SocksAddr)>>,

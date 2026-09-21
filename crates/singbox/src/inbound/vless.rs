@@ -730,6 +730,19 @@ async fn write_connection_response(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use rcgen::{CertifiedKey, generate_simple_self_signed};
+    use serde_json::json;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::{TcpListener, TcpStream, UdpSocket},
+        time::{Duration, timeout},
+    };
+    use tokio_rustls::TlsAcceptor;
+    use x25519_dalek::x25519;
+
     use super::VlessInbound;
     use crate::{
         adapter::{
@@ -755,17 +768,6 @@ mod tests {
         route::Router,
         transport::{quic::QuicDialer, v2ray::WebsocketDialer},
     };
-    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-    use rcgen::{CertifiedKey, generate_simple_self_signed};
-    use serde_json::json;
-    use std::sync::{Arc, Mutex};
-    use tokio::{
-        io::{AsyncReadExt, AsyncWriteExt},
-        net::{TcpListener, TcpStream, UdpSocket},
-        time::{Duration, timeout},
-    };
-    use tokio_rustls::TlsAcceptor;
-    use x25519_dalek::x25519;
 
     struct VisionProbe<D> {
         inner: D,

@@ -36,8 +36,10 @@ use tokio::{
     process::{Child, Command},
     task::JoinHandle,
 };
-use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
-use tokio_util::sync::CancellationToken;
+use tokio_util::{
+    compat::{Compat, TokioAsyncReadCompatExt},
+    sync::CancellationToken,
+};
 use tor_rtcompat::{
     CompoundRuntime, NetStreamListener, NetStreamProvider, PreferredRuntime,
     RuntimeSubstExt, StreamOps,

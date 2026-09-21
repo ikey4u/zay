@@ -6,11 +6,10 @@ use regex::Regex;
 use serde::Deserialize;
 use url::Url;
 
-use crate::common::network::SocksAddr;
-
 use super::cloudflared::{
     CloudflaredConfigurationApplier, CloudflaredConfigurationUpdate,
 };
+use crate::common::network::SocksAddr;
 
 pub const CLOUDFLARED_DEFAULT_HTTP_CONNECT_TIMEOUT: Duration =
     Duration::from_secs(30);

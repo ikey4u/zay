@@ -427,7 +427,10 @@ impl UrlTestOutbound {
         external: bool,
     ) -> (String, Arc<dyn Dialer>, CancellationToken) {
         self.touch();
-        self.refresh(false).await;
+        // `attach()` already starts the initial URL test in the background.
+        // Do not hold the first real connection behind every candidate probe:
+        // one unreachable candidate can consume the full TCP timeout even
+        // though the first configured outbound is immediately usable.
         let state = self.state.lock().expect("urltest lock poisoned");
         let selected = state
             .selected
@@ -940,6 +943,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn first_connection_does_not_wait_for_candidate_probes() {
+        let choices: HashMap<String, Arc<dyn Dialer>> = HashMap::from([
+            (
+                "slow".into(),
+                Arc::new(ProbeDialer {
+                    name: "slow",
+                    delay: Duration::from_millis(250),
+                }) as Arc<dyn Dialer>,
+            ),
+            (
+                "fast".into(),
+                Arc::new(ProbeDialer {
+                    name: "fast",
+                    delay: Duration::from_millis(1),
+                }) as Arc<dyn Dialer>,
+            ),
+        ]);
+        let options: UrlTestOutboundOptions =
+            serde_json::from_value(serde_json::json!({
+                "outbounds":["slow","fast"],
+                "url":"http://probe.test/generate_204",
+                "tolerance":1
+            }))
+            .unwrap();
+        let group = UrlTestOutbound::new(options, choices).unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_millis(20),
+            group.dial_tcp(&SocksAddr::new("destination.test", 443)),
+        )
+        .await
+        .expect("the first connection waited for URLTest probes");
+        let error = match result {
+            Ok(_) => panic!("test dial unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        assert_eq!(error.to_string(), "slow");
+        assert_eq!(group.selected(), None);
+        assert!(group.history().is_empty());
+    }
+
+    #[tokio::test]
     async fn probes_candidates_and_routes_through_the_fastest() {
         let choices: HashMap<String, Arc<dyn Dialer>> = HashMap::from([
             (
@@ -969,6 +1013,7 @@ mod tests {
         let group =
             UrlTestOutbound::new_with_registry(options, choices, registry)
                 .unwrap();
+        group.refresh(true).await;
         let error = match group
             .dial_tcp(&SocksAddr::new("destination.test", 443))
             .await

@@ -19,7 +19,6 @@ use hickory_proto::{
 use hyper::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::Value;
 
-use crate::common::platform_network::RouteDialerDefaults;
 #[cfg(any(target_os = "android", target_os = "ios", target_os = "macos"))]
 use crate::common::platform_network::{
     PlatformNetworkDefaults, PlatformNetworkProvider,
@@ -32,6 +31,7 @@ use crate::{
     common::{
         network::SocksAddr,
         ntp::NtpClock,
+        platform_network::RouteDialerDefaults,
         tls::{EchConfigRecord, EchConfigResolver, build_client_config},
     },
     constant,
@@ -2713,13 +2713,16 @@ mod tests {
     };
     use tokio::net::UdpSocket;
 
+    use super::{
+        REVERSE_MAPPING_CAPACITY, ReverseMappingCache,
+        ech_config_from_response, restore_packet_destination,
+    };
     use crate::{
         adapter::{
             DialFuture, Dialer, NeighborResolver, PacketConnection,
             PacketFuture, PacketStream,
         },
-        common::network::SocksAddr,
-        common::tls::EchConfigResolver,
+        common::{network::SocksAddr, tls::EchConfigResolver},
         dns::{
             Resolver,
             manager::{
@@ -2728,11 +2731,6 @@ mod tests {
             },
         },
         option::{DnsOptions, DomainStrategy, HostsDnsServerOptions, Listable},
-    };
-
-    use super::{
-        REVERSE_MAPPING_CAPACITY, ReverseMappingCache,
-        ech_config_from_response, restore_packet_destination,
     };
 
     struct RecordingDialer {

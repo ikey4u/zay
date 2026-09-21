@@ -14,9 +14,8 @@ use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
-use crate::option::{AcmeDns01ChallengeOptions, AcmeDns01CommonOptions};
-
 use super::{CertificateHttpClient, CertificateProviderError};
+use crate::option::{AcmeDns01ChallengeOptions, AcmeDns01CommonOptions};
 
 const CLOUDFLARE_API: &str = "https://api.cloudflare.com/client/v4";
 const ALIDNS_API: &str = "https://alidns.aliyuncs.com/";
@@ -742,9 +741,8 @@ mod tests {
     use hyper::{Request, Response, body::Incoming, service::service_fn};
     use hyper_util::rt::TokioIo;
 
-    use crate::option::{AcmeDns01ChallengeOptions, AcmeDns01CommonOptions};
-
     use super::{Dns01Solver, ProvisionedRecord};
+    use crate::option::{AcmeDns01ChallengeOptions, AcmeDns01CommonOptions};
 
     #[test]
     fn builds_wildcard_and_override_record_names() {

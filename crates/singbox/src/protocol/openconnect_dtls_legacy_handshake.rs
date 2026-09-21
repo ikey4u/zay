@@ -4,10 +4,11 @@
 //! pre-RFC DTLS handshake.  These helpers are transport-independent so a zay
 //! owned UDP connector can drive retransmission and cancellation.
 
+use std::{io, time::Duration};
+
 use md5::{Digest as _, Md5};
 use openssl::memcmp;
 use sha1_11::Sha1;
-use std::{io, time::Duration};
 use thiserror::Error;
 use tokio::time::{Instant, timeout_at};
 use tokio_util::sync::CancellationToken;
@@ -823,9 +824,8 @@ mod tests {
     use parking_lot::Mutex as SyncMutex;
     use tokio::sync::{Mutex as TokioMutex, mpsc};
 
-    use crate::adapter::{PacketConnection, PacketFuture};
-
     use super::*;
+    use crate::adapter::{PacketConnection, PacketFuture};
 
     fn suite() -> LegacyDtlsSuite {
         LegacyDtlsSuite::from_name("AES128-SHA", false).unwrap()

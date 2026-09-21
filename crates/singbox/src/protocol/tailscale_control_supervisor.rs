@@ -21,16 +21,6 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    adapter::{Dialer, Stream},
-    common::{
-        http::{DownloadOptions, download_with_options},
-        network::SocksAddr,
-        tls::{ClientTlsDialer, build_client_config},
-    },
-    option::OutboundTlsOptions,
-};
-
 use super::{
     tailscale_control::{
         TailscaleControlError, TailscaleControlHttp2Client,
@@ -50,6 +40,15 @@ use super::{
         TailscaleTkaSyncSendResponse,
     },
     tailscale_wireguard::TailscaleWireGuardHandle,
+};
+use crate::{
+    adapter::{Dialer, Stream},
+    common::{
+        http::{DownloadOptions, download_with_options},
+        network::SocksAddr,
+        tls::{ClientTlsDialer, build_client_config},
+    },
+    option::OutboundTlsOptions,
 };
 
 const EVENT_QUEUE_DEPTH: usize = 32;
@@ -997,11 +996,14 @@ mod tests {
     };
 
     use super::*;
-    use crate::protocol::tailscale_control_types::{
-        TailscaleDiscoPublicKey, TailscaleNode, TailscaleNodePublicKey,
-    };
     use crate::{
-        option::DirectOutboundOptions, protocol::direct::DirectOutbound,
+        option::DirectOutboundOptions,
+        protocol::{
+            direct::DirectOutbound,
+            tailscale_control_types::{
+                TailscaleDiscoPublicKey, TailscaleNode, TailscaleNodePublicKey,
+            },
+        },
     };
 
     struct MemoryMapStream {

@@ -542,8 +542,10 @@ fn parse_juniper_2021_challenge(
 
 #[cfg(test)]
 mod tests {
-    use super::super::{PULSE_EAP_FAILURE, PULSE_IFT_VERSION_REQUEST};
-    use super::*;
+    use super::{
+        super::{PULSE_EAP_FAILURE, PULSE_IFT_VERSION_REQUEST},
+        *,
+    };
 
     fn expanded_packet(content: Vec<u8>) -> PulseEapPacket {
         PulseEapPacket {

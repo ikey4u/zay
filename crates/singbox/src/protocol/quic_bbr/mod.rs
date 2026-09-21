@@ -1,17 +1,18 @@
 // Adapted from quinn-proto's BBR controller (MIT OR Apache-2.0) and
 // parameterized to match sing-quic/congestion_meta2 profile behavior.
 
-use std::any::Any;
-use std::fmt::{self, Debug};
-use std::sync::Arc;
-
-use rand::{Rng, SeedableRng};
+use std::{
+    any::Any,
+    fmt::{self, Debug},
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use quinn_proto::{
     RttEstimator,
     congestion::{Controller, ControllerFactory, ControllerMetrics},
 };
-use std::time::{Duration, Instant};
+use rand::{Rng, SeedableRng};
 
 use self::bw_estimation::BandwidthEstimation;
 

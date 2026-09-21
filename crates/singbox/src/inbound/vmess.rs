@@ -887,6 +887,15 @@ async fn proxy_tcp(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use rcgen::{CertifiedKey, generate_simple_self_signed};
+    use serde_json::json;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::{TcpListener, UdpSocket},
+    };
+
     use super::VmessInbound;
     use crate::{
         adapter::Dialer,
@@ -905,13 +914,6 @@ mod tests {
         transport::v2ray::{
             GrpcDialer, HttpDialer, HttpUpgradeDialer, WebsocketDialer,
         },
-    };
-    use rcgen::{CertifiedKey, generate_simple_self_signed};
-    use serde_json::json;
-    use std::sync::Arc;
-    use tokio::{
-        io::{AsyncReadExt, AsyncWriteExt},
-        net::{TcpListener, UdpSocket},
     };
 
     #[tokio::test]

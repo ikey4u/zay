@@ -13,11 +13,11 @@ use std::{
 use async_trait::async_trait;
 use openssl::memcmp;
 use thiserror::Error;
-use tokio::sync::Mutex;
-use tokio::time::{Instant, timeout_at};
+use tokio::{
+    sync::Mutex,
+    time::{Instant, timeout_at},
+};
 use tokio_util::sync::CancellationToken;
-
-use crate::{adapter::PacketStream, common::network::SocksAddr};
 
 use super::{
     CstpPacketType, LEGACY_DTLS_CONTENT_ALERT,
@@ -27,6 +27,7 @@ use super::{
     LegacyDtlsReplayWindow, LegacyDtlsSuite, decrypt_legacy_dtls_record,
     encrypt_legacy_dtls_record, parse_legacy_dtls_records,
 };
+use crate::{adapter::PacketStream, common::network::SocksAddr};
 
 const LEGACY_DTLS_READ_BUFFER_SIZE: usize = 64 * 1024;
 
@@ -482,12 +483,13 @@ fn legacy_dtls_io_error(error: LegacyDtlsChannelError) -> io::Error {
 mod tests {
     use tokio::sync::{Mutex as TokioMutex, mpsc};
 
-    use crate::adapter::{PacketConnection, PacketFuture};
-
     use super::*;
-    use crate::protocol::openconnect::{
-        LegacyDtlsCipher, LegacyDtlsRecord, derive_legacy_dtls_keys,
-        encrypt_legacy_dtls_record, parse_legacy_dtls_records,
+    use crate::{
+        adapter::{PacketConnection, PacketFuture},
+        protocol::openconnect::{
+            LegacyDtlsCipher, LegacyDtlsRecord, derive_legacy_dtls_keys,
+            encrypt_legacy_dtls_record, parse_legacy_dtls_records,
+        },
     };
 
     struct MemoryPacket {

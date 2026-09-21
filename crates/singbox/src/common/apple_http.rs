@@ -14,14 +14,13 @@ use rustls::pki_types::CertificateDer;
 use tokio::{io::copy_bidirectional, net::TcpListener, sync::Mutex};
 use tokio_util::sync::CancellationToken;
 
+use super::http::DownloadResponse;
 use crate::{
     adapter::Dialer,
     common::ntp::NtpClock,
     option::{HttpClientOptions, User},
     protocol::socks::{SocksCommand, server_request, write_reply_for_version},
 };
-
-use super::http::DownloadResponse;
 
 #[repr(C)]
 struct NativeSession {
@@ -653,6 +652,10 @@ extern "C" fn singbox_apple_http_verify_public_key_sha256(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
     use super::DialerSocksBridge;
     use crate::{
         adapter::Dialer,
@@ -660,8 +663,6 @@ mod tests {
         option::DirectOutboundOptions,
         protocol::{direct::DirectOutbound, socks::Socks5Outbound},
     };
-    use std::sync::Arc;
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     #[tokio::test]
     async fn authenticated_bridge_returns_connections_to_selected_dialer() {

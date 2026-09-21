@@ -2,8 +2,7 @@
 
 include!(env!("ZAY_EMBEDDED_RULES_RS"));
 
-use std::fs;
-use std::path::Path;
+use std::{fs, path::Path};
 
 use anyhow::{Context, Result};
 use serde_json::json;

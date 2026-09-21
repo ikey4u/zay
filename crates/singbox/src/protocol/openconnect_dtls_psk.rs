@@ -5,13 +5,12 @@
 //! RFC 7627 EMS, cookie exchange, retransmission and Finished verification.
 //! The maintained `dtls` crate remains the independent interop oracle in tests.
 
-use std::{io, sync::Arc, time::Duration};
-
 #[cfg(test)]
 use std::{
     any::Any,
     net::{IpAddr, Ipv4Addr, SocketAddr},
 };
+use std::{io, sync::Arc, time::Duration};
 
 #[cfg(test)]
 use async_trait::async_trait;

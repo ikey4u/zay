@@ -1,3 +1,5 @@
+#[cfg(windows)]
+use std::path::PathBuf;
 use std::{
     fs,
     io::{BufRead, BufReader},
@@ -9,9 +11,6 @@ use std::{
 };
 
 use anyhow::{Context, bail};
-
-#[cfg(windows)]
-use std::path::PathBuf;
 
 /// A zay-owned process that hosts the native Rust library with TUN privileges.
 /// On Windows an unelevated Zay cannot directly own the UAC-launched worker,
@@ -83,7 +82,7 @@ pub fn ensure_mixed_port_free(port: u16) -> anyhow::Result<()> {
     };
     bail!(
         "proxy port 127.0.0.1:{port} is already in use ({detail}); \
-         stop that process, or `zay config set mixed_port <other-port>`"
+         stop that process, or `zay x config set mixed_port <other-port>`"
     );
 }
 

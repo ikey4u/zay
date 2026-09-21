@@ -82,7 +82,8 @@ struct IpDomains {
 
 #[derive(Clone, Default)]
 struct Connection {
-    app: Option<String>,
+    process_name: Option<String>,
+    process_path: Option<String>,
     destination: Option<String>,
     domain: Option<String>,
 }
@@ -97,13 +98,25 @@ impl SingboxLogWriter {
     }
 
     fn write(&self, line: &str, buffer: &LogBuffer) {
-        let clean = strip_ansi(line);
+        let clean = redact_sensitive_text(&strip_ansi(line));
         if !clean.starts_with('+') {
-            crate::logging::emit_external("singbox", "info", &clean);
+            let lower = clean.trim_start().to_ascii_lowercase();
+            let level = if lower.starts_with("error:")
+                || lower.starts_with("caused by:")
+                || lower.contains("fatal")
+            {
+                "error"
+            } else {
+                "info"
+            };
+            crate::logging::emit_external("singbox", level, &clean);
             buffer.push(clean);
             return;
         }
         crate::logging::emit_singbox_raw(&clean);
+        if self.write_native_flow(&clean, buffer) {
+            return;
+        }
         let id = connection_id(&clean);
         let mut state = id
             .as_deref()
@@ -114,7 +127,11 @@ impl SingboxLogWriter {
         {
             let path =
                 value.split(", user:").next().unwrap_or(value).to_string();
-            state.app = Some(path);
+            state.process_name = std::path::Path::new(&path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(ToOwned::to_owned);
+            state.process_path = Some(path);
         }
         if let Some(destination) = extract_destination(&clean) {
             state.destination = Some(destination.to_string());
@@ -176,8 +193,14 @@ impl SingboxLogWriter {
         if let Some(id) = id.as_deref() {
             fields.insert("connection".into(), id.into());
         }
-        if let Some(app) = state.app.as_deref() {
-            fields.insert("app".into(), app.into());
+        if let Some(name) = state.process_name.as_deref() {
+            fields.insert("process_name".into(), name.into());
+        }
+        if let Some(path) = state.process_path.as_deref() {
+            fields.insert("process_path".into(), path.into());
+            fields.insert("app".into(), path.into());
+        } else if let Some(name) = state.process_name.as_deref() {
+            fields.insert("app".into(), name.into());
         }
         if let Some(destination) = state.destination.as_deref() {
             fields.insert("destination".into(), destination.into());
@@ -220,7 +243,11 @@ impl SingboxLogWriter {
         }
         let human = format!(
             "proxy {kind} level={level} app={:?} dst={:?} domain={:?} node={:?}{}",
-            state.app.as_deref().unwrap_or("-"),
+            state
+                .process_path
+                .as_deref()
+                .or(state.process_name.as_deref())
+                .unwrap_or("-"),
             state.destination.as_deref().unwrap_or("-"),
             fields.get("domain").map(String::as_str).unwrap_or("-"),
             node.unwrap_or("-"),
@@ -239,6 +266,80 @@ impl SingboxLogWriter {
             fields,
         );
         buffer.push(human);
+    }
+
+    fn write_native_flow(&self, clean: &str, buffer: &LogBuffer) -> bool {
+        let Some((_, payload)) = clean.split_once("zay-flow: ") else {
+            return false;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(payload)
+        else {
+            return false;
+        };
+        let Some(object) = value.as_object() else {
+            return false;
+        };
+        let mut fields = BTreeMap::new();
+        for key in [
+            "network",
+            "inbound",
+            "source",
+            "destination",
+            "original_destination",
+            "routed_destination",
+            "domain",
+            "domain_source",
+            "domain_confidence",
+            "protocol",
+            "rule",
+            "outbound",
+            "process_name",
+            "process_path",
+            "process_lookup",
+        ] {
+            if let Some(value) =
+                object.get(key).and_then(|value| value.as_str())
+                && !value.is_empty()
+            {
+                fields.insert(key.to_string(), value.to_string());
+            }
+        }
+        if let Some(app) = fields
+            .get("process_path")
+            .or_else(|| fields.get("process_name"))
+            .cloned()
+        {
+            fields.insert("app".into(), app);
+        }
+        if let Some(outbound) = fields.get("outbound").cloned() {
+            fields.insert("node".into(), outbound);
+        }
+        let human = format!(
+            "proxy connection level=info app={:?} dst={:?} domain={:?} domain_source={:?} confidence={:?} node={:?}",
+            fields.get("app").map(String::as_str).unwrap_or("-"),
+            fields.get("destination").map(String::as_str).unwrap_or("-"),
+            fields.get("domain").map(String::as_str).unwrap_or("-"),
+            fields
+                .get("domain_source")
+                .map(String::as_str)
+                .unwrap_or("none"),
+            fields
+                .get("domain_confidence")
+                .map(String::as_str)
+                .unwrap_or("none"),
+            fields.get("node").map(String::as_str).unwrap_or("-"),
+        );
+        crate::logging::emit_with_source(
+            "singbox",
+            "info",
+            "proxy",
+            "connection",
+            clean,
+            None,
+            fields,
+        );
+        buffer.push(human);
+        true
     }
 
     fn remember_dns_name(&self, connection_id: &str, domain: &str) {
@@ -328,6 +429,36 @@ impl SingboxLogWriter {
             .get(host)
             .map(|entry| entry.domains.iter().cloned().collect())
     }
+}
+
+/// Redact JSON-shaped credentials from child diagnostics before they enter
+/// either the in-memory status buffer or persistent logs.
+pub(crate) fn redact_sensitive_text(input: &str) -> String {
+    let mut output = input.to_string();
+    for key in ["password", "network_secret", "token"] {
+        let needle = format!(r#""{key}":""#);
+        let mut offset = 0;
+        while let Some(relative) = output[offset..].find(&needle) {
+            let value_start = offset + relative + needle.len();
+            let bytes = output.as_bytes();
+            let mut index = value_start;
+            let mut escaped = false;
+            while index < bytes.len() {
+                match bytes[index] {
+                    b'"' if !escaped => break,
+                    b'\\' if !escaped => escaped = true,
+                    _ => escaped = false,
+                }
+                index += 1;
+            }
+            if index >= bytes.len() {
+                break;
+            }
+            output.replace_range(value_start..index, "***");
+            offset = value_start + 3;
+        }
+    }
+    output
 }
 
 pub fn pipe_singbox_to_buffer(
@@ -559,6 +690,16 @@ mod tests {
     }
 
     #[test]
+    fn redacts_credentials_from_child_diagnostics() {
+        let line = r#"invalid outbound {"password":"secret","token":"abc","server":"example.com"}"#;
+        let redacted = redact_sensitive_text(line);
+        assert!(!redacted.contains("secret"));
+        assert!(!redacted.contains("abc"));
+        assert!(redacted.contains(r#""password":"***""#));
+        assert!(redacted.contains("example.com"));
+    }
+
+    #[test]
     fn captures_connection_context() {
         let _guard =
             TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
@@ -577,9 +718,41 @@ mod tests {
             events
                 .contains("\"app\":\"/Applications/Google Chrome.app/Chrome\"")
         );
+        assert!(events.contains("\"process_name\":\"Chrome\""));
+        assert!(events.contains(
+            "\"process_path\":\"/Applications/Google Chrome.app/Chrome\""
+        ));
         assert!(events.contains("\"destination\":\"chatgpt.com:443\""));
         assert!(events.contains("\"domain\":\"chatgpt.com\""));
         assert!(events.contains("\"node\":\"sg-1\""));
+    }
+
+    #[test]
+    fn captures_native_flow_domain_provenance() {
+        let _guard =
+            TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let dir = std::env::temp_dir()
+            .join(format!("zay-log-native-flow-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::logging::init(&dir);
+        let writer = SingboxLogWriter::new(dir.clone());
+        let buffer = LogBuffer::with_default_capacity();
+        writer.write(
+            r#"+0800 2026-09-20 00:01:56 INFO zay-flow: {"event":"flow","network":"tcp","inbound":"tun-in","source":"10.14.14.1:53000","destination":"142.250.72.132:443","domain":"www.google.com","domain_source":"sniff","domain_confidence":"exact","protocol":"tls","outbound":"Proxy","process_path":"/Applications/curl"}"#,
+            &buffer,
+        );
+        crate::logging::flush();
+        let events = std::fs::read_to_string(dir.join("events.jsonl")).unwrap();
+        assert!(events.contains("\"event\":\"connection\""));
+        assert!(events.contains("\"domain\":\"www.google.com\""));
+        assert!(events.contains("\"domain_source\":\"sniff\""));
+        assert!(events.contains("\"domain_confidence\":\"exact\""));
+        assert!(events.contains("\"app\":\"/Applications/curl\""));
+        assert!(events.contains("\"process_path\":\"/Applications/curl\""));
+        assert!(events.contains("\"node\":\"Proxy\""));
+        let human = std::fs::read_to_string(dir.join("zay.log")).unwrap();
+        assert!(human.contains("domain=\"www.google.com\""));
+        assert!(human.contains("domain_source=\"sniff\""));
     }
 
     #[test]

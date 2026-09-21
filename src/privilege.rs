@@ -12,7 +12,7 @@ const NO_ELEVATION_TOOL_MSG: &str = "\
 TUN mode requires administrator privileges, but no elevation tool was found.
 
 Install sudo (apt install sudo) or doas (apk add doas), or run as root:
-  zay run proxy …";
+  zay x run proxy …";
 
 fn command_in_path(program: &str) -> bool {
     std::env::var_os("PATH")
@@ -61,9 +61,7 @@ pub fn resolve_privilege_wrapper() -> Result<PathBuf> {
     bail!("privilege elevation wrappers are only supported on Unix");
 }
 
-/// Authenticate before daemonizing so the detached supervisor never needs a
-/// terminal. For mesh **node**, the daemon itself is elevated (EasyTier TUN).
-/// Otherwise only the subsequently spawned sing-box TUN worker runs as root.
+/// Authenticate before starting a privileged foreground worker.
 #[cfg(unix)]
 pub fn preflight_tun_worker() -> Result<()> {
     if is_root() {
@@ -96,10 +94,10 @@ pub fn preflight_tun_worker() -> Result<()> {
     Ok(())
 }
 
-/// Prompt and validate a sudo password before daemonizing. The caller passes
-/// the returned value through a private runtime channel to the TUN worker.
+/// Prompt and validate a sudo password in the launching terminal. The WebUI
+/// passes the returned value directly to its supervised core child's stdin.
 #[cfg(unix)]
-pub fn daemon_tun_password() -> Result<Option<String>> {
+pub fn prompt_core_authorization() -> Result<Option<String>> {
     if is_root() {
         return Ok(None);
     }
@@ -127,7 +125,7 @@ pub fn daemon_tun_password() -> Result<Option<String>> {
 }
 
 #[cfg(not(unix))]
-pub fn daemon_tun_password() -> Result<Option<String>> {
+pub fn prompt_core_authorization() -> Result<Option<String>> {
     Ok(None)
 }
 
@@ -174,18 +172,6 @@ fn wrapper_is_sudo(wrapper: &Path) -> bool {
         .file_name()
         .and_then(|s| s.to_str())
         .is_some_and(|name| name == "sudo" || name.ends_with("sudo"))
-}
-
-/// Build `sudo -S program …` for elevating a daemon with a piped password.
-///
-/// Do **not** `setsid` before this sudo: macOS `tty_tickets` makes `sudo -n`
-/// fail in a new session, and a detached `-S` child often cannot finish auth.
-/// Call [`crate::daemon::become_session_leader`] inside `--run-daemon` instead.
-pub fn command_for_elevated_daemon(
-    program: &Path,
-    password: Option<&str>,
-) -> Result<(Command, bool)> {
-    command_for_program_with_password(program, true, password)
 }
 
 /// Build `sudo program …` when TUN needs root; otherwise `program …`.
@@ -247,7 +233,46 @@ pub fn command_for_program_with_password(
     }
 }
 
-/// When the daemon runs as root via `sudo`, return the invoking user's uid/gid.
+/// Build a privileged command that may only use an already-authorized sudo/doas
+/// session. It never prompts and is therefore safe for WebUI-triggered restarts.
+#[cfg(unix)]
+pub fn command_for_program_with_cached_authorization(
+    program: &Path,
+) -> Result<Command> {
+    let program = program
+        .canonicalize()
+        .with_context(|| format!("canonicalizing {}", program.display()))?;
+    if is_root() {
+        return Ok(Command::new(program));
+    }
+    let wrapper = resolve_privilege_wrapper()?;
+    let mut command = Command::new(wrapper);
+    command.arg("-n").arg(program).stdin(Stdio::null());
+    Ok(command)
+}
+
+#[cfg(unix)]
+pub fn validate_cached_authorization() -> Result<()> {
+    if is_root() {
+        return Ok(());
+    }
+    let wrapper = resolve_privilege_wrapper()?;
+    let status = if wrapper_is_sudo(&wrapper) {
+        Command::new(wrapper).args(["-n", "-v"]).status()
+    } else {
+        Command::new(wrapper).args(["-n", "true"]).status()
+    }
+    .context("checking cached administrator authorization")?;
+    if status.success() {
+        Ok(())
+    } else {
+        bail!(
+            "administrator authorization expired; restart `zay webui` from a terminal"
+        )
+    }
+}
+
+/// When the core runs as root via `sudo`, return the invoking user's uid/gid.
 #[cfg(unix)]
 pub fn sudo_invoker_ids() -> Option<(u32, u32)> {
     if !is_root() {
@@ -261,7 +286,7 @@ pub fn sudo_invoker_ids() -> Option<(u32, u32)> {
     Some((uid, gid))
 }
 
-/// Re-own a path created under an elevated daemon so the invoking user can
+/// Re-own a path created under an elevated core so the invoking user can
 /// still `service stop` / read logs / read `config.json` without sudo.
 #[cfg(unix)]
 pub fn restore_invoker_ownership(path: &Path) {

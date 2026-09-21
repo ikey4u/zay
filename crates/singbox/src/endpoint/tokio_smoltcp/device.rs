@@ -1,9 +1,3 @@
-use futures::{Sink, Stream};
-pub use smoltcp::phy::DeviceCapabilities;
-use smoltcp::{
-    phy::{Device, RxToken, TxToken},
-    time::Instant,
-};
 use std::{
     collections::VecDeque,
     io,
@@ -11,6 +5,13 @@ use std::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
+};
+
+use futures::{Sink, Stream};
+pub use smoltcp::phy::DeviceCapabilities;
+use smoltcp::{
+    phy::{Device, RxToken, TxToken},
+    time::Instant,
 };
 
 /// Default value of `max_burst_size`.

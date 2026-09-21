@@ -11,7 +11,18 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 
-use super::userspace_router::{EndpointFlowContext, UserspaceEndpointRouter};
+use super::{
+    tokio_smoltcp::{
+        BufferSize, Net, NetConfig, UdpSocket as SmoltcpUdpSocket,
+        channel_device::ChannelDevice,
+        smoltcp::{
+            iface::Config as SmoltcpInterfaceConfig,
+            phy::{DeviceCapabilities, Medium},
+            wire::{HardwareAddress, IpAddress, IpCidr},
+        },
+    },
+    userspace_router::{EndpointFlowContext, UserspaceEndpointRouter},
+};
 use crate::{
     adapter::{
         DialFuture, Dialer, IcmpResponse, IpPacketPort, IpPacketReturn,
@@ -38,16 +49,6 @@ use crate::{
         parse_crv1_challenge, resolve_allow_compression_policy,
         resolve_auth_retry_mode, resolve_auth_token_credentials,
         resolve_compression_settings, resolve_openvpn_key_direction,
-    },
-};
-
-use super::tokio_smoltcp::{
-    BufferSize, Net, NetConfig, UdpSocket as SmoltcpUdpSocket,
-    channel_device::ChannelDevice,
-    smoltcp::{
-        iface::Config as SmoltcpInterfaceConfig,
-        phy::{DeviceCapabilities, Medium},
-        wire::{HardwareAddress, IpAddress, IpCidr},
     },
 };
 

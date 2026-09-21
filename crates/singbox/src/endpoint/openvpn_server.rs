@@ -24,6 +24,18 @@ use tokio::{
 };
 use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 
+use super::{
+    tokio_smoltcp::{
+        BufferSize, Net, NetConfig, UdpSocket as SmoltcpUdpSocket,
+        channel_device::ChannelDevice,
+        smoltcp::{
+            iface::Config as SmoltcpInterfaceConfig,
+            phy::{DeviceCapabilities, Medium},
+            wire::{HardwareAddress, IpAddress, IpCidr},
+        },
+    },
+    userspace_router::UserspaceEndpointRouter,
+};
 use crate::{
     adapter::{
         DialFuture, Dialer, IcmpResponse, IpPacketPort, IpPacketReturn,
@@ -46,17 +58,6 @@ use crate::{
         openvpn_stream_transport, resolve_openvpn_key_direction,
     },
 };
-
-use super::tokio_smoltcp::{
-    BufferSize, Net, NetConfig, UdpSocket as SmoltcpUdpSocket,
-    channel_device::ChannelDevice,
-    smoltcp::{
-        iface::Config as SmoltcpInterfaceConfig,
-        phy::{DeviceCapabilities, Medium},
-        wire::{HardwareAddress, IpAddress, IpCidr},
-    },
-};
-use super::userspace_router::UserspaceEndpointRouter;
 
 const OPENVPN_SERVER_PACKET_BUFFER: usize = 65_535;
 

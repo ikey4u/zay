@@ -30,16 +30,18 @@ use crate::{
         Stream,
     },
     common::network::SocksAddr,
-    protocol::snell::{
-        AEAD_TAG_LEN, COMMAND_CONNECT, COMMAND_CONNECT_V2, COMMAND_PING,
-        COMMAND_UDP, HEADER_CIPHER_LEN, HEADER_PLAIN_LEN, HEADER_VERSION,
-        NONCE_LEN, REPLY_PONG, REPLY_TUNNEL, Request, SALT_LEN,
-        UDP_COMMAND_FORWARD, decode_request, decode_udp_request_address,
-        decode_udp_response_address, derive_key, encode_request,
-        encode_udp_request_address, encode_udp_response_address,
-        increase_nonce,
+    protocol::{
+        snell::{
+            AEAD_TAG_LEN, COMMAND_CONNECT, COMMAND_CONNECT_V2, COMMAND_PING,
+            COMMAND_UDP, HEADER_CIPHER_LEN, HEADER_PLAIN_LEN, HEADER_VERSION,
+            NONCE_LEN, REPLY_PONG, REPLY_TUNNEL, Request, SALT_LEN,
+            UDP_COMMAND_FORWARD, decode_request, decode_udp_request_address,
+            decode_udp_response_address, derive_key, encode_request,
+            encode_udp_request_address, encode_udp_response_address,
+            increase_nonce,
+        },
+        snell_v6_profile::Profile,
     },
-    protocol::snell_v6_profile::Profile,
 };
 
 pub const MAX_PAYLOAD_LEN: usize = u16::MAX as usize;

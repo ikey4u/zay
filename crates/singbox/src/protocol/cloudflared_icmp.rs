@@ -10,14 +10,13 @@ use std::{
     sync::Arc,
 };
 
-use crate::{adapter::Dialer, common::network::SocksAddr};
-
 use super::{
     cloudflared::{
         CloudflaredDatagramV2Type, CloudflaredDatagramV3Type, CloudflaredError,
     },
     cloudflared_datagram::CloudflaredDatagramTransport,
 };
+use crate::{adapter::Dialer, common::network::SocksAddr};
 
 pub const CLOUDFLARED_ICMP_FLOW_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(30);
@@ -362,10 +361,11 @@ mod tests {
     use async_trait::async_trait;
     use bytes::Bytes;
 
-    use crate::adapter::{DialFuture, IcmpResponse, PacketFuture, Stream};
-
     use super::*;
-    use crate::protocol::cloudflared::CloudflaredIncomingDatagramVersion;
+    use crate::{
+        adapter::{DialFuture, IcmpResponse, PacketFuture, Stream},
+        protocol::cloudflared::CloudflaredIncomingDatagramVersion,
+    };
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct IcmpCall {

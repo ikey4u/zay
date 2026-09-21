@@ -20,11 +20,10 @@ pub mod transport;
 use std::{future::Future, io, net::IpAddr, pin::Pin, time::Duration};
 
 use hickory_proto::op::Message;
+pub use hickory_proto::{op, rr, serialize};
 use hickory_resolver::TokioResolver;
 
 use crate::option::{DomainResolveOptions, DomainStrategy};
-
-pub use hickory_proto::{op, rr, serialize};
 
 pub type LookupFuture<'a> =
     Pin<Box<dyn Future<Output = io::Result<Vec<IpAddr>>> + Send + 'a>>;

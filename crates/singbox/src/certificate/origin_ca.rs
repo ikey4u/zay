@@ -22,6 +22,7 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use x509_parser::{extensions::GeneralName, public_key::PublicKey};
 
+use super::{CertificateHttpClient, CertificateProviderError};
 use crate::{
     common::{
         lifecycle::{Lifecycle, LifecycleError, LifecycleFuture, StartStage},
@@ -29,8 +30,6 @@ use crate::{
     },
     option::CloudflareOriginCaCertificateProviderOptions,
 };
-
-use super::{CertificateHttpClient, CertificateProviderError};
 
 const CLOUDFLARE_ORIGIN_CA_ENDPOINT: &str =
     "https://api.cloudflare.com/client/v4/certificates";
@@ -699,6 +698,27 @@ struct OriginCaResponseResult {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        convert::Infallible,
+        sync::Arc,
+        time::{Duration, UNIX_EPOCH},
+    };
+
+    use http_body_util::{BodyExt as _, Full};
+    use hyper::{Request, Response, body::Incoming, service::service_fn};
+    use hyper_util::rt::TokioIo;
+    use openssl::{
+        asn1::{Asn1Integer, Asn1Time},
+        bn::BigNum,
+        hash::MessageDigest,
+        pkey::PKey,
+        rsa::Rsa,
+        x509::{X509, X509Req, extension::SubjectAlternativeName},
+    };
+    use serde_json::Value;
+    use tempfile::TempDir;
+    use tokio::net::TcpListener;
+
     use super::{
         LeafInfo, OriginCaProviderService, RequestType, effective_renew_before,
         normalize_hostnames,
@@ -712,25 +732,6 @@ mod tests {
         },
         protocol::direct::DirectOutbound,
     };
-    use http_body_util::{BodyExt as _, Full};
-    use hyper::{Request, Response, body::Incoming, service::service_fn};
-    use hyper_util::rt::TokioIo;
-    use openssl::{
-        asn1::{Asn1Integer, Asn1Time},
-        bn::BigNum,
-        hash::MessageDigest,
-        pkey::PKey,
-        rsa::Rsa,
-        x509::{X509, X509Req, extension::SubjectAlternativeName},
-    };
-    use serde_json::Value;
-    use std::{
-        convert::Infallible,
-        sync::Arc,
-        time::{Duration, UNIX_EPOCH},
-    };
-    use tempfile::TempDir;
-    use tokio::net::TcpListener;
 
     #[test]
     fn normalizes_and_validates_origin_hostnames() {

@@ -539,9 +539,10 @@ impl DatagramReceive for DatagramBridge {
 
 #[cfg(test)]
 mod tests {
+    use shadowsocks::crypto::CipherKind;
+
     use super::{from_address, parse_method, server_config, to_address};
     use crate::common::network::SocksAddr;
-    use shadowsocks::crypto::CipherKind;
 
     #[test]
     fn converts_addresses_without_dns_resolution() {

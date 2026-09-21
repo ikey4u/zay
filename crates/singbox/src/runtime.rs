@@ -15,7 +15,6 @@ use crate::common::platform_network::{
 };
 #[cfg(any(target_os = "android", target_os = "ios"))]
 use crate::inbound::tun::TunFileDescriptorProvider;
-
 use crate::{
     adapter::{NeighborResolver, ProcessResolver},
     certificate::{CertificateProviderError, CertificateProviderManager},
@@ -650,6 +649,7 @@ impl Runtime {
         router.configure_preferred_outbounds(&outbounds);
         router.configure_neighbor_resolver(neighbor_resolver);
         router.configure_process_resolver(process_resolver);
+        router.configure_flow_logger(log.new_logger("zay-flow"));
         router.configure_rule_set_http_clients(
             &outbounds,
             &options.http_clients,

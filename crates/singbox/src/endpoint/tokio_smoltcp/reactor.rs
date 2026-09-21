@@ -1,7 +1,5 @@
-use super::{
-    device::{BufferDevice, Packet},
-    socket_allocator::{BufferSize, SocketAlloctor},
-};
+use std::{collections::VecDeque, future::Future, io, sync::Arc};
+
 use futures::{FutureExt, SinkExt, StreamExt, stream::iter};
 use parking_lot::{MappedMutexGuard, Mutex, MutexGuard};
 use smoltcp::{
@@ -9,11 +7,15 @@ use smoltcp::{
     socket::{AnySocket, Socket},
     time::{Duration, Instant},
 };
-use std::{collections::VecDeque, future::Future, io, sync::Arc};
 use tokio::{
     pin, select,
     sync::Notify,
     time::{Instant as TokioInstant, sleep},
+};
+
+use super::{
+    device::{BufferDevice, Packet},
+    socket_allocator::{BufferSize, SocketAlloctor},
 };
 
 pub(crate) type BufferInterface = Arc<Mutex<Interface>>;

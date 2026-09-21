@@ -10,13 +10,12 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::adapter::Stream;
-
 use super::{
     PPP_MAXIMUM_WIRE_FRAME_SIZE, PppEncapsulation, PppFrameDecoder,
     PppNegotiationError, PppNegotiationEvent, PppNegotiator,
     PppNegotiatorOptions, PppOutboundPacket, TunnelConfiguration,
 };
+use crate::adapter::Stream;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PppStreamSessionOptions {

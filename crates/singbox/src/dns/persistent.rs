@@ -12,9 +12,8 @@ use hickory_proto::{
     op::Message,
     serialize::binary::{BinDecodable, BinDecoder, BinEncodable, BinEncoder},
 };
-use rusqlite::{Connection, OptionalExtension as _, params};
-
 use ipnet::IpNet;
+use rusqlite::{Connection, OptionalExtension as _, params};
 
 pub struct PersistentDnsCache {
     connection: Mutex<Connection>,

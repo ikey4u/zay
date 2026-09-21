@@ -1,0 +1,4 @@
+project.local.yml
+DerivedData*/
+*.xcuserstate
+xcuserdata/

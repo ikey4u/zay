@@ -1,4 +1,4 @@
-//! Stable SSH port forwarding (`zay run ssh`).
+//! Stable SSH port forwarding (`zay x run ssh`).
 
 pub(crate) mod client;
 pub(crate) mod config;
@@ -21,8 +21,8 @@ use tracing_subscriber::EnvFilter;
         "  [bind_host:]bind_port:remote_host:remote_port\n",
         "\n",
         "EXAMPLES\n",
-        "  zay run ssh -L 3307:10.0.0.5:3306 myserver\n",
-        "  zay run ssh -J bastion -L 3307:mysql.internal:3306 app-server"
+        "  zay x run ssh -L 3307:10.0.0.5:3306 myserver\n",
+        "  zay x run ssh -J bastion -L 3307:mysql.internal:3306 app-server"
     )
 )]
 pub struct SshCli {

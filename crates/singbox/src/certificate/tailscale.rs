@@ -31,6 +31,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use x509_parser::extensions::GeneralName;
 
+use super::{CertificateHttpClient, CertificateProviderError};
 use crate::{
     common::{
         lifecycle::{Lifecycle, LifecycleError, LifecycleFuture, StartStage},
@@ -39,8 +40,6 @@ use crate::{
     },
     endpoint::tailscale::TailscaleCertificateEndpoint,
 };
-
-use super::{CertificateHttpClient, CertificateProviderError};
 
 const CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 const RETRY_INTERVAL: Duration = Duration::from_secs(60);

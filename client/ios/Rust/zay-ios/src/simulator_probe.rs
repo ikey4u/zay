@@ -10,8 +10,10 @@ use std::{
     ffi::c_char,
     io,
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    os::fd::{FromRawFd as _, IntoRawFd as _, OwnedFd},
-    os::unix::net::UnixDatagram as StdUnixDatagram,
+    os::{
+        fd::{FromRawFd as _, IntoRawFd as _, OwnedFd},
+        unix::net::UnixDatagram as StdUnixDatagram,
+    },
     path::Path,
     sync::{Arc, Mutex},
     time::Duration,

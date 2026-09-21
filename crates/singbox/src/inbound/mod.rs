@@ -51,7 +51,10 @@ tokio::task_local! {
 }
 
 use crate::{
-    adapter::{PacketConnection, PacketStream, Stream, replay_stream},
+    adapter::{
+        PacketConnection, PacketStream, ProcessLookupResult, Stream,
+        replay_stream,
+    },
     common::{
         network::{Network, SocksAddr},
         sniff::{
@@ -60,8 +63,10 @@ use crate::{
         },
     },
     dns::{LookupOptions, Resolver},
-    outbound::OutboundManager,
-    route::{Action, Metadata, RouteDecision, RouteState, Router},
+    outbound::{OutboundManager, TrafficAttribution, with_traffic_attribution},
+    route::{
+        Action, Metadata, RouteDecision, RouteState, Router, describe_action,
+    },
 };
 
 /// Bidirectional destination translation for one routed packet session.
@@ -233,6 +238,7 @@ pub(crate) async fn proxy_routed_tcp(
         user,
         destination,
         origin_destination,
+        None,
         fake_ip,
         router,
         outbounds,
@@ -265,6 +271,7 @@ pub(crate) async fn proxy_routed_tcp_with_origin(
     user: &str,
     destination: SocksAddr,
     origin_destination: Option<SocksAddr>,
+    captured_process: Option<ProcessLookupResult>,
     fake_ip: bool,
     router: &Router,
     outbounds: &OutboundManager,
@@ -279,6 +286,16 @@ pub(crate) async fn proxy_routed_tcp_with_origin(
         user: user.to_owned(),
         ..Metadata::default()
     };
+    if let Some(lookup) = captured_process
+        && let Some(process) = lookup.process
+    {
+        metadata.process_lookup = lookup.status.as_str().to_owned();
+        metadata.process_name = process.process_name;
+        metadata.process_path = process.process_path;
+        metadata.package_name = process.package_name;
+        metadata.user = process.user;
+        metadata.user_id = process.user_id;
+    }
     if let Some(injector) =
         prepare_tcp_inbound_detour(&mut metadata, outbounds)?
     {
@@ -289,6 +306,7 @@ pub(crate) async fn proxy_routed_tcp_with_origin(
     let (mut stream, decision) =
         sniff_and_route_stream(stream, &mut metadata, router, outbounds)
             .await?;
+    router.observe_flow(&metadata, &decision);
     if matches!(decision.action(), Some(Action::Reject { .. })) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -311,12 +329,30 @@ pub(crate) async fn proxy_routed_tcp_with_origin(
         })?
     };
     let connection_options = decision.connection_options();
-    let remote = dialer
-        .dial_tcp_with_options(&destination, &connection_options.network)
-        .await?;
+    let attribution = traffic_attribution(router, &metadata, &decision);
+    let remote =
+        dialer.dial_tcp_with_options(&destination, &connection_options.network);
+    let remote = with_traffic_attribution(attribution, remote).await?;
     let mut remote = apply_routed_tcp_options(remote, &connection_options)?;
     tokio::io::copy_bidirectional(&mut stream, &mut remote).await?;
     Ok(())
+}
+
+pub(crate) fn traffic_attribution(
+    router: &Router,
+    metadata: &Metadata,
+    decision: &RouteDecision<'_>,
+) -> TrafficAttribution {
+    let metadata = router.enriched_flow_metadata(metadata);
+    let domain = metadata.domain().unwrap_or_default().to_owned();
+    TrafficAttribution {
+        source: metadata.source,
+        domain,
+        rule: describe_action(decision.action()),
+        process_name: metadata.process_name,
+        process_path: metadata.process_path,
+        process_lookup: metadata.process_lookup,
+    }
 }
 
 const MAX_SNIFF_BYTES: usize = 64 * 1024;
@@ -1194,6 +1230,7 @@ mod tests {
                     fake_address,
                     target_port,
                 )),
+                None,
                 None,
                 false,
                 &router,

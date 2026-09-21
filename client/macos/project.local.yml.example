@@ -1,0 +1,7 @@
+settings:
+  base:
+    DEVELOPMENT_TEAM: YOUR_TEAM_ID
+
+# Developer ID distribution also requires provisioning profiles that authorize
+# the App Group and Network Extension entitlements. Add target-specific
+# PROVISIONING_PROFILE_SPECIFIER values here when automatic signing is not used.

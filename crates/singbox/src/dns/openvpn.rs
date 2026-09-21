@@ -779,16 +779,17 @@ fn no_resolver(domain: &str) -> io::Error {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::{
-        option::DirectOutboundOptions, protocol::direct::DirectOutbound,
-    };
     use hickory_proto::{
         op::{MessageType, Query},
         rr::{RData, Record, RecordType, rdata::A},
         serialize::binary::{
             BinDecodable, BinDecoder, BinEncodable, BinEncoder,
         },
+    };
+
+    use super::*;
+    use crate::{
+        option::DirectOutboundOptions, protocol::direct::DirectOutbound,
     };
 
     struct StaticProvider(TunnelConfiguration);

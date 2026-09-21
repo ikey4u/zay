@@ -32,8 +32,7 @@ use rustls::{
 };
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-use crate::adapter::Stream;
-use crate::adapter::VisionDirectSwitch;
+use crate::adapter::{Stream, VisionDirectSwitch};
 
 const RECORD_APPLICATION_DATA: u8 = 23;
 const RECORD_ALERT: u8 = 21;

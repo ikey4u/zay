@@ -8,15 +8,6 @@ mod started_service;
 use std::{fmt, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use thiserror::Error;
-use tonic::{
-    Code, Request, Status,
-    metadata::{Ascii, MetadataValue},
-    service::Interceptor,
-    transport::{Channel, ClientTlsConfig, Endpoint},
-};
-use url::{Host, Url};
-
 pub use locale::{
     SelectedLocale, apply_request_locale, request_locale, select_locale,
 };
@@ -26,6 +17,14 @@ pub use started_service::{
     DAEMON_API_VERSION, GO_ZERO_TIME_UNIX_MILLIS, StartedDaemonService,
     StartedServiceOptions,
 };
+use thiserror::Error;
+use tonic::{
+    Code, Request, Status,
+    metadata::{Ascii, MetadataValue},
+    service::Interceptor,
+    transport::{Channel, ClientTlsConfig, Endpoint},
+};
+use url::{Host, Url};
 
 /// Generated directly from the pinned upstream daemon protobuf definitions.
 pub mod proto {

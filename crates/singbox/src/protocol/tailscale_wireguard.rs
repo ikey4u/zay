@@ -23,8 +23,6 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::endpoint::wireguard::{WireGuardAction, WireGuardPeerTunnel};
-
 use super::{
     tailscale_control_types::{TailscaleNetmapState, TailscaleNode},
     tailscale_derp_supervisor::TailscaleDerpConnector,
@@ -34,6 +32,7 @@ use super::{
         TailscalePacketPath,
     },
 };
+use crate::endpoint::wireguard::{WireGuardAction, WireGuardPeerTunnel};
 
 const COMMAND_QUEUE_DEPTH: usize = 32;
 const EVENT_QUEUE_DEPTH: usize = 32;
@@ -913,10 +912,9 @@ fn update_status(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     use boringtun::x25519::{PublicKey, StaticSecret};
 
+    use super::*;
     use crate::protocol::{
         tailscale_control_types::{
             TailscaleDiscoPublicKey, TailscaleNodePublicKey,

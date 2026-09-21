@@ -192,6 +192,67 @@ pub fn singbox_tun_enabled(settings: &Settings) -> bool {
     true
 }
 
+/// Refuse to install a second full-capture TUN route table on macOS.
+///
+/// macOS can keep multiple utun interfaces up, but two proxy applications
+/// managing overlapping split-default routes do not compose: whichever route
+/// wins receives the traffic while the other proxy still appears healthy.
+pub fn ensure_no_conflicting_full_tun(settings: &Settings) -> Result<()> {
+    if !singbox_tun_enabled(settings) {
+        return Ok(());
+    }
+    #[cfg(target_os = "macos")]
+    if let Some((interface, gateway)) = conflicting_macos_tun_route() {
+        bail!(
+            "another full-route TUN is already active on {interface} via {gateway}; two auto-route TUN proxies cannot reliably run at the same time. Disable Clash Verge TUN, or disable Zay TUN and use the Mixed proxy port"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn conflicting_macos_tun_route() -> Option<(String, String)> {
+    let output = Command::new("netstat")
+        .args(["-rn", "-f", "inet"])
+        .output()
+        .ok()?;
+    parse_macos_full_tun_routes(&String::from_utf8_lossy(&output.stdout))
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn parse_macos_full_tun_routes(text: &str) -> Option<(String, String)> {
+    let mut broad_routes =
+        std::collections::BTreeMap::<String, (String, usize)>::new();
+    for line in text.lines() {
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        if fields.len() < 4 {
+            continue;
+        }
+        let Some(interface) =
+            fields.iter().rev().find(|field| field.starts_with("utun"))
+        else {
+            continue;
+        };
+        let destination = fields[0];
+        let is_broad = destination == "default"
+            || destination
+                .rsplit_once('/')
+                .and_then(|(_, prefix)| prefix.parse::<u8>().ok())
+                .is_some_and(|prefix| prefix <= 8);
+        if !is_broad {
+            continue;
+        }
+        let entry = broad_routes
+            .entry((*interface).to_string())
+            .or_insert_with(|| (fields[1].to_string(), 0));
+        entry.1 += 1;
+        if destination == "default" || entry.1 >= 2 {
+            return Some(((*interface).to_string(), entry.0.clone()));
+        }
+    }
+    None
+}
+
 /// Mesh node without proxy subscriptions — no sing-box TUN required.
 pub fn mesh_only_no_proxy(settings: &Settings) -> bool {
     settings.mesh_is_node()
@@ -349,8 +410,8 @@ pub fn log_fakeip_dns_hint(settings: &Settings, clash_dns: bool) {
         return;
     }
     eprintln!(
-        "dns: FakeIP active — with sing-box running, check: getent ahostsv4 google.com \
-         (expect 198.18.x.x, not 173.x or 2607:…). TUN DNS: {}",
+        "dns: hijack active — rule-routed domains may resolve to real IPs; \
+         unmatched A/AAAA queries use FakeIP. TUN DNS: {}",
         servers.join(", ")
     );
     #[cfg(target_os = "linux")]
@@ -379,6 +440,19 @@ pub fn direct_outbound_json(settings: &Settings, tun_enabled: bool) -> Value {
         }
     }
     ob
+}
+
+/// Pin a real network outbound to the physical interface selected before the
+/// full-route TUN is installed. `auto_detect_interface` remains enabled as a
+/// fallback, but an explicit bind keeps proxy transports from being captured
+/// by the same TUN they are meant to carry.
+pub fn bind_outbound_to_interface(outbound: &mut Value, interface: &str) {
+    let Some(object) = outbound.as_object_mut() else {
+        return;
+    };
+    object
+        .entry("bind_interface")
+        .or_insert_with(|| json!(interface));
 }
 
 pub fn default_route_interface() -> Option<String> {
@@ -918,6 +992,7 @@ mod tests {
             vec!["192.168.0.0/16".into(), "198.18.0.15/32".into()];
         let settings = Settings {
             subscriptions: vec!["https://example.com/sub".into()],
+            active_nodes: Vec::new(),
             data_dir: PathBuf::from("/tmp"),
             mixed_port: 7890,
             allow_lan: false,
@@ -952,6 +1027,31 @@ en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST>
 ";
         let cidrs = parse_macos_ifconfig(text);
         assert_eq!(cidrs, vec!["192.168.31.201/24"]);
+    }
+
+    #[test]
+    fn detects_clash_style_split_default_routes() {
+        let text = "\
+Destination        Gateway            Flags               Netif Expire
+8/5                198.18.0.1         UGSc                utun0
+32/3               198.18.0.1         UGSc                utun0
+64/2               198.18.0.1         UGSc                utun0
+128.0/1            198.18.0.1         UGSc                utun0
+198.18.0.1         198.18.0.1         UH                  utun0
+";
+        assert_eq!(
+            parse_macos_full_tun_routes(text),
+            Some(("utun0".to_string(), "198.18.0.1".to_string()))
+        );
+    }
+
+    #[test]
+    fn ignores_narrow_utun_routes() {
+        let text = "\
+10.0.0/24          10.0.0.1           UGSc                utun3
+10.0.0.1           10.0.0.1           UH                  utun3
+";
+        assert_eq!(parse_macos_full_tun_routes(text), None);
     }
 
     #[test]
@@ -990,6 +1090,7 @@ en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST>
 
         let settings = Settings {
             subscriptions: Vec::new(),
+            active_nodes: Vec::new(),
             data_dir: PathBuf::from("/tmp"),
             mixed_port: 7890,
             allow_lan: false,
@@ -1036,6 +1137,7 @@ en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST>
 
         let settings = Settings {
             subscriptions: Vec::new(),
+            active_nodes: Vec::new(),
             data_dir: PathBuf::from("/tmp"),
             mixed_port: 7890,
             allow_lan: false,
@@ -1085,6 +1187,7 @@ en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST>
 
         let settings = Settings {
             subscriptions: Vec::new(),
+            active_nodes: Vec::new(),
             data_dir: PathBuf::from("/tmp"),
             mixed_port: 7890,
             allow_lan: false,
@@ -1135,6 +1238,7 @@ en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST>
 
         let settings = Settings {
             subscriptions: vec!["https://example.com/sub".into()],
+            active_nodes: Vec::new(),
             data_dir: PathBuf::from("/tmp"),
             mixed_port: 7890,
             allow_lan: false,
@@ -1184,6 +1288,7 @@ en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST>
 
         let settings = Settings {
             subscriptions: vec!["https://example.com/sub".into()],
+            active_nodes: Vec::new(),
             data_dir: PathBuf::from("/tmp"),
             mixed_port: 7890,
             allow_lan: false,
@@ -1235,6 +1340,20 @@ en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST>
     }
 
     #[test]
+    fn pins_proxy_outbound_without_overriding_explicit_interface() {
+        let mut outbound = json!({
+            "type": "vless",
+            "tag": "proxy",
+            "server": "proxy.example"
+        });
+        bind_outbound_to_interface(&mut outbound, "en0");
+        assert_eq!(outbound["bind_interface"], "en0");
+
+        bind_outbound_to_interface(&mut outbound, "en1");
+        assert_eq!(outbound["bind_interface"], "en0");
+    }
+
+    #[test]
     fn derived_dns_is_next_host_after_tun_address() {
         assert_eq!(
             super::next_address_host("10.14.14.9/30").as_deref(),
@@ -1255,6 +1374,7 @@ en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST>
 
         let settings = Settings {
             subscriptions: vec!["https://example.com/sub".into()],
+            active_nodes: Vec::new(),
             data_dir: PathBuf::from("/tmp"),
             mixed_port: 7890,
             allow_lan: false,

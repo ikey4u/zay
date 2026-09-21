@@ -514,16 +514,17 @@ fn no_resolver(domain: &str) -> io::Error {
 mod tests {
     use std::{sync::Mutex as StdMutex, time::Duration};
 
-    use super::*;
-    use crate::{
-        adapter::{DialFuture, PacketConnection, PacketFuture, PacketStream},
-        protocol::openconnect::{TunnelRoute, TunnelSplitDnsRule},
-    };
     use hickory_proto::{
         rr::{Record, rdata::A},
         serialize::binary::{
             BinDecodable, BinDecoder, BinEncodable, BinEncoder,
         },
+    };
+
+    use super::*;
+    use crate::{
+        adapter::{DialFuture, PacketConnection, PacketFuture, PacketStream},
+        protocol::openconnect::{TunnelRoute, TunnelSplitDnsRule},
     };
 
     struct StaticProvider(TunnelConfiguration);

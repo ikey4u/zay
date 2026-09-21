@@ -9,16 +9,23 @@ mod platform {
         net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
         path::Path,
         ptr,
-        sync::{Arc, Mutex},
+        sync::{Arc, Mutex, Weak},
+        thread,
         time::{Duration, Instant},
     };
 
     use crate::{
-        adapter::{ProcessInfo, ProcessResolver},
+        adapter::{
+            ProcessInfo, ProcessLookupResult, ProcessLookupStatus,
+            ProcessResolver,
+        },
         common::network::Network,
     };
 
     const SNAPSHOT_TTL: Duration = Duration::from_millis(200);
+    const UDP_OWNER_TTL: Duration = Duration::from_secs(30);
+    const UDP_OWNER_CACHE_LIMIT: usize = 4096;
+    const UDP_SAMPLER_INTERVAL: Duration = Duration::from_millis(5);
     const XINPGEN_SIZE: usize = 24;
     const XSOCKET_OFFSET: usize = 104;
     const XINPCB_FOREIGN_PORT: usize = 16;
@@ -45,6 +52,18 @@ mod platform {
         entries: Vec<ConnectionEntry>,
     }
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    struct FlowKey {
+        source: SocketAddr,
+        destination: Option<SocketAddr>,
+    }
+
+    #[derive(Clone)]
+    struct CachedProcess {
+        created_at: Instant,
+        process: ProcessInfo,
+    }
+
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum MatchKind {
         Exact,
@@ -52,9 +71,20 @@ mod platform {
         WildcardFallback,
     }
 
-    #[derive(Default)]
     pub(super) struct NativeProcessResolver {
         snapshots: Mutex<HashMap<Network, Snapshot>>,
+        udp_owners: Arc<Mutex<HashMap<FlowKey, CachedProcess>>>,
+    }
+
+    impl Default for NativeProcessResolver {
+        fn default() -> Self {
+            let udp_owners = Arc::new(Mutex::new(HashMap::new()));
+            start_udp_sampler(Arc::downgrade(&udp_owners));
+            Self {
+                snapshots: Mutex::new(HashMap::new()),
+                udp_owners,
+            }
+        }
     }
 
     impl NativeProcessResolver {
@@ -77,6 +107,246 @@ mod platform {
             snapshots.insert(network, snapshot.clone());
             Ok((snapshot, false))
         }
+
+        fn cached_udp_owner(&self, key: FlowKey) -> Option<ProcessInfo> {
+            let mut owners = self
+                .udp_owners
+                .lock()
+                .expect("UDP process cache lock poisoned");
+            owners
+                .retain(|_, value| value.created_at.elapsed() < UDP_OWNER_TTL);
+            owners
+                .get(&key)
+                .or_else(|| {
+                    owners
+                        .iter()
+                        .filter(|(candidate, _)| {
+                            candidate.source.port() == key.source.port()
+                                && candidate.source.is_ipv4()
+                                    == key.source.is_ipv4()
+                                && (candidate.source.ip() == key.source.ip()
+                                    || candidate.source.ip().is_unspecified())
+                                && (candidate.destination == key.destination
+                                    || candidate.destination.is_none())
+                        })
+                        .max_by_key(|(_, value)| value.created_at)
+                        .map(|(_, value)| value)
+                })
+                .map(|value| value.process.clone())
+        }
+
+        fn remember_udp_owner(&self, key: FlowKey, process: &ProcessInfo) {
+            let mut owners = self
+                .udp_owners
+                .lock()
+                .expect("UDP process cache lock poisoned");
+            remember_udp_owner_in(&mut owners, key, process);
+        }
+
+        fn lookup_native(
+            &self,
+            network: Network,
+            source: SocketAddr,
+            destination: Option<SocketAddr>,
+        ) -> ProcessLookupResult {
+            if !matches!(network, Network::Tcp | Network::Udp) {
+                return ProcessLookupResult {
+                    process: None,
+                    status: ProcessLookupStatus::SocketSnapshotMiss,
+                };
+            }
+            let source = normalize(source);
+            let destination = destination.map(normalize);
+            let key = FlowKey {
+                source,
+                destination,
+            };
+            let mut matched = None;
+            for attempt in 0..2 {
+                let (snapshot, from_cache) =
+                    match self.snapshot(network, attempt > 0) {
+                        Ok(snapshot) => snapshot,
+                        Err(_) => {
+                            return ProcessLookupResult {
+                                process: None,
+                                status: ProcessLookupStatus::ResolverError,
+                            };
+                        }
+                    };
+                let Some((entry, kind)) = match_entry(
+                    &snapshot.entries,
+                    network,
+                    source,
+                    destination,
+                ) else {
+                    // A socket can be created immediately after a cached
+                    // pcblist snapshot. Refresh once instead of treating that
+                    // ordinary race as an unknown process.
+                    if from_cache {
+                        continue;
+                    }
+                    break;
+                };
+                if from_cache && kind != MatchKind::Exact {
+                    continue;
+                }
+                matched = Some(entry);
+                break;
+            }
+
+            let Some(entry) = matched else {
+                if network == Network::Udp
+                    && let Some(process) = self.cached_udp_owner(key)
+                {
+                    return ProcessLookupResult {
+                        process: Some(process),
+                        status: ProcessLookupStatus::UdpCache,
+                    };
+                }
+                return ProcessLookupResult {
+                    process: None,
+                    status: ProcessLookupStatus::SocketSnapshotMiss,
+                };
+            };
+            let mut process = ProcessInfo {
+                user: (entry.uid >= 0)
+                    .then(|| super::lookup_username(entry.uid as u32))
+                    .flatten()
+                    .unwrap_or_default(),
+                user_id: Some(entry.uid),
+                ..ProcessInfo::default()
+            };
+            if entry.pid == 0 {
+                return ProcessLookupResult {
+                    process: None,
+                    status: ProcessLookupStatus::KernelSocket,
+                };
+            }
+            match process_path(entry.pid) {
+                Ok(path) => {
+                    process.process_name = Path::new(&path)
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    process.process_path = path;
+                    if network == Network::Udp {
+                        self.remember_udp_owner(key, &process);
+                    }
+                    ProcessLookupResult {
+                        process: Some(process),
+                        status: ProcessLookupStatus::Found,
+                    }
+                }
+                Err(error) => ProcessLookupResult {
+                    process: None,
+                    status: match error.kind() {
+                        io::ErrorKind::PermissionDenied => {
+                            ProcessLookupStatus::PermissionDenied
+                        }
+                        _ => ProcessLookupStatus::ProcessExited,
+                    },
+                },
+            }
+        }
+    }
+
+    fn start_udp_sampler(
+        udp_owners: Weak<Mutex<HashMap<FlowKey, CachedProcess>>>,
+    ) {
+        let _ = thread::Builder::new()
+            .name("singbox-udp-process-sampler".into())
+            .spawn(move || {
+                let mut processes = HashMap::<u32, CachedProcess>::new();
+                loop {
+                    let Some(owners) = udp_owners.upgrade() else {
+                        break;
+                    };
+                    if let Ok(snapshot) = build_snapshot(Network::Udp) {
+                        processes.retain(|_, process| {
+                            process.created_at.elapsed() < UDP_OWNER_TTL
+                        });
+                        for entry in snapshot.entries {
+                            if entry.pid == 0 {
+                                continue;
+                            }
+                            let process = if let Some(cached) =
+                                processes.get(&entry.pid)
+                            {
+                                Some(cached.process.clone())
+                            } else {
+                                let process = process_info(entry).ok();
+                                if let Some(process) = process.as_ref() {
+                                    processes.insert(
+                                        entry.pid,
+                                        CachedProcess {
+                                            created_at: Instant::now(),
+                                            process: process.clone(),
+                                        },
+                                    );
+                                }
+                                process
+                            };
+                            let Some(process) = process else {
+                                continue;
+                            };
+                            let destination =
+                                (!entry.remote.ip().is_unspecified()
+                                    || entry.remote.port() != 0)
+                                    .then(|| normalize(entry.remote));
+                            let key = FlowKey {
+                                source: normalize(entry.local),
+                                destination,
+                            };
+                            let mut owners = owners
+                                .lock()
+                                .expect("UDP process cache lock poisoned");
+                            remember_udp_owner_in(&mut owners, key, &process);
+                        }
+                    }
+                    drop(owners);
+                    thread::sleep(UDP_SAMPLER_INTERVAL);
+                }
+            });
+    }
+
+    fn process_info(entry: ConnectionEntry) -> io::Result<ProcessInfo> {
+        let path = process_path(entry.pid)?;
+        Ok(ProcessInfo {
+            process_name: Path::new(&path)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            process_path: path,
+            user: (entry.uid >= 0)
+                .then(|| super::lookup_username(entry.uid as u32))
+                .flatten()
+                .unwrap_or_default(),
+            user_id: Some(entry.uid),
+            ..ProcessInfo::default()
+        })
+    }
+
+    fn remember_udp_owner_in(
+        owners: &mut HashMap<FlowKey, CachedProcess>,
+        key: FlowKey,
+        process: &ProcessInfo,
+    ) {
+        owners.retain(|_, value| value.created_at.elapsed() < UDP_OWNER_TTL);
+        if owners.len() >= UDP_OWNER_CACHE_LIMIT
+            && let Some(oldest) = owners
+                .iter()
+                .min_by_key(|(_, value)| value.created_at)
+                .map(|(key, _)| *key)
+        {
+            owners.remove(&oldest);
+        }
+        owners.insert(
+            key,
+            CachedProcess {
+                created_at: Instant::now(),
+                process: process.clone(),
+            },
+        );
     }
 
     impl ProcessResolver for NativeProcessResolver {
@@ -86,49 +356,16 @@ mod platform {
             source: SocketAddr,
             destination: Option<SocketAddr>,
         ) -> Option<ProcessInfo> {
-            if !matches!(network, Network::Tcp | Network::Udp) {
-                return None;
-            }
-            let source = normalize(source);
-            let destination = destination.map(normalize);
-            let mut last = None;
-            for attempt in 0..2 {
-                let (snapshot, from_cache) =
-                    self.snapshot(network, attempt > 0).ok()?;
-                let (entry, kind) = match_entry(
-                    &snapshot.entries,
-                    network,
-                    source,
-                    destination,
-                )?;
-                if from_cache && kind != MatchKind::Exact {
-                    continue;
-                }
-                let mut process = ProcessInfo {
-                    user: (entry.uid >= 0)
-                        .then(|| super::lookup_username(entry.uid as u32))
-                        .flatten()
-                        .unwrap_or_default(),
-                    user_id: Some(entry.uid),
-                    ..ProcessInfo::default()
-                };
-                last = Some(process.clone());
-                if entry.pid == 0 {
-                    return Some(process);
-                }
-                if let Ok(path) = process_path(entry.pid) {
-                    process.process_name = Path::new(&path)
-                        .file_name()
-                        .map(|name| name.to_string_lossy().into_owned())
-                        .unwrap_or_default();
-                    process.process_path = path;
-                    return Some(process);
-                }
-                if !from_cache {
-                    return Some(process);
-                }
-            }
-            last
+            self.lookup_native(network, source, destination).process
+        }
+
+        fn lookup_detailed(
+            &self,
+            network: Network,
+            source: SocketAddr,
+            destination: Option<SocketAddr>,
+        ) -> ProcessLookupResult {
+            self.lookup_native(network, source, destination)
         }
     }
 
@@ -403,6 +640,55 @@ mod platform {
                 Some(unsafe { libc::geteuid() } as i32)
             );
             assert!(!process.process_path.is_empty());
+        }
+
+        #[test]
+        fn cached_udp_snapshot_miss_forces_refresh() {
+            let server = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            let destination = server.local_addr().unwrap();
+            let client = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            client.connect(destination).unwrap();
+            client.send(b"probe").unwrap();
+            let source = client.local_addr().unwrap();
+
+            let resolver = NativeProcessResolver::default();
+            resolver.snapshots.lock().unwrap().insert(
+                Network::Udp,
+                Snapshot {
+                    created_at: Instant::now(),
+                    entries: Vec::new(),
+                },
+            );
+            let result = resolver.lookup_detailed(
+                Network::Udp,
+                source,
+                Some(destination),
+            );
+            assert_eq!(result.status, ProcessLookupStatus::Found);
+            assert!(!result.process.unwrap().process_path.is_empty());
+        }
+
+        #[test]
+        fn remembers_udp_owner_by_full_flow_tuple() {
+            let resolver = NativeProcessResolver::default();
+            let key = FlowKey {
+                source: "127.0.0.1:1000".parse().unwrap(),
+                destination: Some("127.0.0.1:2000".parse().unwrap()),
+            };
+            let process = ProcessInfo {
+                process_name: "client".into(),
+                process_path: "/tmp/client".into(),
+                ..ProcessInfo::default()
+            };
+            resolver.remember_udp_owner(key, &process);
+            assert_eq!(resolver.cached_udp_owner(key), Some(process));
+            assert_eq!(
+                resolver.cached_udp_owner(FlowKey {
+                    destination: Some("127.0.0.1:2001".parse().unwrap()),
+                    ..key
+                }),
+                None
+            );
         }
     }
 }

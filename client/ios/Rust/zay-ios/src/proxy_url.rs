@@ -6,13 +6,16 @@
 //! - `ss://…` (Shadowsocks SIP002 / legacy)
 //! - Clash / Mihomo subscription (`http://` / `https://` returning YAML with `proxies:`)
 
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    time::Duration,
+};
+
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
 use serde_json::{Value, json};
 use serde_yaml::Value as YamlValue;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 pub enum OutboundSpec {
     Single(Value),

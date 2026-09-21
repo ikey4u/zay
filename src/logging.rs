@@ -4,7 +4,7 @@ use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
     io::Write,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         Mutex,
         mpsc::{SyncSender, TrySendError, sync_channel},
@@ -17,6 +17,9 @@ use once_cell::sync::Lazy;
 use serde::Serialize;
 
 const LOG_QUEUE_CAPACITY: usize = 16_384;
+/// All files in the runtime log directory share this on-disk budget.
+pub const MAX_LOG_DIR_BYTES: u64 = 200 * 1024 * 1024;
+const LOG_ROLL_BYTES: u64 = 16 * 1024 * 1024;
 
 static WRITER: Lazy<Mutex<Option<Writer>>> = Lazy::new(|| Mutex::new(None));
 
@@ -53,6 +56,7 @@ pub fn init(log_dir: &Path) {
     if fs::create_dir_all(log_dir).is_err() {
         return;
     }
+    enforce_log_budget(log_dir, MAX_LOG_DIR_BYTES);
     let (sender, receiver) = sync_channel(LOG_QUEUE_CAPACITY);
     let paths = (
         log_dir.join("zay.log"),
@@ -117,12 +121,15 @@ pub fn emit_with_source(
         error,
         fields,
     };
-    let human = format!(
+    let mut human = format!(
         "zay level={level} component={component:?} event={event:?} message={message:?}{}",
         error
             .map(|value| format!(" error={value:?}"))
             .unwrap_or_default()
     );
+    for (key, value) in &record.fields {
+        human.push_str(&format!(" {key}={value:?}"));
+    }
     let Some(writer) = WRITER.lock().expect("logging lock").clone() else {
         eprintln!("{human}");
         return;
@@ -172,23 +179,26 @@ fn write_records(
         std::path::PathBuf,
     ),
 ) {
-    let Ok(mut log) = append_file(&log_path) else {
+    let Some(log_dir) = log_path.parent().map(Path::to_path_buf) else {
         return;
     };
-    let Ok(mut events) = append_file(&event_path) else {
+    let Ok(mut log) = RollingFile::open(log_path, log_dir.clone()) else {
         return;
     };
-    let Ok(mut raw) = append_file(&raw_path) else {
+    let Ok(mut events) = RollingFile::open(event_path, log_dir.clone()) else {
+        return;
+    };
+    let Ok(mut raw) = RollingFile::open(raw_path, log_dir) else {
         return;
     };
     while let Ok(record) = receiver.recv() {
         match record {
             LogRecord::Event { event, human } => {
-                let _ = writeln!(events, "{event}");
-                let _ = writeln!(log, "{human}");
+                let _ = events.write_line(&event);
+                let _ = log.write_line(&human);
             }
             LogRecord::SingboxRaw(line) => {
-                let _ = writeln!(raw, "{line}");
+                let _ = raw.write_line(&line);
             }
             #[cfg(test)]
             LogRecord::Flush(done) => {
@@ -203,4 +213,100 @@ fn write_records(
 
 fn append_file(path: &Path) -> std::io::Result<File> {
     OpenOptions::new().create(true).append(true).open(path)
+}
+
+struct RollingFile {
+    path: PathBuf,
+    log_dir: PathBuf,
+    file: File,
+    bytes: u64,
+    sequence: u64,
+}
+
+impl RollingFile {
+    fn open(path: PathBuf, log_dir: PathBuf) -> std::io::Result<Self> {
+        let file = append_file(&path)?;
+        let bytes = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+        Ok(Self {
+            path,
+            log_dir,
+            file,
+            bytes,
+            sequence: 0,
+        })
+    }
+
+    fn write_line(&mut self, line: &str) -> std::io::Result<()> {
+        let incoming = line.len() as u64 + 1;
+        if self.bytes > 0
+            && self.bytes.saturating_add(incoming) > LOG_ROLL_BYTES
+        {
+            self.rotate()?;
+        }
+        writeln!(self.file, "{line}")?;
+        self.bytes = self.bytes.saturating_add(incoming);
+        Ok(())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
+
+    fn rotate(&mut self) -> std::io::Result<()> {
+        self.file.flush()?;
+        self.sequence = self.sequence.wrapping_add(1);
+        let timestamp = Utc::now().format("%Y%m%dT%H%M%S%.3fZ");
+        let file_name = self
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("zay.log");
+        let archived = self
+            .log_dir
+            .join(format!("{file_name}.{timestamp}.{}", self.sequence));
+        fs::rename(&self.path, archived)?;
+        self.file = append_file(&self.path)?;
+        self.bytes = 0;
+        enforce_log_budget(&self.log_dir, MAX_LOG_DIR_BYTES);
+        Ok(())
+    }
+}
+
+fn enforce_log_budget(log_dir: &Path, budget: u64) {
+    let Ok(entries) = fs::read_dir(log_dir) else {
+        return;
+    };
+    let active = ["zay.log", "events.jsonl", "singbox.raw.log"];
+    let mut total = 0u64;
+    let mut archived = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !active
+            .iter()
+            .any(|base| name == *base || name.starts_with(&format!("{base}.")))
+        {
+            continue;
+        }
+        total = total.saturating_add(metadata.len());
+        if !active.contains(&name.as_ref()) {
+            archived.push((metadata.modified().ok(), path, metadata.len()));
+        }
+    }
+    archived.sort_by_key(|(modified, _, _)| *modified);
+    for (_, path, bytes) in archived {
+        if total <= budget {
+            break;
+        }
+        if fs::remove_file(path).is_ok() {
+            total = total.saturating_sub(bytes);
+        }
+    }
 }

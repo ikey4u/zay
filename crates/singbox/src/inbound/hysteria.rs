@@ -10,12 +10,12 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::common::sniff::{SniffError, sniff_stream};
 use crate::{
     adapter::Stream,
     common::{
         lifecycle::{Lifecycle, LifecycleError, LifecycleFuture, StartStage},
         network::{Network, SocksAddr},
+        sniff::{SniffError, sniff_stream},
         tls::{TlsError, build_server_config_with_default_alpn},
     },
     inbound::{

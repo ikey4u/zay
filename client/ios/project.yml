@@ -51,6 +51,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.zay.ios
         INFOPLIST_FILE: ZayApp/Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         CODE_SIGN_ENTITLEMENTS: ZayApp/ZayApp.entitlements
         SWIFT_OBJC_BRIDGING_HEADER: Shared/Zay-Bridging-Header.h
         HEADER_SEARCH_PATHS: "$(SRCROOT)/Shared"

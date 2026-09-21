@@ -1,7 +1,6 @@
 //! Loyalsoldier clash-rules routing helpers (aligned with desktop `src/singbox/rules.rs`).
 
-use std::fs;
-use std::path::Path;
+use std::{fs, path::Path};
 
 use serde_json::{Value, json};
 

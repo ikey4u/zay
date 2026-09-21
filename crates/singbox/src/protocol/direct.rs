@@ -1,3 +1,7 @@
+#[cfg(any(target_os = "android", target_os = "ios", target_os = "macos"))]
+use std::os::fd::AsRawFd as _;
+#[cfg(any(target_os = "android", target_os = "ios", target_os = "macos"))]
+use std::time::Instant;
 use std::{
     collections::{HashMap, VecDeque},
     io,
@@ -9,12 +13,7 @@ use std::{
     time::Duration,
 };
 
-#[cfg(any(target_os = "android", target_os = "ios", target_os = "macos"))]
-use std::time::Instant;
-
 use socket2::{Domain, Protocol, Socket, Type};
-#[cfg(any(target_os = "android", target_os = "ios", target_os = "macos"))]
-use std::os::fd::AsRawFd as _;
 use tokio::{
     net::{TcpSocket, TcpStream, UdpSocket},
     sync::{Mutex as AsyncMutex, oneshot},

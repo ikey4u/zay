@@ -771,9 +771,8 @@ mod tests {
     use parking_lot::Mutex as SyncMutex;
     use tokio::sync::{Mutex as TokioMutex, mpsc};
 
-    use crate::adapter::{PacketConnection, PacketFuture};
-
     use super::*;
+    use crate::adapter::{PacketConnection, PacketFuture};
 
     #[test]
     fn defaults_match_upstream_legacy_policy() {

@@ -512,7 +512,7 @@ pub fn spawn_background_download(
                 }
                 *config_json.write().expect("config lock") = json;
                 eprintln!(
-                    "clash-rules updated on disk; restart `zay run proxy` to apply"
+                    "clash-rules updated on disk; restart `zay x run proxy` to apply"
                 );
             }
             Err(e) => eprintln!("rebuild config after rules update: {e:#}"),
@@ -529,7 +529,11 @@ pub fn update_rules_via_proxy(settings: &Settings) -> Result<()> {
         return Ok(());
     }
     subscription::wait_for_proxy(settings, Duration::from_secs(120))?;
-    eprintln!("clash-rules: updating via local proxy…");
+    if crate::singbox::tun_route::singbox_tun_enabled(settings) {
+        eprintln!("clash-rules: updating through system TUN…");
+    } else {
+        eprintln!("clash-rules: updating via local Mixed proxy…");
+    }
     download_all(settings, true)
 }
 
@@ -624,6 +628,10 @@ fn rule_download_clients(settings: &Settings) -> Result<Vec<Client>> {
         return Ok(vec![direct]);
     }
 
+    if crate::singbox::tun_route::singbox_tun_enabled(settings) {
+        return Ok(vec![crate::singbox::subscription::client_via_tun()?]);
+    }
+
     if mixed_proxy_reachable(settings.mixed_port) {
         return crate::singbox::subscription::clients_via_mixed_proxy(
             settings.mixed_port,
@@ -715,6 +723,7 @@ mod tests {
             .unwrap();
         let settings = Settings {
             subscriptions: vec!["https://example.com/sub".into()],
+            active_nodes: Vec::new(),
             data_dir,
             mixed_port: 7890,
             allow_lan: false,
@@ -773,6 +782,7 @@ mod tests {
             .unwrap();
         let settings = Settings {
             subscriptions: vec!["https://example.com/sub".into()],
+            active_nodes: Vec::new(),
             data_dir,
             mixed_port: 7890,
             allow_lan: false,
@@ -839,17 +849,29 @@ pub mod subscription {
             return Ok(());
         }
         let deadline = Instant::now() + timeout;
-        eprintln!("waiting for sing-box mixed proxy before rules download…");
+        let tun_enabled =
+            crate::singbox::tun_route::singbox_tun_enabled(settings);
+        if tun_enabled {
+            eprintln!("waiting for sing-box TUN before rules download…");
+        } else {
+            eprintln!(
+                "waiting for sing-box Mixed proxy before rules download…"
+            );
+        }
         loop {
-            if crate::singbox::subscription::client_via_mixed_proxy(
-                settings.mixed_port,
-            )
-            .ok()
-            .and_then(|c| {
-                c.get("http://cp.cloudflare.com/generate_204").send().ok()
-            })
-            .is_some()
-            {
+            let ready = if tun_enabled {
+                crate::singbox::subscription::probe_tun_proxy(
+                    &settings.health_check_url,
+                    Duration::from_secs(8),
+                )
+            } else {
+                crate::singbox::subscription::probe_mixed_proxy(
+                    settings.mixed_port,
+                    &settings.health_check_url,
+                    Duration::from_secs(8),
+                )
+            };
+            if ready.is_ok() {
                 return Ok(());
             }
             if Instant::now() >= deadline {

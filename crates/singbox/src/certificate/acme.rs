@@ -24,6 +24,12 @@ use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
 use sha2::{Digest as _, Sha256};
 use tokio_util::sync::CancellationToken;
 
+use super::{
+    CertificateHttpClient, CertificateProviderError,
+    acme_custom::AcmeSession,
+    acme_dns::{Dns01Solver, ProvisionedRecord},
+    acme_signer::AcmeAccountSigner,
+};
 use crate::{
     common::{
         lifecycle::{Lifecycle, LifecycleError, LifecycleFuture, StartStage},
@@ -32,13 +38,6 @@ use crate::{
     option::{
         AcmeCertificateProviderOptions, AcmeExternalAccountOptions, AcmeKeyType,
     },
-};
-
-use super::{
-    CertificateHttpClient, CertificateProviderError,
-    acme_custom::AcmeSession,
-    acme_dns::{Dns01Solver, ProvisionedRecord},
-    acme_signer::AcmeAccountSigner,
 };
 
 const RENEW_BEFORE: Duration = Duration::from_secs(30 * 24 * 60 * 60);

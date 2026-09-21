@@ -1,0 +1,506 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		1F6DA8ED95657DC229C22DD5 /* FilterDataProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD58B91EC320E2EAED7AADC0 /* FilterDataProvider.swift */; };
+		247D7F43AD7F9EEB6A8A05EC /* NetworkExtension.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 8AA359A7D645BCF08E88D3F1 /* NetworkExtension.framework */; };
+		29DE17EEDC76A92565D66CBB /* ZayMacApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 63D2E1787CD1E02ED950FEAA /* ZayMacApp.swift */; };
+		403D2E91A39E76B505D32B58 /* AttributionEvent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64924021DB8640B0705C555F /* AttributionEvent.swift */; };
+		5E1EA945F0049F1F357D6D1E /* AttributionEventWriter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 79F5A53075A5DE96FF45E375 /* AttributionEventWriter.swift */; };
+		62F5A53DF4336E13C76B115D /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A167EB83CB131DFFCEF686F /* main.swift */; };
+		800285D243FF0367972C4238 /* AppGroup.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD3A3CA7EBF65E2C481DD21D /* AppGroup.swift */; };
+		830E43F1AB0055B73C0780A6 /* NetworkExtension.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 8AA359A7D645BCF08E88D3F1 /* NetworkExtension.framework */; };
+		8D2F0675F159B6938B250D58 /* AppGroup.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD3A3CA7EBF65E2C481DD21D /* AppGroup.swift */; };
+		92C0686FFDD462378EC88A9F /* AttributionEvent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64924021DB8640B0705C555F /* AttributionEvent.swift */; };
+		96450E8DFADE50E3AB29F2CA /* ZayProcessFilter.systemextension in Embed System Extensions */ = {isa = PBXBuildFile; fileRef = 69588D59D44E0AC98A1C8241 /* ZayProcessFilter.systemextension */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		997BADCA88A40ED56D745855 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E140660AC89584FEF74C304A /* ContentView.swift */; };
+		BAB12519103DB0D5C8CBC589 /* ProcessFilterController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 785EDD8361F7A5FB979341F0 /* ProcessFilterController.swift */; };
+		CF76C9C9357FF4BA5753A147 /* ProcessIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 494CFDECAB169BEAF3727246 /* ProcessIdentity.swift */; };
+		D50CD982D4FA3EB1409B0FE8 /* Network.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 2E5C857D6F3B1DC95598C3CB /* Network.framework */; };
+		E7A2781BDE62747E46F207D4 /* SystemExtensions.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = FE555F7ABFD5678499F83CA8 /* SystemExtensions.framework */; };
+		EB9156DCC28CC78D942DD636 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6EA488BD6194F26E8631362B /* Security.framework */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		F1E7D295F772DAD28AE5D1A9 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 1D39E26DE8FEA2AD54FD9080 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 6F17CB026B1CB96AF732E29E;
+			remoteInfo = ZayProcessFilter;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		45A503097CBBC94E195BAC76 /* Embed System Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "$(SYSTEM_EXTENSIONS_FOLDER_PATH)";
+			dstSubfolderSpec = 16;
+			files = (
+				96450E8DFADE50E3AB29F2CA /* ZayProcessFilter.systemextension in Embed System Extensions */,
+			);
+			name = "Embed System Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		22070D9F9BB0847206691CCE /* ZayMacApp.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = ZayMacApp.entitlements; sourceTree = "<group>"; };
+		2D8745CD1C270428829BE902 /* ZayMac.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ZayMac.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		2E5C857D6F3B1DC95598C3CB /* Network.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Network.framework; path = System/Library/Frameworks/Network.framework; sourceTree = SDKROOT; };
+		494CFDECAB169BEAF3727246 /* ProcessIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProcessIdentity.swift; sourceTree = "<group>"; };
+		63D2E1787CD1E02ED950FEAA /* ZayMacApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZayMacApp.swift; sourceTree = "<group>"; };
+		64924021DB8640B0705C555F /* AttributionEvent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttributionEvent.swift; sourceTree = "<group>"; };
+		69588D59D44E0AC98A1C8241 /* ZayProcessFilter.systemextension */ = {isa = PBXFileReference; explicitFileType = "wrapper.system-extension"; includeInIndex = 0; path = ZayProcessFilter.systemextension; sourceTree = BUILT_PRODUCTS_DIR; };
+		6CC35A184EFA433FA199F663 /* ZayProcessFilter.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = ZayProcessFilter.entitlements; sourceTree = "<group>"; };
+		6EA488BD6194F26E8631362B /* Security.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Security.framework; path = System/Library/Frameworks/Security.framework; sourceTree = SDKROOT; };
+		785EDD8361F7A5FB979341F0 /* ProcessFilterController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProcessFilterController.swift; sourceTree = "<group>"; };
+		79F5A53075A5DE96FF45E375 /* AttributionEventWriter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttributionEventWriter.swift; sourceTree = "<group>"; };
+		8A167EB83CB131DFFCEF686F /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
+		8AA359A7D645BCF08E88D3F1 /* NetworkExtension.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = NetworkExtension.framework; path = System/Library/Frameworks/NetworkExtension.framework; sourceTree = SDKROOT; };
+		8B06EA6C39BD06814871AD60 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		973C9821D03E9BD139AF0C43 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		BD3A3CA7EBF65E2C481DD21D /* AppGroup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppGroup.swift; sourceTree = "<group>"; };
+		CD58B91EC320E2EAED7AADC0 /* FilterDataProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FilterDataProvider.swift; sourceTree = "<group>"; };
+		E140660AC89584FEF74C304A /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		FE555F7ABFD5678499F83CA8 /* SystemExtensions.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SystemExtensions.framework; path = System/Library/Frameworks/SystemExtensions.framework; sourceTree = SDKROOT; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		6E1720D1EEBEE072910FB476 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				830E43F1AB0055B73C0780A6 /* NetworkExtension.framework in Frameworks */,
+				E7A2781BDE62747E46F207D4 /* SystemExtensions.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C58C380611328BD6FC354BBE /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				247D7F43AD7F9EEB6A8A05EC /* NetworkExtension.framework in Frameworks */,
+				D50CD982D4FA3EB1409B0FE8 /* Network.framework in Frameworks */,
+				EB9156DCC28CC78D942DD636 /* Security.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		3B5866791EC2D9B603755687 /* ZayMacApp */ = {
+			isa = PBXGroup;
+			children = (
+				E140660AC89584FEF74C304A /* ContentView.swift */,
+				8B06EA6C39BD06814871AD60 /* Info.plist */,
+				785EDD8361F7A5FB979341F0 /* ProcessFilterController.swift */,
+				22070D9F9BB0847206691CCE /* ZayMacApp.entitlements */,
+				63D2E1787CD1E02ED950FEAA /* ZayMacApp.swift */,
+			);
+			path = ZayMacApp;
+			sourceTree = "<group>";
+		};
+		90768439BF314E1585621EFD = {
+			isa = PBXGroup;
+			children = (
+				A3C921FBCF307D7E7E1597F1 /* Shared */,
+				3B5866791EC2D9B603755687 /* ZayMacApp */,
+				BEC27E787F6A04B12FCBA326 /* ZayProcessFilter */,
+				F3CAFEA2209FA0BFCD9AA7A5 /* Frameworks */,
+				CE9B9C5300D939F975B72942 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		A3C921FBCF307D7E7E1597F1 /* Shared */ = {
+			isa = PBXGroup;
+			children = (
+				BD3A3CA7EBF65E2C481DD21D /* AppGroup.swift */,
+				64924021DB8640B0705C555F /* AttributionEvent.swift */,
+			);
+			path = Shared;
+			sourceTree = "<group>";
+		};
+		BEC27E787F6A04B12FCBA326 /* ZayProcessFilter */ = {
+			isa = PBXGroup;
+			children = (
+				79F5A53075A5DE96FF45E375 /* AttributionEventWriter.swift */,
+				CD58B91EC320E2EAED7AADC0 /* FilterDataProvider.swift */,
+				973C9821D03E9BD139AF0C43 /* Info.plist */,
+				8A167EB83CB131DFFCEF686F /* main.swift */,
+				494CFDECAB169BEAF3727246 /* ProcessIdentity.swift */,
+				6CC35A184EFA433FA199F663 /* ZayProcessFilter.entitlements */,
+			);
+			path = ZayProcessFilter;
+			sourceTree = "<group>";
+		};
+		CE9B9C5300D939F975B72942 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				2D8745CD1C270428829BE902 /* ZayMac.app */,
+				69588D59D44E0AC98A1C8241 /* ZayProcessFilter.systemextension */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		F3CAFEA2209FA0BFCD9AA7A5 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				2E5C857D6F3B1DC95598C3CB /* Network.framework */,
+				8AA359A7D645BCF08E88D3F1 /* NetworkExtension.framework */,
+				6EA488BD6194F26E8631362B /* Security.framework */,
+				FE555F7ABFD5678499F83CA8 /* SystemExtensions.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		6F17CB026B1CB96AF732E29E /* ZayProcessFilter */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 461A29A539FD334B79D99758 /* Build configuration list for PBXNativeTarget "ZayProcessFilter" */;
+			buildPhases = (
+				C0451B3FD81551D5BF4F0994 /* Sources */,
+				C58C380611328BD6FC354BBE /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = ZayProcessFilter;
+			packageProductDependencies = (
+			);
+			productName = ZayProcessFilter;
+			productReference = 69588D59D44E0AC98A1C8241 /* ZayProcessFilter.systemextension */;
+			productType = "com.apple.product-type.system-extension";
+		};
+		BCB02B9F8B665DBFE4A058C2 /* ZayMac */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 5E7C61F024B3ECDAC2DAD630 /* Build configuration list for PBXNativeTarget "ZayMac" */;
+			buildPhases = (
+				8D1DD28423EEA8BBF0641A10 /* Sources */,
+				6E1720D1EEBEE072910FB476 /* Frameworks */,
+				45A503097CBBC94E195BAC76 /* Embed System Extensions */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				613995814D400A2B3370698A /* PBXTargetDependency */,
+			);
+			name = ZayMac;
+			packageProductDependencies = (
+			);
+			productName = ZayMac;
+			productReference = 2D8745CD1C270428829BE902 /* ZayMac.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		1D39E26DE8FEA2AD54FD9080 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1600;
+				TargetAttributes = {
+					6F17CB026B1CB96AF732E29E = {
+						ProvisioningStyle = Automatic;
+					};
+					BCB02B9F8B665DBFE4A058C2 = {
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = 19BBFB1FACCB3FC0B8C9FC9A /* Build configuration list for PBXProject "ZayMac" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 90768439BF314E1585621EFD;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				BCB02B9F8B665DBFE4A058C2 /* ZayMac */,
+				6F17CB026B1CB96AF732E29E /* ZayProcessFilter */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		8D1DD28423EEA8BBF0641A10 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				800285D243FF0367972C4238 /* AppGroup.swift in Sources */,
+				403D2E91A39E76B505D32B58 /* AttributionEvent.swift in Sources */,
+				997BADCA88A40ED56D745855 /* ContentView.swift in Sources */,
+				BAB12519103DB0D5C8CBC589 /* ProcessFilterController.swift in Sources */,
+				29DE17EEDC76A92565D66CBB /* ZayMacApp.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C0451B3FD81551D5BF4F0994 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				8D2F0675F159B6938B250D58 /* AppGroup.swift in Sources */,
+				92C0686FFDD462378EC88A9F /* AttributionEvent.swift in Sources */,
+				5E1EA945F0049F1F357D6D1E /* AttributionEventWriter.swift in Sources */,
+				1F6DA8ED95657DC229C22DD5 /* FilterDataProvider.swift in Sources */,
+				CF76C9C9357FF4BA5753A147 /* ProcessIdentity.swift in Sources */,
+				62F5A53DF4336E13C76B115D /* main.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		613995814D400A2B3370698A /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 6F17CB026B1CB96AF732E29E /* ZayProcessFilter */;
+			targetProxy = F1E7D295F772DAD28AE5D1A9 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		269CA2D20C1CBAF60EAEA869 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = ZayMacApp/ZayMacApp.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = ZayMacApp/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = dev.zay.macos;
+				PRODUCT_NAME = Zay;
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+		3C6C5E458734177366D469F4 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		3CB955C5A4F539D32F684DDD /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = ZayMacApp/ZayMacApp.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = ZayMacApp/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = dev.zay.macos;
+				PRODUCT_NAME = Zay;
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+		54BD2D2BBBE98002CBD3D2EB /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		5BC643D02D4BE1D038A48793 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = ZayProcessFilter/ZayProcessFilter.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = ZayProcessFilter/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = "dev.zay.macos.process-filter";
+				PRODUCT_NAME = ZayProcessFilter;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+			};
+			name = Release;
+		};
+		80AB0178E3EBA91AA68AA6BD /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = ZayProcessFilter/ZayProcessFilter.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = ZayProcessFilter/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = "dev.zay.macos.process-filter";
+				PRODUCT_NAME = ZayProcessFilter;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		19BBFB1FACCB3FC0B8C9FC9A /* Build configuration list for PBXProject "ZayMac" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				54BD2D2BBBE98002CBD3D2EB /* Debug */,
+				3C6C5E458734177366D469F4 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		461A29A539FD334B79D99758 /* Build configuration list for PBXNativeTarget "ZayProcessFilter" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				80AB0178E3EBA91AA68AA6BD /* Debug */,
+				5BC643D02D4BE1D038A48793 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		5E7C61F024B3ECDAC2DAD630 /* Build configuration list for PBXNativeTarget "ZayMac" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				3CB955C5A4F539D32F684DDD /* Debug */,
+				269CA2D20C1CBAF60EAEA869 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 1D39E26DE8FEA2AD54FD9080 /* Project object */;
+}

@@ -3,13 +3,6 @@ use std::{io, path::PathBuf, sync::Arc, time::Duration};
 use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    adapter::Dialer,
-    common::network::SocksAddr,
-    dns::manager::SharedResolver,
-    option::{DomainStrategy, OpenVpnClientEndpointOptions},
-};
-
 use super::{
     AllowCompressionPolicy, AuthFailedAdvance, AuthFailedInfo,
     ClientPullChallengeContext, ClientPullError, ClientPullOptions,
@@ -30,6 +23,12 @@ use super::{
     negotiate_tls_client_renegotiation_data_channel,
     resolve_allow_compression_policy, resolve_compression_settings,
     split_local_address_prefixes, split_tunnel_routes,
+};
+use crate::{
+    adapter::Dialer,
+    common::network::SocksAddr,
+    dns::manager::SharedResolver,
+    option::{DomainStrategy, OpenVpnClientEndpointOptions},
 };
 
 pub const OPENVPN_DEFAULT_TLS_TIMEOUT: Duration = Duration::from_secs(2);

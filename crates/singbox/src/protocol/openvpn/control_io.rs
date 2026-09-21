@@ -11,14 +11,13 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    adapter::{Dialer, PacketStream, Stream},
-    common::network::SocksAddr,
-};
-
 use super::{
     IncomingControlEvent, Packet, TlsControlChannelCore,
     TlsControlChannelMuxCore, read_stream_packet, write_stream_packet,
+};
+use crate::{
+    adapter::{Dialer, PacketStream, Stream},
+    common::network::SocksAddr,
 };
 
 #[async_trait]

@@ -734,14 +734,16 @@ fn escape_xml(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use http::{HeaderMap, Request};
+    use time::macros::datetime;
+
     use super::*;
     use crate::protocol::openconnect::{
         AnyConnectAuthHttpTransport, AnyConnectAuthRawHttpResponse,
     };
-    use async_trait::async_trait;
-    use http::{HeaderMap, Request};
-    use std::sync::{Arc, Mutex};
-    use time::macros::datetime;
 
     #[test]
     fn token_filters_only_upstream_cookie_fields() {

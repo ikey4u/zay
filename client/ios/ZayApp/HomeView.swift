@@ -122,16 +122,7 @@ struct HomeView: View {
     }
 
     private var brand: some View {
-        Text("ZAY")
-            .font(.custom(ZayTheme.brandFont, size: 64))
-            .tracking(10)
-            .foregroundStyle(
-                LinearGradient(
-                    colors: [ZayTheme.ink, ZayTheme.accent],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-            )
+        ZayWordmark()
     }
 
     private var statusLine: some View {

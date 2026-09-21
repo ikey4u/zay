@@ -14,12 +14,7 @@ mod simulator_probe;
 mod singbox_config;
 mod singbox_runtime;
 
-use std::ffi::c_char;
-use std::path::PathBuf;
-
-use crate::error::{clear_error, cstr, set_error, to_cstring};
-use crate::mesh_config::MeshInput;
-use crate::singbox_config::SingboxInput;
+use std::{ffi::c_char, path::PathBuf};
 
 pub use error::{zay_ios_free_string, zay_ios_last_error};
 #[cfg(all(target_os = "ios", target_abi = "sim"))]
@@ -28,6 +23,12 @@ pub use singbox_runtime::{
     ZayIosOpenTunCallback, zay_ios_reload_singbox,
     zay_ios_select_singbox_outbound, zay_ios_singbox_groups_json,
     zay_ios_start_singbox, zay_ios_stop_singbox, zay_ios_url_test_singbox,
+};
+
+use crate::{
+    error::{clear_error, cstr, set_error, to_cstring},
+    mesh_config::MeshInput,
+    singbox_config::SingboxInput,
 };
 
 /// Set the log file path (App Group container). Pass null to disable file logging.

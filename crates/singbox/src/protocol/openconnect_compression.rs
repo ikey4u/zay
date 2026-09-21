@@ -3,10 +3,11 @@
 //! LZS is a direct safe-Rust port of OpenConnect's LGPL-2.1 `lzs.c` algorithm;
 //! LZ4 block encoding is delegated to `lz4_flex`.
 
-use super::{CSTP_MAX_PAYLOAD_SIZE, CstpCompression, CstpError};
 use flate2::{
     Compress, Compression, Decompress, FlushCompress, FlushDecompress,
 };
+
+use super::{CSTP_MAX_PAYLOAD_SIZE, CstpCompression, CstpError};
 
 pub const ANYCONNECT_MINIMUM_COMPRESSION_SIZE: usize = 40;
 const LZS_HASH_TABLE_SIZE: usize = 1 << 16;

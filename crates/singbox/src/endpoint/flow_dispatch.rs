@@ -2200,6 +2200,13 @@ fn finish_checksum(mut sum: u32) -> u16 {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        io,
+        net::{IpAddr, Ipv6Addr},
+        sync::{Arc, Mutex, Weak, atomic::Ordering},
+        time::{Duration, Instant},
+    };
+
     use super::{
         EmbeddedPacket, FlowDispatcher, ParsedPacket, Rewrite,
         TCP_CLOSING_TIMEOUT, TCP_TRANSITORY_TIMEOUT, UDP_TIMEOUT,
@@ -2216,12 +2223,6 @@ mod tests {
         option::Options,
         outbound::OutboundManager,
         route::Router,
-    };
-    use std::{
-        io,
-        net::{IpAddr, Ipv6Addr},
-        sync::{Arc, Mutex, Weak, atomic::Ordering},
-        time::{Duration, Instant},
     };
 
     #[derive(Default)]

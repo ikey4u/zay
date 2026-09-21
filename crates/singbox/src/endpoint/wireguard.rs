@@ -13,9 +13,20 @@ use boringtun::{
     x25519::{PublicKey, StaticSecret},
 };
 use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
-use tokio_util::task::AbortOnDropHandle;
+use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 
+use super::{
+    tokio_smoltcp::{
+        BufferSize, Net, NetConfig, UdpSocket as SmoltcpUdpSocket,
+        channel_device::ChannelDevice,
+        smoltcp::{
+            iface::Config as SmoltcpInterfaceConfig,
+            phy::{DeviceCapabilities, Medium},
+            wire::{HardwareAddress, IpAddress, IpCidr},
+        },
+    },
+    userspace_router::UserspaceEndpointRouter,
+};
 use crate::{
     adapter::{
         DialFuture, Dialer, IcmpResponse, IpPacketPort, IpPacketReturn,
@@ -30,17 +41,6 @@ use crate::{
     outbound::OutboundManager,
     route::Router,
 };
-
-use super::tokio_smoltcp::{
-    BufferSize, Net, NetConfig, UdpSocket as SmoltcpUdpSocket,
-    channel_device::ChannelDevice,
-    smoltcp::{
-        iface::Config as SmoltcpInterfaceConfig,
-        phy::{DeviceCapabilities, Medium},
-        wire::{HardwareAddress, IpAddress, IpCidr},
-    },
-};
-use super::userspace_router::UserspaceEndpointRouter;
 
 const MIN_PACKET_BUFFER: usize = 2048;
 const WIREGUARD_OVERHEAD: usize = 256;
@@ -1424,7 +1424,6 @@ fn action(result: TunnResult<'_>) -> io::Result<WireGuardAction> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     use crate::{
         option::DirectOutboundOptions, protocol::direct::DirectOutbound,
     };

@@ -21,14 +21,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
-
-use crate::{
-    common::json::{merge_value, strip_comments},
-    constant, schema,
-};
-
 pub use base::*;
 pub use certificate::*;
 pub use cloudflared::*;
@@ -39,11 +31,18 @@ pub use openconnect::*;
 pub use openvpn::*;
 pub use protocol::*;
 pub use route::*;
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 pub use tailscale::*;
 pub use tls::*;
 pub use types::{
     Addr, DnsQueryType, DomainStrategy, Duration, FwMark, Listable,
     MemoryBytes, Network, NetworkBytesCompat, NetworkList, Prefix, Prefixable,
+};
+
+use crate::{
+    common::json::{merge_value, strip_comments},
+    constant, schema,
 };
 
 #[derive(Debug, thiserror::Error)]
