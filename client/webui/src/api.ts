@@ -59,6 +59,11 @@ export type ZayConfig = {
 
 export type StateResponse = {
   version: string
+  platform: {
+    os: string
+    arch: string
+    process_attribution: string
+  }
   core: {
     running: boolean
     health: "stopped" | "starting" | "healthy" | "degraded" | "failed" | "stopping"

@@ -840,6 +840,11 @@ async fn snapshot(state: &AppState) -> ApiResult<JsonValue> {
         };
     Ok(json!({
         "version": env!("ZAY_VERSION"),
+        "platform": {
+            "os": std::env::consts::OS,
+            "arch": std::env::consts::ARCH,
+            "process_attribution": crate::platform::process_attribution::backend_name(),
+        },
         "core": core,
         "mesh": mesh,
         "proxy_nodes": proxy_nodes(

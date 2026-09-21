@@ -52,6 +52,8 @@ use crate::{
 const MAX_PACKET_SIZE: usize = 65_535;
 const TCP_PROCESS_CACHE_TTL: Duration = Duration::from_secs(10);
 const TCP_PROCESS_CACHE_LIMIT: usize = 4096;
+const UDP_PROCESS_CACHE_TTL: Duration = Duration::from_secs(10);
+const UDP_PROCESS_CACHE_LIMIT: usize = 4096;
 const ICMP_FRAGMENT_TIMEOUT: Duration = Duration::from_secs(10);
 const ICMP_FRAGMENT_MAX_ENTRIES: usize = 256;
 const ICMP_FRAGMENT_MAX_BYTES: usize = 8 * 1024 * 1024;
@@ -85,6 +87,7 @@ enum TransportPacket {
         initial_syn: bool,
     },
     Udp {
+        source: SocketAddr,
         destination: SocketAddr,
     },
     IcmpEcho {
@@ -103,6 +106,17 @@ struct TcpProcessKey {
 }
 
 struct CachedTcpProcess {
+    captured_at: Instant,
+    lookup: ProcessLookupResult,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct UdpProcessKey {
+    source: SocketAddr,
+    destination: SocketAddr,
+}
+
+struct CachedUdpProcess {
     captured_at: Instant,
     lookup: ProcessLookupResult,
 }
@@ -130,6 +144,7 @@ pub(crate) struct UserspaceEndpointRouter {
     cancellation: CancellationToken,
     tcp_connections: Arc<Mutex<HashMap<u64, CancellationToken>>>,
     tcp_processes: Arc<Mutex<HashMap<TcpProcessKey, CachedTcpProcess>>>,
+    udp_processes: Mutex<HashMap<UdpProcessKey, CachedUdpProcess>>,
     tcp_listeners: Mutex<HashMap<SocketAddr, TcpListenerEntry>>,
     udp_listeners: Mutex<HashMap<SocketAddr, UdpListenerEntry>>,
     udp_state: Mutex<UdpState>,
@@ -192,6 +207,7 @@ impl UserspaceEndpointRouter {
             cancellation,
             tcp_connections: Arc::new(Mutex::new(HashMap::new())),
             tcp_processes: Arc::new(Mutex::new(HashMap::new())),
+            udp_processes: Mutex::new(HashMap::new()),
             tcp_listeners: Mutex::new(HashMap::new()),
             udp_listeners: Mutex::new(HashMap::new()),
             udp_state: Mutex::new(UdpState::new(udp_timeout)),
@@ -241,7 +257,29 @@ impl UserspaceEndpointRouter {
                 self.ensure_tcp_listener(destination).await?;
                 Ok(true)
             }
-            TransportPacket::Udp { destination } => {
+            TransportPacket::Udp {
+                source,
+                destination,
+            } => {
+                if cached_udp_process(&self.udp_processes, source, destination)
+                    .await
+                    .is_none()
+                {
+                    let lookup = self.router.lookup_process_owner(
+                        Network::Udp,
+                        source,
+                        Some(destination),
+                    );
+                    if lookup.process.is_some() {
+                        remember_udp_process(
+                            &self.udp_processes,
+                            source,
+                            destination,
+                            lookup,
+                        )
+                        .await;
+                    }
+                }
                 self.ensure_udp_listener(destination).await?;
                 Ok(true)
             }
@@ -550,11 +588,17 @@ impl UserspaceEndpointRouter {
         payload: Vec<u8>,
     ) {
         let original = SocksAddr::from(original_destination);
+        let captured_process = cached_udp_process(
+            &self.udp_processes,
+            source,
+            original_destination,
+        )
+        .await;
         if self
             .dns_hijack_addresses
             .contains(&original_destination.ip())
         {
-            let metadata = Metadata {
+            let mut metadata = Metadata {
                 inbound: self.tag.clone(),
                 source: Some(source.into()),
                 destination: Some(original.clone()),
@@ -562,6 +606,7 @@ impl UserspaceEndpointRouter {
                 protocol: "dns".into(),
                 ..Metadata::default()
             };
+            apply_process_lookup(&mut metadata, captured_process);
             if let Ok(response) = hijack_dns_packet_with_context(
                 &payload,
                 &self.outbounds,
@@ -638,6 +683,7 @@ impl UserspaceEndpointRouter {
             network: Some(Network::Udp),
             ..Metadata::default()
         };
+        apply_process_lookup(&mut metadata, captured_process);
         let decision = {
             let mut state = self.udp_state.lock().await;
             match state
@@ -915,6 +961,7 @@ impl UserspaceEndpointRouter {
         state.sniff_sessions = PacketSniffSessions::new(self.udp_timeout);
         drop(state);
         self.tcp_processes.lock().await.clear();
+        self.udp_processes.lock().await.clear();
     }
 }
 
@@ -1010,6 +1057,78 @@ async fn take_tcp_process(
 fn prune_tcp_processes(cache: &mut HashMap<TcpProcessKey, CachedTcpProcess>) {
     cache
         .retain(|_, value| value.captured_at.elapsed() < TCP_PROCESS_CACHE_TTL);
+}
+
+async fn remember_udp_process(
+    cache: &Mutex<HashMap<UdpProcessKey, CachedUdpProcess>>,
+    source: SocketAddr,
+    destination: SocketAddr,
+    lookup: ProcessLookupResult,
+) {
+    let mut cache = cache.lock().await;
+    prune_udp_processes(&mut cache);
+    if cache.len() >= UDP_PROCESS_CACHE_LIMIT
+        && let Some(oldest) = cache
+            .iter()
+            .min_by_key(|(_, value)| value.captured_at)
+            .map(|(key, _)| *key)
+    {
+        cache.remove(&oldest);
+    }
+    cache.insert(
+        UdpProcessKey {
+            source,
+            destination,
+        },
+        CachedUdpProcess {
+            captured_at: Instant::now(),
+            lookup,
+        },
+    );
+}
+
+async fn cached_udp_process(
+    cache: &Mutex<HashMap<UdpProcessKey, CachedUdpProcess>>,
+    source: SocketAddr,
+    destination: SocketAddr,
+) -> Option<ProcessLookupResult> {
+    let mut cache = cache.lock().await;
+    prune_udp_processes(&mut cache);
+    cache
+        .get(&UdpProcessKey {
+            source,
+            destination,
+        })
+        .or_else(|| {
+            cache
+                .iter()
+                .find(|(candidate, _)| candidate.source == source)
+                .map(|(_, cached)| cached)
+        })
+        .map(|cached| cached.lookup.clone())
+}
+
+fn prune_udp_processes(cache: &mut HashMap<UdpProcessKey, CachedUdpProcess>) {
+    cache
+        .retain(|_, value| value.captured_at.elapsed() < UDP_PROCESS_CACHE_TTL);
+}
+
+fn apply_process_lookup(
+    metadata: &mut Metadata,
+    lookup: Option<ProcessLookupResult>,
+) {
+    let Some(lookup) = lookup else {
+        return;
+    };
+    metadata.process_lookup = lookup.status.as_str().to_owned();
+    let Some(process) = lookup.process else {
+        return;
+    };
+    metadata.process_name = process.process_name;
+    metadata.process_path = process.process_path;
+    metadata.package_name = process.package_name;
+    metadata.user = process.user;
+    metadata.user_id = process.user_id;
 }
 
 impl Drop for UserspaceEndpointRouter {
@@ -1759,7 +1878,10 @@ fn parse_transport_packet(packet: &[u8]) -> io::Result<TransportPacket> {
     let destination_port = u16::from_be_bytes([transport[2], transport[3]]);
     let destination = SocketAddr::new(destination, destination_port);
     if protocol == 17 {
-        return Ok(TransportPacket::Udp { destination });
+        return Ok(TransportPacket::Udp {
+            source,
+            destination,
+        });
     }
     if transport.len() < 14 {
         return Err(invalid_packet("truncated TCP header"));
@@ -2106,10 +2228,10 @@ fn invalid_packet(message: impl Into<String>) -> io::Error {
 mod tests {
     use super::{
         FragmentDisposition, IcmpFragmentCache, NatKey, TransportPacket,
-        build_icmp_response_packet, cancel_tcp_connections,
+        build_icmp_response_packet, cached_udp_process, cancel_tcp_connections,
         icmp_response_source, icmpv6_checksum, internet_checksum,
         parse_transport_packet, prepare_icmp_egress, remember_tcp_process,
-        spawn_flow_writeback, take_tcp_process,
+        remember_udp_process, spawn_flow_writeback, take_tcp_process,
     };
     use crate::{
         adapter::{
@@ -2151,6 +2273,38 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn first_udp_packet_process_cache_survives_process_exit() {
+        let cache = tokio::sync::Mutex::new(std::collections::HashMap::new());
+        let source = "10.14.14.1:53000".parse().unwrap();
+        let destination = "198.51.100.7:53".parse().unwrap();
+        remember_udp_process(
+            &cache,
+            source,
+            destination,
+            ProcessLookupResult {
+                process: Some(ProcessInfo {
+                    process_name: "nslookup".into(),
+                    process_path: "/usr/bin/nslookup".into(),
+                    ..ProcessInfo::default()
+                }),
+                status: ProcessLookupStatus::Found,
+            },
+        )
+        .await;
+
+        let captured = cached_udp_process(&cache, source, destination)
+            .await
+            .expect("initial UDP process attribution should be cached");
+        assert_eq!(captured.status, ProcessLookupStatus::Found);
+        assert_eq!(captured.process.unwrap().process_path, "/usr/bin/nslookup");
+        assert!(
+            cached_udp_process(&cache, source, destination)
+                .await
+                .is_some()
+        );
+    }
+
     #[test]
     fn parses_ipv4_tcp_syn_and_udp_destinations() {
         let mut packet = vec![0_u8; 40];
@@ -2184,6 +2338,7 @@ mod tests {
         assert_eq!(
             parse_transport_packet(&packet).unwrap(),
             TransportPacket::Udp {
+                source: "10.0.0.2:12345".parse().unwrap(),
                 destination: "198.51.100.7:443".parse().unwrap(),
             }
         );
@@ -2249,6 +2404,7 @@ mod tests {
         assert_eq!(
             parse_transport_packet(&packet).unwrap(),
             TransportPacket::Udp {
+                source: "[fd00::2]:12345".parse().unwrap(),
                 destination: "[2001:db8::7]:53".parse().unwrap(),
             }
         );

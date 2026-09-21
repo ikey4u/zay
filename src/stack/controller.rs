@@ -449,11 +449,7 @@ fn wait_for_initial_proxy_health(
 ) -> Result<()> {
     if crate::singbox::tun_route::singbox_tun_enabled(settings) {
         let ready_deadline = Instant::now() + Duration::from_secs(45);
-        while !logs
-            .recent()
-            .iter()
-            .any(|line| line.trim() == crate::native_tun_worker::READY_MESSAGE)
-        {
+        while !native_tun_worker_ready(settings, logs) {
             if stop.load(Ordering::SeqCst) {
                 bail!("proxy health monitor stopped before TUN became ready");
             }
@@ -477,6 +473,24 @@ fn wait_for_initial_proxy_health(
             Err(_) => thread::sleep(Duration::from_millis(250)),
         }
     }
+}
+
+#[cfg(unix)]
+fn native_tun_worker_ready(_settings: &Settings, logs: &LogBuffer) -> bool {
+    logs.recent()
+        .iter()
+        .any(|line| line.trim() == crate::native_tun_worker::READY_MESSAGE)
+}
+
+#[cfg(windows)]
+fn native_tun_worker_ready(settings: &Settings, _logs: &LogBuffer) -> bool {
+    // The elevated worker writes this file only after the native runtime and
+    // its authenticated control pipe are ready. Its stdout is not inherited
+    // through the UAC boundary, so the Unix log marker is unavailable.
+    settings
+        .singbox_dir()
+        .join("sing-box-worker.json")
+        .is_file()
 }
 
 fn probe_proxy_health(settings: &Settings, timeout: Duration) -> Result<()> {

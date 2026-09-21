@@ -98,7 +98,7 @@ rustls = { version = "0.23", default-features = false, features = ["brotli", "pr
 rustls-acme = { version = "0.15.4", default-features = false, features = ["aws-lc-rs", "tokio", "webpki-roots"] }
 rustls-native-certs = "0.8.4"
 rustls-pemfile = "2"
-rusqlite = "0.39"
+rusqlite = { version = "0.39", features = ["bundled"] }
 russh = "0.60"
 scraper = "0.18.1"
 serde = { version = "1", features = ["derive"] }

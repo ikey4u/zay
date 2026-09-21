@@ -349,8 +349,39 @@ pub(crate) fn resolver() -> Option<Arc<dyn ProcessResolver>> {
     {
         Some(macos::resolver())
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    {
+        singbox_core::native_process_resolver()
+    }
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "linux",
+        target_os = "windows"
+    )))]
     {
         None
+    }
+}
+
+pub(crate) const fn backend_name() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        "network-extension+socket-snapshot"
+    }
+    #[cfg(target_os = "linux")]
+    {
+        "inet-diag+procfs"
+    }
+    #[cfg(target_os = "windows")]
+    {
+        "ip-helper-api"
+    }
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "linux",
+        target_os = "windows"
+    )))]
+    {
+        "unavailable"
     }
 }
