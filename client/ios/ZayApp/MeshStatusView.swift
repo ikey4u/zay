@@ -1,12 +1,12 @@
 import SwiftUI
 
 struct MeshStatusView: View {
+    @EnvironmentObject private var powerPolicy: PowerPolicy
     @StateObject private var vpn = VPNManager.shared
     @State private var report: MeshStatusReport = .empty
     @State private var errorText: String?
     @State private var isLoading = false
     @State private var expandedIDs: Set<String> = []
-    @State private var autoRefresh = true
 
     var body: some View {
         List {
@@ -38,11 +38,12 @@ struct MeshStatusView: View {
             }
         }
         .refreshable { await refresh() }
-        .task {
+        .task(id: powerPolicy.meshRefreshInterval) {
             await refresh()
+            guard let interval = powerPolicy.meshRefreshInterval else { return }
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 5_000_000_000)
-                guard autoRefresh, !Task.isCancelled else { continue }
+                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                guard !Task.isCancelled else { return }
                 await refresh(silent: true)
             }
         }
@@ -89,12 +90,22 @@ struct MeshStatusView: View {
         } header: {
             Text("总览")
         } footer: {
-            Text("数据来自隧道内 EasyTier；下拉或点右上角刷新。")
+            Text(refreshFooter)
                 .font(.custom(ZayTheme.captionFont, size: 12))
         }
     }
 
     private var overview: MeshOverview { report.overview }
+
+    private var refreshFooter: String {
+        if powerPolicy.scenePhase != .active {
+            return "页面不活跃，已停止自动刷新。下拉可手动刷新。"
+        }
+        if powerPolicy.isLowPowerModeEnabled {
+            return "低电量模式：每 45 秒刷新；离开页面后停止。"
+        }
+        return "每 15 秒刷新；离开页面或进入后台后停止。"
+    }
 
     private func overviewRow(_ title: String, _ value: String, valueColor: Color = ZayTheme.inkSecondary) -> some View {
         HStack {

@@ -6,7 +6,16 @@ Mesh（EasyTier）+ 全局 TUN 代理（sing-box）的 iOS 客户端。
 
 ## 功能
 
-在 App 中填写：
+App 使用四个原生主界面：
+
+- **主页**：安装、启动或停止唯一的系统 VPN 隧道，并查看当前出口与 Mesh 状态。
+- **代理**：管理订阅、选择/测速节点，以及维护内置和自定义规则。
+- **Mesh**：按需启用 EasyTier、编辑网络参数并查看节点状态。
+- **更多**：查看脱敏运行日志、能耗策略与重置 VPN 配置。
+
+代理与 Mesh 仍共用一个 Packet Tunnel。Mesh 默认关闭；启用后与代理一样由 Network Extension 在 App 后台或锁屏时保持运行。App 侧状态刷新只在相关页面可见且 App 位于前台时运行，系统低电量模式下会自动降频或停止日志轮询，但不会停止隧道内核。
+
+主要配置字段：
 
 | 字段 | 示例 |
 | --- | --- |
@@ -15,7 +24,7 @@ Mesh（EasyTier）+ 全局 TUN 代理（sing-box）的 iOS 客户端。
 | 网络名 / 密钥 | 与桌面 `zay` / EasyTier 节点一致 |
 | Mesh IP（可选） | `10.126.126.5/24`；留空则 DHCP |
 
-点击 **启动** 后：
+点击主页的 **立即连接** 后：
 
 1. Network Extension 内启动 EasyTier（`no_tun` + 本地 SOCKS5）
 2. 启动 ZayCore 内嵌的 Rust singbox library 占用 Packet Tunnel → **全局代理**
@@ -65,7 +74,7 @@ iOS 只有一个 Packet Tunnel：sing-box 占用真实 utun；mesh CIDR 经 sing
 
 ## 调试
 
-- **设置 → 运行日志**：复制 / 导出诊断包（含配置脱敏 + 日志尾部 + 最近失败）
+- **更多 → 运行日志**：复制 / 导出诊断包（含配置脱敏 + 日志尾部 + 最近失败）
 - App Group 文件：`…/logs/zay-ios.log`、`…/last-failure.txt`
 - Extension 控制台：Xcode → Debug → Attach to Process → `ZayTunnel`
 - 生成的 sing-box 配置：`…/run/config.json`

@@ -23,9 +23,9 @@ pub fn ensure_installed(working_dir: &Path) -> Result<()> {
     let installed = fs::read_to_string(&version_path)
         .ok()
         .map(|s| s.trim().to_string());
-    // Install all sets (incl. large `direct`/`reject`) so progressive stages can
-    // reference them after cold start; stage 0 only wires the small subset.
-    let stamp = format!("{EMBEDDED_VERSION}+ios-full-disk");
+    // `direct` and `reject` are precompiled by build.rs. Keeping their multi-MB
+    // source documents out of the extension avoids source-parser memory spikes.
+    let stamp = format!("{EMBEDDED_VERSION}+ios-srs-v1");
     let version_changed = installed.as_deref() != Some(stamp.as_str());
 
     // Packet Tunnel cannot match by process — drop leftover applications sets.
@@ -44,9 +44,28 @@ pub fn ensure_installed(working_dir: &Path) -> Result<()> {
         if never_on_ios(id) {
             continue;
         }
+        if matches!(*id, "direct" | "reject") {
+            let legacy = dir.join(format!("{id}.json"));
+            if legacy.is_file() {
+                let _ = fs::remove_file(legacy);
+            }
+            continue;
+        }
         let path = dir.join(format!("{id}.json"));
         if version_changed || !rule_file_valid(&path) {
             fs::write(&path, json)
+                .with_context(|| format!("writing embedded rule-set {id}"))?;
+            written += 1;
+        }
+    }
+
+    for (id, binary) in [
+        ("direct", EMBEDDED_DIRECT_SRS),
+        ("reject", EMBEDDED_REJECT_SRS),
+    ] {
+        let path = dir.join(format!("{id}.srs"));
+        if version_changed || !binary_ok(&path) {
+            fs::write(&path, binary)
                 .with_context(|| format!("writing embedded rule-set {id}"))?;
             written += 1;
         }
@@ -89,13 +108,24 @@ pub fn ensure_installed(working_dir: &Path) -> Result<()> {
 pub fn info_json(working_dir: Option<&Path>) -> String {
     let mut sets = Vec::new();
     for (id, json) in EMBEDDED_RULE_SETS {
-        let bytes = json.len();
         let skipped = never_on_ios(id);
         let heavy = matches!(*id, "reject" | "direct");
+        let bytes = match *id {
+            "direct" => EMBEDDED_DIRECT_SRS.len(),
+            "reject" => EMBEDDED_REJECT_SRS.len(),
+            _ => json.len(),
+        };
         let on_disk = working_dir
             .map(|d| {
-                let p = d.join(EMBEDDED_RULESET_DIR).join(format!("{id}.json"));
-                rule_file_valid(&p)
+                let extension = if heavy { "srs" } else { "json" };
+                let p = d
+                    .join(EMBEDDED_RULESET_DIR)
+                    .join(format!("{id}.{extension}"));
+                if heavy {
+                    binary_ok(&p)
+                } else {
+                    rule_file_valid(&p)
+                }
             })
             .unwrap_or(false);
         sets.push(json!({
@@ -105,12 +135,10 @@ pub fn info_json(working_dir: Option<&Path>) -> String {
             "skipped": skipped,
             "skip_reason": if skipped {
                 "ios-process"
-            } else if heavy {
-                "ios-progressive"
             } else {
                 ""
             },
-            "kind": "source"
+            "kind": if heavy { "binary" } else { "source" }
         }));
     }
     sets.push(json!({

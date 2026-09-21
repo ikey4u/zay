@@ -2,7 +2,6 @@ import SwiftUI
 import UIKit
 
 enum AppRoute: Hashable {
-    case settings
     case edit(SettingField)
     case logs
     case meshStatus

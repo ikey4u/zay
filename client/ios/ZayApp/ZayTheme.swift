@@ -6,6 +6,7 @@ enum ZayTheme {
     static let canvas = Color(uiColor: .systemGroupedBackground)
     static let canvasDeep = Color(uiColor: .secondarySystemGroupedBackground)
     static let surface = Color(uiColor: .secondarySystemGroupedBackground)
+    static let raisedSurface = Color(uiColor: .tertiarySystemGroupedBackground)
     static let ink = Color(uiColor: .label)
     static let inkSecondary = Color(uiColor: .secondaryLabel)
     static let inkTertiary = Color(uiColor: .tertiaryLabel)
@@ -63,6 +64,122 @@ enum ZayTheme {
     static let bodyFont = "AvenirNext-Medium"
     static let captionFont = "AvenirNext-Regular"
     static let monoFont = "Menlo-Regular"
+}
+
+struct ZayPageHeader: View {
+    let eyebrow: String
+    let title: String
+    let detail: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(eyebrow.uppercased())
+                .font(.custom(ZayTheme.captionFont, size: 11))
+                .tracking(1.6)
+                .foregroundStyle(ZayTheme.accent)
+            Text(title)
+                .font(.custom(ZayTheme.titleFont, size: 30))
+                .foregroundStyle(ZayTheme.ink)
+            Text(detail)
+                .font(.custom(ZayTheme.captionFont, size: 14))
+                .foregroundStyle(ZayTheme.inkSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+struct ZayCard<Content: View>: View {
+    private let content: Content
+
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    var body: some View {
+        content
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(ZayTheme.surface)
+            .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .stroke(ZayTheme.hairline.opacity(0.45), lineWidth: 0.5)
+            )
+    }
+}
+
+struct ZaySectionTitle: View {
+    let title: String
+    var detail: String? = nil
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(title)
+                .font(.custom(ZayTheme.titleFont, size: 18))
+                .foregroundStyle(ZayTheme.ink)
+            Spacer()
+            if let detail {
+                Text(detail)
+                    .font(.custom(ZayTheme.captionFont, size: 12))
+                    .foregroundStyle(ZayTheme.inkTertiary)
+            }
+        }
+    }
+}
+
+struct ZayNavigationRow: View {
+    let icon: String
+    let title: String
+    var detail: String = ""
+    var tint: Color = ZayTheme.accent
+
+    var body: some View {
+        HStack(spacing: 13) {
+            Image(systemName: icon)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(tint)
+                .frame(width: 34, height: 34)
+                .background(tint.opacity(0.12))
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.custom(ZayTheme.bodyFont, size: 16))
+                    .foregroundStyle(ZayTheme.ink)
+                if !detail.isEmpty {
+                    Text(detail)
+                        .font(.custom(ZayTheme.captionFont, size: 12))
+                        .foregroundStyle(ZayTheme.inkTertiary)
+                        .lineLimit(2)
+                }
+            }
+            Spacer(minLength: 8)
+            Image(systemName: "chevron.right")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(ZayTheme.inkTertiary)
+        }
+        .contentShape(Rectangle())
+    }
+}
+
+struct ZayStatusPill: View {
+    let title: String
+    let color: Color
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(color)
+                .frame(width: 7, height: 7)
+            Text(title)
+                .font(.custom(ZayTheme.captionFont, size: 12))
+                .foregroundStyle(color)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(color.opacity(0.10))
+        .clipShape(Capsule())
+    }
 }
 
 struct ZayCanvas: View {

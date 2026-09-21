@@ -10,8 +10,8 @@ enum ZayLog {
     private static var memoryLines: [String] = []
     private static let maxMemoryLines = 400
     private static var resolvedLogURL: URL?
-    /// Soft cap for shared log file (bytes). Rotated when exceeded.
-    private static let maxLogFileBytes: UInt64 = 1_500_000
+    /// Keep the active file plus one rotated backup within roughly 200 MiB.
+    private static let maxLogFileBytes: UInt64 = 100 * 1024 * 1024
 
     /// Shows in Xcode console when the corresponding process is being debugged.
     private static let logger = Logger(subsystem: "dev.zay.ios", category: "zay")

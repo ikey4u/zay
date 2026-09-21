@@ -13312,6 +13312,8 @@ dependencies = [
  "base64 0.22.1",
  "easytier",
  "easytier-core",
+ "flate2",
+ "ipnet",
  "libc",
  "log",
  "once_cell",

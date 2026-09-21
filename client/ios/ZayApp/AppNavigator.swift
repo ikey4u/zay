@@ -4,10 +4,6 @@ import SwiftUI
 final class AppNavigator: ObservableObject {
     @Published var path = NavigationPath()
 
-    func openSettings() {
-        path.append(AppRoute.settings)
-    }
-
     func open(_ route: AppRoute) {
         path.append(route)
     }

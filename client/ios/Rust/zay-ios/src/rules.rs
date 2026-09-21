@@ -87,7 +87,7 @@ pub fn never_on_ios(id: &str) -> bool {
     id == "applications"
 }
 
-/// Multi‑MB source sets loaded only at higher progressive stages.
+/// Large sets are precompiled to SRS and loaded at higher stages.
 fn ios_memory_heavy(id: &str) -> bool {
     matches!(id, "reject" | "direct")
 }
@@ -132,14 +132,29 @@ pub fn rule_set_definitions(
     let mut defs: Vec<Value> = RULE_SETS
         .iter()
         .filter(|def| include_ruleset(def.id, stage))
-        .filter(|def| rule_file_valid(&dir.join(format!("{}.json", def.id))))
+        .filter(|def| {
+            if ios_memory_heavy(def.id) {
+                binary_ok(&dir.join(format!("{}.srs", def.id)))
+            } else {
+                rule_file_valid(&dir.join(format!("{}.json", def.id)))
+            }
+        })
         .map(|def| {
-            json!({
-                "type": "local",
-                "tag": def.id,
-                "format": "source",
-                "path": format!("{EMBEDDED_RULESET_DIR}/{}.json", def.id)
-            })
+            if ios_memory_heavy(def.id) {
+                json!({
+                    "type": "local",
+                    "tag": def.id,
+                    "format": "binary",
+                    "path": format!("{EMBEDDED_RULESET_DIR}/{}.srs", def.id)
+                })
+            } else {
+                json!({
+                    "type": "local",
+                    "tag": def.id,
+                    "format": "source",
+                    "path": format!("{EMBEDDED_RULESET_DIR}/{}.json", def.id)
+                })
+            }
         })
         .collect();
 
