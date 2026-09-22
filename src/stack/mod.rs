@@ -17,7 +17,6 @@ use crate::{
     bootstrap::singbox as bootstrap,
     settings::{
         self as zay_settings, MeshConfig, MeshRole, Settings, StackFlags,
-        default_zay_toml,
     },
     singbox::{self, assets, rules},
 };
@@ -392,15 +391,7 @@ pub(crate) fn spawn_tun_worker(
 
 pub(crate) fn ensure_stack_config_exists(common: &ProxyOpts) -> Result<()> {
     let (data_dir, toml_path) = stack_config_paths(common);
-    if toml_path.is_file() {
-        return Ok(());
-    }
-    fs::create_dir_all(&data_dir)
-        .with_context(|| format!("creating data dir {}", data_dir.display()))?;
-    fs::write(&toml_path, default_zay_toml())
-        .with_context(|| format!("writing {}", toml_path.display()))?;
-    eprintln!("created default config at {}", toml_path.display());
-    Ok(())
+    zay_settings::ensure_zay_toml(&data_dir, &toml_path)
 }
 
 fn zay_toml_has_mesh(toml_path: &PathBuf) -> Result<bool> {

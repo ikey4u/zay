@@ -91,7 +91,7 @@ struct HomeView: View {
                     dashboardValue(title: "当前节点", value: selectedNode)
                 }
 
-                if !vpn.isInstalled || configStore.config.proxyURL.isEmpty {
+                if !vpn.isInstalled || configStore.config.proxyURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     Text(proxyConfigurationHint)
                         .font(.custom(ZayTheme.captionFont, size: 12))
                         .foregroundStyle(ZayTheme.inkSecondary)
@@ -379,10 +379,13 @@ struct HomeView: View {
 
     private var proxyConfigurationHint: String {
         if !vpn.isInstalled { return "首次开启时，iOS 会请求添加 VPN 配置。" }
-        return "尚未配置代理订阅，请先到代理页完成配置。"
+        return "未配置代理，流量走直连。需要分流时再添加订阅。"
     }
 
     private var selectedNode: String {
+        if configStore.config.proxyURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "直连"
+        }
         let tag = configStore.config.resolvedSelectedProxyTag
         return tag == "Auto" ? "自动选择" : tag
     }

@@ -79,6 +79,136 @@ fn main() {
     prepare_windows_runtime(&out_dir, target);
 
     embed_clash_rules(&out_dir);
+    embed_webui(&out_dir);
+}
+
+/// Build the WebUI and copy its outputs into OUT_DIR. `client/webui/dist` is a
+/// local build product and is not part of the source tree.
+fn embed_webui(out_dir: &Path) {
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    let webui_dir = manifest_dir.join("client/webui");
+    for relative in [
+        "src",
+        "public",
+        "index.html",
+        "package.json",
+        "package-lock.json",
+        "vite.config.ts",
+        "tsconfig.json",
+        "tsconfig.app.json",
+        "tsconfig.node.json",
+        "tailwind.config.ts",
+        "postcss.config.js",
+        "components.json",
+    ] {
+        println!(
+            "cargo:rerun-if-changed={}",
+            webui_dir.join(relative).display()
+        );
+    }
+
+    let staged = out_dir.join("webui");
+    fs::create_dir_all(&staged).expect("creating webui out dir");
+    let stamp_path = staged.join("stamp");
+    let stamp = webui_source_stamp(&webui_dir);
+    let outputs_ready = ["index.html", "app.js", "app.css", "logo.svg"]
+        .iter()
+        .all(|name| staged.join(name).is_file());
+    if outputs_ready
+        && fs::read_to_string(&stamp_path).ok().as_deref()
+            == Some(stamp.as_str())
+    {
+        return;
+    }
+
+    if !webui_dir.join("node_modules").is_dir() {
+        run_npm(&webui_dir, &["ci"]);
+    }
+    run_npm(&webui_dir, &["run", "build"]);
+
+    let dist = webui_dir.join("dist");
+    copy_file(&dist.join("index.html"), &staged.join("index.html"));
+    copy_file(&dist.join("assets/app.js"), &staged.join("app.js"));
+    copy_file(&dist.join("assets/app.css"), &staged.join("app.css"));
+    copy_file(&dist.join("logo.svg"), &staged.join("logo.svg"));
+    fs::write(&stamp_path, stamp).expect("writing webui stamp");
+}
+
+fn run_npm(webui_dir: &Path, args: &[&str]) {
+    let status = Command::new("npm")
+        .args(args)
+        .current_dir(webui_dir)
+        .status()
+        .unwrap_or_else(|error| {
+            panic!(
+                "failed to run npm {} in {}: {error}. Install Node.js to build the WebUI.",
+                args.join(" "),
+                webui_dir.display()
+            )
+        });
+    if !status.success() {
+        panic!("npm {} failed in {}", args.join(" "), webui_dir.display());
+    }
+}
+
+fn copy_file(from: &Path, to: &Path) {
+    fs::copy(from, to).unwrap_or_else(|error| {
+        panic!("copying {} to {}: {error}", from.display(), to.display())
+    });
+}
+
+fn webui_source_stamp(webui_dir: &Path) -> String {
+    let mut files = Vec::new();
+    collect_files(&webui_dir.join("src"), &mut files);
+    collect_files(&webui_dir.join("public"), &mut files);
+    for name in [
+        "index.html",
+        "package.json",
+        "package-lock.json",
+        "vite.config.ts",
+        "tsconfig.json",
+        "tsconfig.app.json",
+        "tsconfig.node.json",
+        "tailwind.config.ts",
+        "postcss.config.js",
+        "components.json",
+    ] {
+        files.push(webui_dir.join(name));
+    }
+    files.sort();
+    let mut hasher = Sha256::new();
+    for path in files {
+        let Ok(metadata) = fs::metadata(&path) else {
+            continue;
+        };
+        hasher.update(path.to_string_lossy().as_bytes());
+        hasher.update(metadata.len().to_le_bytes());
+        hasher.update(
+            metadata
+                .modified()
+                .ok()
+                .and_then(|time| {
+                    time.duration_since(std::time::UNIX_EPOCH).ok()
+                })
+                .map(|duration| duration.as_nanos().to_le_bytes())
+                .unwrap_or_default(),
+        );
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+fn collect_files(dir: &Path, files: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_files(&path, files);
+        } else {
+            files.push(path);
+        }
+    }
 }
 
 /// Keep in sync with `src/singbox/rules.rs` `RULE_SETS`.

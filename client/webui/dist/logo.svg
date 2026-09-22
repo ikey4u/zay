@@ -1,7 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96" role="img" aria-labelledby="title">
-  <title id="title">Zay</title>
-  <rect width="96" height="96" rx="22" fill="#071713"/>
-  <path d="M28 30h40L28 66h40" fill="none" stroke="#2DD4A3" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/>
-  <circle cx="28" cy="30" r="3" fill="#071713"/>
-  <circle cx="68" cy="66" r="3" fill="#071713"/>
-</svg>

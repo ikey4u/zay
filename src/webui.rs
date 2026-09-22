@@ -27,10 +27,12 @@ use toml_edit::{Array, ArrayOfTables, DocumentMut, Item, Table, Value, value};
 
 use crate::{runtime::CoreSupervisor, settings};
 
-const INDEX_HTML: &str = include_str!("../client/webui/dist/index.html");
-const APP_JS: &str = include_str!("../client/webui/dist/assets/app.js");
-const APP_CSS: &str = include_str!("../client/webui/dist/assets/app.css");
-const LOGO_SVG: &str = include_str!("../client/webui/dist/logo.svg");
+const INDEX_HTML: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/webui/index.html"));
+const APP_JS: &str = include_str!(concat!(env!("OUT_DIR"), "/webui/app.js"));
+const APP_CSS: &str = include_str!(concat!(env!("OUT_DIR"), "/webui/app.css"));
+const LOGO_SVG: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/webui/logo.svg"));
 
 fn default_listen() -> SocketAddr {
     "127.0.0.1:8787"

@@ -165,11 +165,7 @@ final class VPNManager: ObservableObject {
 
         // 2) Then require config to actually start the tunnel.
         guard config.isValid else {
-            if config.meshEnabled, !config.meshConfigReady {
-                lastError = "已启用 Mesh：请填写中继、网络名与密钥"
-            } else {
-                lastError = "请到设置填写代理 URL 后再启动"
-            }
+            lastError = "已启用 Mesh：请填写中继、网络名与密钥"
             statusDetail = lastError ?? ""
             return
         }
@@ -192,11 +188,11 @@ final class VPNManager: ObservableObject {
 
             // Warm subscription cache on App network before the Packet Tunnel starts.
             // Tunnel start often fails DNS/HTTPS while underlay is still settling.
-            if let working = AppGroup.workingDirectory?.path {
+            let proxyURL = config.proxyURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !proxyURL.isEmpty, let working = AppGroup.workingDirectory?.path {
                 statusDetail = "正在拉取订阅…"
-                let url = config.proxyURL
                 let ok = await Task.detached(priority: .userInitiated) {
-                    ZayNative.prefetchProxy(proxyURL: url, workingDir: working)
+                    ZayNative.prefetchProxy(proxyURL: proxyURL, workingDir: working)
                 }.value
                 if !ok {
                     ZayLog.warn("prefetch missed — tunnel will try cache / live fetch")

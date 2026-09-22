@@ -1,7 +1,24 @@
 # Complete documentation: https://github.com/ikey4u/zay/tree/main/docs
+#
+# Default: the proxy stack is on and subscriptions are empty, so traffic goes
+# direct. Add a subscription to send rule matches through a proxy. http, fwd,
+# ssh, and mesh stay unset until configured.
+
+[proxy]
+enabled = true
+subscriptions = []
+active_nodes = []
+gateway = false
+mixed_port = 7890
+update_interval = 3600
+health_check_url = "https://www.gstatic.com/generate_204"
+log_level = "info"
+
+[proxy.tun]
+enabled = true
+exclude_routes = []
 
 # [proxy]
-# enabled = true
 # subscriptions = ["https://subscription.example/clash"]
 # active_nodes = [] # empty = all subscription nodes; WebUI stores selected tags here
 # gateway = true

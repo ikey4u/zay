@@ -77,13 +77,22 @@ pub fn build_singbox_json(input: &SingboxInput) -> Result<String> {
     }
 
     let prefer_cache = input.prefer_cache.unwrap_or(false);
-    let resolved = resolve_proxy(&input.proxy_url, working_dir, prefer_cache)
-        .with_context(|| {
-        format!(
-            "resolving proxy_url {}",
-            redacted_proxy_url(&input.proxy_url)
+    let proxy_url = input.proxy_url.trim();
+    // No proxy is a direct-only tunnel: rule hits that would use Proxy stay on direct.
+    let resolved = if proxy_url.is_empty() {
+        None
+    } else {
+        Some(
+            resolve_proxy(proxy_url, working_dir, prefer_cache).with_context(
+                || {
+                    format!(
+                        "resolving proxy_url {}",
+                        redacted_proxy_url(proxy_url)
+                    )
+                },
+            )?,
         )
-    })?;
+    };
     let mut bypass_networks = BTreeSet::new();
     let mut bypass_domains = BTreeSet::new();
     for target in input
@@ -127,7 +136,8 @@ pub fn build_singbox_json(input: &SingboxInput) -> Result<String> {
         .map(str::to_string);
 
     let proxy_final = match resolved {
-        OutboundSpec::Single(ob) => {
+        None => "direct".to_string(),
+        Some(OutboundSpec::Single(ob)) => {
             let tag = ob
                 .get("tag")
                 .and_then(|t| t.as_str())
@@ -147,7 +157,7 @@ pub fn build_singbox_json(input: &SingboxInput) -> Result<String> {
             }));
             "Proxy".to_string()
         }
-        OutboundSpec::Many(nodes) => {
+        Some(OutboundSpec::Many(nodes)) => {
             if nodes.is_empty() {
                 bail!("subscription produced no proxy nodes");
             }
@@ -243,11 +253,13 @@ pub fn build_singbox_json(input: &SingboxInput) -> Result<String> {
             "ip_is_private": true,
             "outbound": "direct"
         }));
-        // VLESS Vision is TCP-oriented; reject QUIC when no rule-sets.
-        route_rules.push(json!({
-            "protocol": "quic",
-            "action": "reject"
-        }));
+        // VLESS Vision is TCP-oriented; reject QUIC only when a proxy is in use.
+        if proxy_final != "direct" {
+            route_rules.push(json!({
+                "protocol": "quic",
+                "action": "reject"
+            }));
+        }
     }
 
     let mut exclude = vec![
@@ -509,5 +521,23 @@ mod tests {
         assert!(exclusions.iter().any(|value| value == "192.0.2.10/32"));
         assert!(exclusions.iter().any(|value| value == "2001:db8::10/128"));
         assert!(!exclusions.iter().any(|value| value == "relay.example.com"));
+    }
+
+    #[test]
+    fn empty_proxy_url_uses_direct_without_a_proxy_selector() {
+        let input: SingboxInput = serde_json::from_value(serde_json::json!({
+            "proxy_url": "  ",
+            "mesh_cidrs": [],
+            "bypass_ips": []
+        }))
+        .unwrap();
+        let document: serde_json::Value =
+            serde_json::from_str(&build_singbox_json(&input).unwrap()).unwrap();
+        assert_eq!(document["route"]["final"], "direct");
+        let outbounds = document["outbounds"].as_array().unwrap();
+        assert!(outbounds.iter().any(|outbound| outbound["tag"] == "direct"));
+        assert!(outbounds.iter().all(|outbound| outbound["tag"] != "Proxy"));
+        let rules = document["route"]["rules"].as_array().unwrap();
+        assert!(rules.iter().all(|rule| rule["action"] != "reject"));
     }
 }

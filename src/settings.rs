@@ -8,6 +8,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_yaml::Value;
 use toml::Value as TomlValue;
+use toml_edit::{DocumentMut, Item};
 
 use crate::{ProxyOpts, bootstrap::proxy};
 
@@ -538,13 +539,52 @@ fn config_parent_dir(path: &Path) -> PathBuf {
 pub fn ensure_zay_toml(data_dir: &Path, toml_path: &Path) -> Result<()> {
     fs::create_dir_all(data_dir)
         .with_context(|| format!("creating data dir {}", data_dir.display()))?;
-    if toml_path.is_file() {
+    if !toml_path.is_file() {
+        fs::write(toml_path, default_zay_toml())
+            .with_context(|| format!("writing {}", toml_path.display()))?;
+        eprintln!("created default config at {}", toml_path.display());
         return Ok(());
     }
-    fs::write(toml_path, default_zay_toml())
-        .with_context(|| format!("writing {}", toml_path.display()))?;
-    eprintln!("created default config at {}", toml_path.display());
+    upgrade_blank_config(toml_path)
+}
+
+/// A comment-only or empty zay.toml has no enabled component, so startup
+/// fails. Replace that file with the direct-by-default stack. An explicit
+/// `[proxy] enabled = false` (or any other real section) is left alone.
+fn upgrade_blank_config(toml_path: &Path) -> Result<()> {
+    let raw = fs::read_to_string(toml_path)
+        .with_context(|| format!("reading {}", toml_path.display()))?;
+    let doc = match raw.parse::<DocumentMut>() {
+        Ok(doc) => doc,
+        Err(_) => return Ok(()),
+    };
+    if !is_blank_config(&doc) {
+        return Ok(());
+    }
+    fs::write(toml_path, default_zay_toml()).with_context(|| {
+        format!("writing default config {}", toml_path.display())
+    })?;
+    eprintln!("wrote default direct config at {}", toml_path.display());
     Ok(())
+}
+
+fn is_blank_config(doc: &DocumentMut) -> bool {
+    for key in ["proxy", "http", "fwd", "ssh"] {
+        if doc.get(key).is_some_and(item_has_values) {
+            return false;
+        }
+    }
+    true
+}
+
+fn item_has_values(item: &Item) -> bool {
+    if let Some(table) = item.as_table() {
+        return !table.is_empty();
+    }
+    if let Some(tables) = item.as_array_of_tables() {
+        return !tables.is_empty();
+    }
+    false
 }
 
 /// Load the configuration used by the no-subcommand persistent runner.
@@ -765,6 +805,40 @@ mod tests {
 
         assert!(!default_zay_toml().contains("[mihomo]"));
         assert!(parsed.proxy.mixin.is_none());
+        assert!(parsed.proxy.enabled);
+        assert!(parsed.proxy.subscriptions.is_empty());
+        assert!(parsed.proxy.tun.enabled);
+        assert!(parsed.http.is_empty());
+        assert!(parsed.fwd.is_empty());
+        assert!(parsed.ssh.is_empty());
+    }
+
+    #[test]
+    fn blank_config_is_replaced_with_the_direct_default() {
+        let directory = std::env::temp_dir().join(format!(
+            "zay-blank-config-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let toml_path = directory.join(ZAY_TOML_FILE);
+        fs::write(&toml_path, "# [proxy]\n# enabled = true\n").unwrap();
+
+        ensure_zay_toml(&directory, &toml_path).unwrap();
+        let parsed: ZayFile =
+            toml::from_str(&fs::read_to_string(&toml_path).unwrap()).unwrap();
+        assert!(parsed.proxy.enabled);
+        assert!(parsed.proxy.subscriptions.is_empty());
+
+        fs::write(&toml_path, "[proxy]\nenabled = false\n").unwrap();
+        ensure_zay_toml(&directory, &toml_path).unwrap();
+        let kept: ZayFile =
+            toml::from_str(&fs::read_to_string(&toml_path).unwrap()).unwrap();
+        assert!(!kept.proxy.enabled);
+        let _ = fs::remove_dir_all(&directory);
     }
 
     #[test]

@@ -79,8 +79,7 @@ struct ZayRuntimeConfig: Codable, Equatable {
     }
 
     var isValid: Bool {
-        let proxyOK = !proxyURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        guard proxyOK else { return false }
+        // An empty proxy URL is direct-only and is a valid tunnel config.
         guard meshEnabled else { return true }
         return !relayURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && !networkName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
