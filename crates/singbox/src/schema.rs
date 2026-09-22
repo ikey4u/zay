@@ -7,9 +7,8 @@ use serde_json::{Map, Value};
 
 use crate::option::ConfigError;
 
-/// The exact schema checked into `inner/sing-box` at [`crate::UPSTREAM_REVISION`].
-pub const UPSTREAM_SCHEMA_JSON: &str =
-    include_str!("../../../inner/sing-box/docs/schema.json");
+/// The schema snapshot bundled with this crate for [`crate::UPSTREAM_REVISION`].
+pub const UPSTREAM_SCHEMA_JSON: &str = include_str!("../schema.json");
 
 static VALIDATOR: LazyLock<Result<Validator, String>> = LazyLock::new(|| {
     let schema: Value =

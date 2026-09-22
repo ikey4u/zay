@@ -12,6 +12,7 @@ use hickory_proto::{
     op::Message,
     rr::{Name, RData, Record, rdata::A},
 };
+use sha2::{Digest, Sha256};
 use singbox::{
     ConfigLoader, NeighborResolver, ProcessInfo, ProcessResolver, Runtime,
     RuntimeHost,
@@ -1449,10 +1450,11 @@ fn cloudflared_configuration_and_protocol_are_public_library_api() {
 }
 
 #[test]
-fn embedded_schema_is_byte_identical_to_the_pinned_upstream_schema() {
+fn embedded_schema_matches_the_pinned_snapshot() {
+    let digest = Sha256::digest(UPSTREAM_SCHEMA_JSON.as_bytes());
     assert_eq!(
-        UPSTREAM_SCHEMA_JSON.as_bytes(),
-        include_bytes!("../../../inner/sing-box/docs/schema.json")
+        hex::encode(digest),
+        "15133dc518142b7082f120fa7ed08dabb5b28768850e4bebcde67272cbd58d47"
     );
 }
 

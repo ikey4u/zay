@@ -75,7 +75,7 @@ cargo build --release
 [tasks."macos:build:linux-x64"]
 description = "Cross-build Linux x64 via cargo-zigbuild (glibc 2.17)"
 depends = ["setup"]
-tools = { zig = "latest", "cargo:cargo-zigbuild" = "latest" }
+tools = { zig = "latest", "cargo:cargo-zigbuild" = "latest", protoc = "latest" }
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
@@ -94,7 +94,7 @@ test -f "$BIN" || {
 [tasks."macos:build:windows-x64"]
 description = "Cross-build Windows x64 via cargo-zigbuild + mingw"
 depends = ["setup", "check:mingw"]
-tools = { zig = "latest", "cargo:cargo-zigbuild" = "latest" }
+tools = { zig = "latest", "cargo:cargo-zigbuild" = "latest", protoc = "latest" }
 alias = ["macos:build:window-x64"]
 run = """
 #!/usr/bin/env bash
@@ -186,9 +186,9 @@ echo "packaged: ${PACKAGE}" >&2
 
 [tasks."macos:build:all"]
 description = "macOS host: release macOS/Linux/Windows without embedding $HOME paths"
-# mise installs zig and cargo-zigbuild for this task. Requires: mingw-w64, ripgrep.
+# mise installs zig, cargo-zigbuild, and protoc for this task. Requires: mingw-w64, ripgrep.
 # See scripts/cross_build_on_macos.sh (CARGO_HOME + remap-path-prefix + strip + verify).
-tools = { zig = "latest", "cargo:cargo-zigbuild" = "latest" }
+tools = { zig = "latest", "cargo:cargo-zigbuild" = "latest", protoc = "latest" }
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
@@ -199,7 +199,7 @@ exec bash "${ROOT}/scripts/cross_build_on_macos.sh"
 [tasks.pkg]
 description = "Alias of macos:build:all (cross-builds + zip under dist/)"
 alias = ["cross-build"]
-tools = { zig = "latest", "cargo:cargo-zigbuild" = "latest" }
+tools = { zig = "latest", "cargo:cargo-zigbuild" = "latest", protoc = "latest" }
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
