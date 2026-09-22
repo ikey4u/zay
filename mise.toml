@@ -15,18 +15,6 @@ TARGET_LINUX_X64 = "x86_64-unknown-linux-gnu"
 TARGET_WINDOWS_X64 = "x86_64-pc-windows-gnu"
 DIST_DIR = "dist"
 
-[tasks."check:zig"]
-description = "Require zig and cargo-zigbuild on PATH"
-run = """
-#!/usr/bin/env bash
-set -euo pipefail
-command -v zig >/dev/null || { echo "Install zig: https://ziglang.org/" >&2; exit 1; }
-command -v cargo-zigbuild >/dev/null || {
-  echo "Install cargo-zigbuild: cargo install cargo-zigbuild" >&2
-  exit 1
-}
-"""
-
 [tasks."check:mingw"]
 description = "Require mingw-w64 tools for Windows GNU target"
 run = """
@@ -63,11 +51,6 @@ else
 fi
 """
 
-[tasks."setup:zig"]
-description = "setup + check:zig"
-depends = ["setup", "check:zig"]
-run = "true"
-
 [tasks.format]
 description = "Format zay-owned Rust packages (nightly; excludes vendored submodules)"
 run = "./scripts/fmt.sh"
@@ -91,7 +74,8 @@ cargo build --release
 
 [tasks."macos:build:linux-x64"]
 description = "Cross-build Linux x64 via cargo-zigbuild (glibc 2.17)"
-depends = ["setup:zig"]
+depends = ["setup"]
+tools = { zig = "latest", "cargo:cargo-zigbuild" = "latest" }
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
@@ -109,7 +93,8 @@ test -f "$BIN" || {
 
 [tasks."macos:build:windows-x64"]
 description = "Cross-build Windows x64 via cargo-zigbuild + mingw"
-depends = ["setup:zig", "check:mingw"]
+depends = ["setup", "check:mingw"]
+tools = { zig = "latest", "cargo:cargo-zigbuild" = "latest" }
 alias = ["macos:build:window-x64"]
 run = """
 #!/usr/bin/env bash
@@ -201,8 +186,9 @@ echo "packaged: ${PACKAGE}" >&2
 
 [tasks."macos:build:all"]
 description = "macOS host: release macOS/Linux/Windows without embedding $HOME paths"
-# Requires: zig, cargo-zigbuild, mingw-w64, ripgrep.
+# mise installs zig and cargo-zigbuild for this task. Requires: mingw-w64, ripgrep.
 # See scripts/cross_build_on_macos.sh (CARGO_HOME + remap-path-prefix + strip + verify).
+tools = { zig = "latest", "cargo:cargo-zigbuild" = "latest" }
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
@@ -213,6 +199,7 @@ exec bash "${ROOT}/scripts/cross_build_on_macos.sh"
 [tasks.pkg]
 description = "Alias of macos:build:all (cross-builds + zip under dist/)"
 alias = ["cross-build"]
+tools = { zig = "latest", "cargo:cargo-zigbuild" = "latest" }
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
