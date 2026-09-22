@@ -3,7 +3,10 @@
 #
 # Technique:
 #   1. CARGO_HOME=/tmp/cargo-tmp  — crates/git checkouts never live under $HOME/.cargo
-#   2. CARGO_TARGET_DIR=/tmp/zay-target — build outs off the repo tree
+#   2. CARGO_TARGET_DIR=/tmp/zay-target — build outs off the repo tree.
+#      /tmp paths may remain in C objects (vendored OpenSSL --prefix); that is OK.
+#      CARGO_ZIGBUILD_CACHE_DIR=/tmp/cargo-zigbuild — OpenSSL records $(CC), and
+#      cargo-zigbuild's default CC is a wrapper under ~/Library/Caches.
 #   3. RUSTFLAGS --remap-path-prefix — scrub HOME/RUSTUP/CARGO/ROOT/TARGET
 #      (overlapping prefixes: last match wins; list broad → specific)
 #   4. strip after link — drop leftover symbols
@@ -14,7 +17,7 @@
 #   mise run macos:build:all
 #
 # Env overrides:
-#   CARGO_HOME_DIR, CARGO_TARGET_DIR, RUSTUP_HOME, DIST_DIR, MINGW_{CC,AR,DLLTOOL}
+#   CARGO_HOME_DIR, CARGO_TARGET_DIR, CARGO_ZIGBUILD_CACHE_DIR, RUSTUP_HOME, DIST_DIR, MINGW_{CC,AR,DLLTOOL}
 #   SKIP_PACKAGE=1  — build+strip+verify only, skip dist/*.zip
 #   SKIP_VERIFY=1   — skip strings privacy check
 
@@ -32,6 +35,9 @@ CARGO_HOME_DIR="${CARGO_HOME_DIR:-/tmp/cargo-tmp}"
 # Keep OUT_DIR / build script paths off the repo tree so panic locations
 # cannot leak folder names like Dev/zay even if remap order regresses.
 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/zay-target}"
+# OpenSSL bakes $(CC) into libcrypto. cargo-zigbuild's CC wrapper otherwise
+# lives in ~/Library/Caches/cargo-zigbuild.
+CARGO_ZIGBUILD_CACHE_DIR="${CARGO_ZIGBUILD_CACHE_DIR:-/tmp/cargo-zigbuild}"
 RUSTUP_HOME="${RUSTUP_HOME:-${HOME}/.rustup}"
 DIST_DIR="${DIST_DIR:-dist}"
 
@@ -76,9 +82,10 @@ build_remap_flags() {
 
 export_build_env() {
   local extra="${1:-}"
-  mkdir -p "$CARGO_HOME_DIR" "$CARGO_TARGET_DIR"
+  mkdir -p "$CARGO_HOME_DIR" "$CARGO_TARGET_DIR" "$CARGO_ZIGBUILD_CACHE_DIR"
   export CARGO_HOME="$CARGO_HOME_DIR"
   export CARGO_TARGET_DIR
+  export CARGO_ZIGBUILD_CACHE_DIR
   local remap
   remap="$(build_remap_flags)"
   if [[ -n "$extra" ]]; then
@@ -88,6 +95,7 @@ export_build_env() {
   fi
   echo "CARGO_HOME=$CARGO_HOME" >&2
   echo "CARGO_TARGET_DIR=$CARGO_TARGET_DIR" >&2
+  echo "CARGO_ZIGBUILD_CACHE_DIR=$CARGO_ZIGBUILD_CACHE_DIR" >&2
   echo "RUSTFLAGS=$RUSTFLAGS" >&2
 }
 
@@ -227,6 +235,14 @@ strip_all() {
 # Privacy check
 # ---------------------------------------------------------------------------
 
+# /tmp (and macOS /private/tmp) is a shared build dir, not a home or repo path.
+is_tmp_path() {
+  case "$1" in
+    /tmp | /tmp/* | /private/tmp | /private/tmp/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 verify_no_personal_paths() {
   local bin="$1"
   local label="$2"
@@ -235,22 +251,29 @@ verify_no_personal_paths() {
   parent_name="$(basename "$(dirname "$ROOT")")"
   echo "==> verify paths: $label" >&2
 
+  local -a patterns=()
+  patterns+=(-e "${HOME}")
+  patterns+=(-e '/Users/[^/]+/\.cargo')
+  patterns+=(-e '/Users/[^/]+/\.rustup')
+  patterns+=(-e '/Users/[^/]+/Dev/')
+  patterns+=(-e '/Users/[^/]+/Library/')
+  patterns+=(-e "/home/${parent_name}/")
+  patterns+=(-e "/home/.*/${repo_name}/")
+  # Default cargo dirs live under /tmp. Overrides outside /tmp are still personal.
+  if ! is_tmp_path "${CARGO_HOME_DIR}"; then
+    patterns+=(-e "${CARGO_HOME_DIR}")
+  fi
+  if ! is_tmp_path "${CARGO_TARGET_DIR}"; then
+    patterns+=(-e "${CARGO_TARGET_DIR}")
+  fi
+
   local hits
   hits="$(
-    strings "$bin" | rg -n \
-      -e "${HOME}" \
-      -e '/Users/[^/]+/\.cargo' \
-      -e '/Users/[^/]+/\.rustup' \
-      -e '/Users/[^/]+/Dev/' \
-      -e '/Users/[^/]+/Library/' \
-      -e "/home/${parent_name}/" \
-      -e "/home/.*/${repo_name}/" \
-      -e "${CARGO_HOME_DIR}" \
-      -e "${CARGO_TARGET_DIR}" \
-      || true
+    strings "$bin" | rg -n "${patterns[@]}" || true
   )"
   # Remapped prefixes /cargo /src /home /rustup /target are OK.
   # System frameworks under /System/Library are OK and not matched above.
+  # Vendored OpenSSL ENGINESDIR/MODULESDIR under /tmp/zay-target are OK.
 
   if [[ -n "$hits" ]]; then
     echo "error: personal path(s) still embedded in $bin:" >&2
