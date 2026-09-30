@@ -36,7 +36,8 @@ use crate::{
         network::SocksAddr,
         socket::{
             apply_icmp_dialer_options, apply_tcp_dialer_options,
-            apply_udp_dialer_options, with_network_namespace,
+            apply_udp_dialer_options, log_invalid_socket_error,
+            with_network_namespace,
         },
     },
     dns::manager::SharedResolver,
@@ -399,8 +400,22 @@ impl DirectOutbound {
                 let socket = new_tcp_socket(
                     address,
                     socket_options.tcp_multi_path && address.is_ipv4(),
-                )?;
-                apply_tcp_dialer_options(&socket, address, &socket_options)?;
+                )
+                .inspect_err(|error| {
+                    log_invalid_socket_error(
+                        "create_tcp_socket",
+                        address,
+                        error,
+                    )
+                })?;
+                apply_tcp_dialer_options(&socket, address, &socket_options)
+                    .inspect_err(|error| {
+                        log_invalid_socket_error(
+                            "configure_tcp_socket",
+                            address,
+                            error,
+                        )
+                    })?;
                 let bind = match address.ip() {
                     IpAddr::V4(_) => socket_options
                         .inet4_bind_address
@@ -410,7 +425,15 @@ impl DirectOutbound {
                         .map(|address| address.0),
                 };
                 if let Some(bind) = bind {
-                    socket.bind(SocketAddr::new(bind, 0))?;
+                    socket.bind(SocketAddr::new(bind, 0)).inspect_err(
+                        |error| {
+                            log_invalid_socket_error(
+                                "bind_source_address",
+                                address,
+                                error,
+                            )
+                        },
+                    )?;
                 }
                 Ok(socket)
             })
@@ -420,7 +443,10 @@ impl DirectOutbound {
                     stream.set_nodelay(true)?;
                     return Ok(stream);
                 }
-                Ok(Err(error)) => last_error = Some(error),
+                Ok(Err(error)) => {
+                    log_invalid_socket_error("connect", address, &error);
+                    last_error = Some(error);
+                }
                 Err(_) => {
                     last_error = Some(io::Error::new(
                         io::ErrorKind::TimedOut,

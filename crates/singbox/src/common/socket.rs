@@ -1,9 +1,7 @@
 //! Platform socket options shared by direct and underlay dialers.
 
 #[cfg(any(
-    target_os = "android",
     target_os = "ios",
-    target_os = "linux",
     target_os = "macos",
     target_os = "tvos",
     target_os = "visionos",
@@ -29,8 +27,9 @@ struct AutoRedirectMarkState {
 static AUTO_REDIRECT_MARK: std::sync::Mutex<AutoRedirectMarkState> =
     std::sync::Mutex::new(AutoRedirectMarkState { mark: 0, leases: 0 });
 
-/// Process-wide output mark registered by an active Linux TUN auto-redirect
-/// instance. Explicit per-outbound `routing_mark` continues to take priority.
+/// Process-wide output mark for an active Linux TUN. Auto-redirect and the
+/// direct-dial bypass each register one so their sockets leave via the main
+/// table. An explicit per-socket mark is replaced while a lease is held.
 #[cfg(target_os = "linux")]
 pub(crate) struct AutoRedirectMarkLease {
     mark: u32,
@@ -272,12 +271,14 @@ fn build_tcp_listener(
                 options
                     .tcp_keep_alive
                     .as_std()
+                    .filter(|duration| !duration.is_zero())
                     .unwrap_or(std::time::Duration::from_secs(5 * 60)),
             )
             .with_interval(
                 options
                     .tcp_keep_alive_interval
                     .as_std()
+                    .filter(|duration| !duration.is_zero())
                     .unwrap_or(std::time::Duration::from_secs(75)),
             );
         socket_ref
@@ -311,26 +312,39 @@ pub(crate) fn apply_tcp_dialer_options(
     let socket = SockRef::from(socket);
     apply_common_options(&socket, remote, options)?;
     if options.disable_tcp_keep_alive {
-        socket.set_keepalive(false)?;
+        socket.set_keepalive(false).inspect_err(|error| {
+            log_invalid_socket_error("disable_tcp_keepalive", remote, error)
+        })?;
     } else {
-        socket.set_keepalive(true)?;
+        socket.set_keepalive(true).inspect_err(|error| {
+            log_invalid_socket_error("enable_tcp_keepalive", remote, error)
+        })?;
         let keepalive = TcpKeepalive::new()
             .with_time(
                 options
                     .tcp_keep_alive
                     .as_std()
+                    .filter(|duration| !duration.is_zero())
                     .unwrap_or(std::time::Duration::from_secs(5 * 60)),
             )
             .with_interval(
                 options
                     .tcp_keep_alive_interval
                     .as_std()
+                    .filter(|duration| !duration.is_zero())
                     .unwrap_or(std::time::Duration::from_secs(75)),
             );
-        socket.set_tcp_keepalive(&keepalive)?;
+        socket.set_tcp_keepalive(&keepalive).inspect_err(|error| {
+            log_invalid_socket_error("set_tcp_keepalive", remote, error)
+        })?;
     }
-    apply_tcp_fast_open(&socket, options.tcp_fast_open)?;
+    apply_tcp_fast_open(&socket, options.tcp_fast_open).inspect_err(
+        |error| log_invalid_socket_error("tcp_fast_open", remote, error),
+    )?;
     apply_bind_address_no_port(&socket, remote, options.bind_address_no_port)
+        .inspect_err(|error| {
+            log_invalid_socket_error("bind_address_no_port", remote, error)
+        })
 }
 
 pub(crate) fn apply_udp_dialer_options(
@@ -382,7 +396,9 @@ fn apply_common_options(
     remote: SocketAddr,
     options: &AbstractDialerOptions,
 ) -> io::Result<()> {
-    apply_bind_interface(socket, remote, &options.bind_interface)?;
+    apply_bind_interface(socket, remote, &options.bind_interface).inspect_err(
+        |error| log_invalid_socket_error("bind_interface", remote, error),
+    )?;
     #[cfg(target_os = "linux")]
     let mark = {
         let auto_redirect_mark = AUTO_REDIRECT_MARK
@@ -397,8 +413,29 @@ fn apply_common_options(
     };
     #[cfg(not(target_os = "linux"))]
     let mark = options.routing_mark.0;
-    apply_routing_mark(socket, mark)?;
+    apply_routing_mark(socket, mark).inspect_err(|error| {
+        log_invalid_socket_error("routing_mark", remote, error)
+    })?;
     apply_protect_path(socket, &options.protect_path)
+}
+
+pub(crate) fn log_invalid_socket_error(
+    operation: &'static str,
+    remote: SocketAddr,
+    error: &io::Error,
+) {
+    #[cfg(target_os = "linux")]
+    if error.raw_os_error() == Some(libc::EINVAL) {
+        tracing::warn!(
+            target: "singbox::direct",
+            operation,
+            %remote,
+            %error,
+            "direct outbound socket operation returned EINVAL"
+        );
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = (operation, remote, error);
 }
 
 /// Ask an Android-style VPN service to exempt this socket from its TUN by
@@ -528,10 +565,22 @@ fn apply_bind_interface(
     if interface.is_empty() {
         return Ok(());
     }
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    {
+        let _ = remote;
+        std::ffi::CString::new(interface).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "interface name contains NUL",
+            )
+        })?;
+        // SO_BINDTOIFINDEX is unavailable on older Linux kernels. The
+        // interface name is already known, so use the long-standing socket
+        // option instead of resolving it to an index first.
+        socket.bind_device(Some(interface.as_bytes()))
+    }
     #[cfg(any(
-        target_os = "android",
         target_os = "ios",
-        target_os = "linux",
         target_os = "macos",
         target_os = "tvos",
         target_os = "visionos",
@@ -902,6 +951,12 @@ mod tests {
         )
         .unwrap();
         assert!(SockRef::from(&socket).keepalive().unwrap());
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            let socket = SockRef::from(&socket);
+            assert_eq!(socket.tcp_keepalive_time().unwrap().as_secs(), 300);
+            assert_eq!(socket.tcp_keepalive_interval().unwrap().as_secs(), 75);
+        }
 
         let socket = TcpSocket::new_v4().unwrap();
         let options = AbstractDialerOptions {
@@ -923,6 +978,36 @@ mod tests {
         };
         apply_udp_dialer_options(&socket, REMOTE, &options).unwrap();
         assert!(socket.reuse_address().unwrap());
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn preserves_explicit_tcp_keepalive_durations() {
+        let socket = TcpSocket::new_v4().unwrap();
+        let options = AbstractDialerOptions {
+            tcp_keep_alive: "60s".parse().unwrap(),
+            tcp_keep_alive_interval: "15s".parse().unwrap(),
+            ..Default::default()
+        };
+        apply_tcp_dialer_options(&socket, REMOTE, &options).unwrap();
+        let socket = SockRef::from(&socket);
+        assert_eq!(socket.tcp_keepalive_time().unwrap().as_secs(), 60);
+        assert_eq!(socket.tcp_keepalive_interval().unwrap().as_secs(), 15);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn listener_uses_default_tcp_keepalive_durations() {
+        let listener = bind_tcp_listener(
+            SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+            &ListenOptions::default(),
+        )
+        .await
+        .unwrap();
+        let socket = SockRef::from(&listener);
+        assert!(socket.keepalive().unwrap());
+        assert_eq!(socket.tcp_keepalive_time().unwrap().as_secs(), 300);
+        assert_eq!(socket.tcp_keepalive_interval().unwrap().as_secs(), 75);
     }
 
     #[cfg(unix)]

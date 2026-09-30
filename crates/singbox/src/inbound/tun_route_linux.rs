@@ -33,11 +33,15 @@ use tokio_util::sync::CancellationToken;
 
 use super::tun_route::{TunRouteBackend, TunRouteLease, TunRoutePlan};
 use crate::{
-    common::socket::with_network_namespace, option::TunInboundOptions,
+    common::socket::{AutoRedirectMarkLease, with_network_namespace},
+    option::TunInboundOptions,
 };
 
 pub(crate) const DEFAULT_ROUTE_TABLE: u32 = 2022;
 pub(crate) const DEFAULT_RULE_PRIORITY: u32 = 9000;
+/// fwmark on sing-box's own sockets so direct dials use the main table's
+/// physical default route instead of re-entering the TUN.
+const TUN_EGRESS_MARK: u32 = 0x2022;
 pub(crate) const DEFAULT_AUTO_REDIRECT_FALLBACK_RULE_PRIORITY: u32 = 32768;
 const RULE_PRIORITY_SPAN: u32 = 10;
 const USER_END: u32 = u32::MAX - 1;
@@ -510,6 +514,7 @@ pub(crate) struct LinuxTunLease {
     redirect_task: Option<JoinHandle<()>>,
     dns_interface: Option<String>,
     dns_task: Option<JoinHandle<()>>,
+    egress_mark: Option<AutoRedirectMarkLease>,
 }
 
 impl LinuxTunLease {
@@ -566,6 +571,7 @@ impl LinuxTunLease {
             redirect_task: None,
             dns_interface: None,
             dns_task: None,
+            egress_mark: None,
         };
 
         let install_result: io::Result<()> = async {
@@ -587,7 +593,7 @@ impl LinuxTunLease {
                         .then_some(auto_redirect_fallback_rule_priority),
                 )
                 .await?;
-                let rules = if auto_redirect {
+                let mut rules = if auto_redirect {
                     build_auto_redirect_rules(
                         addresses,
                         table,
@@ -605,11 +611,20 @@ impl LinuxTunLease {
                         policy,
                     )
                 };
+                if !auto_redirect {
+                    let mut bypass = tun_egress_bypass_rules(rule_priority);
+                    bypass.append(&mut rules);
+                    rules = bypass;
+                }
                 for rule in rules {
                     let mut request = handle.rule().add();
                     request.message_mut().clone_from(&rule);
                     request.execute().await.map_err(netlink_error)?;
                     lease.rules.push(rule);
+                }
+                if !auto_redirect {
+                    lease.egress_mark =
+                        Some(AutoRedirectMarkLease::register(TUN_EGRESS_MARK)?);
                 }
             } else if addresses.iter().any(|address| address.addr().is_ipv6()) {
                 let priority = next_ipv6_rule_priority(&handle).await?;
@@ -849,6 +864,7 @@ impl LinuxTunLease {
                 failures.push(format!("remove TUN policy rule: {error}"));
             }
         }
+        drop(self.egress_mark.take());
         if let Err(error) = self.routes.close().await {
             failures.push(error.to_string());
         }
@@ -1439,6 +1455,20 @@ async fn next_ipv6_rule_priority(handle: &Handle) -> io::Result<u32> {
         .ok_or_else(|| io::Error::other("no free IPv6 policy rule priority"))
 }
 
+fn tun_egress_bypass_rules(priority: u32) -> Vec<RuleMessage> {
+    [false, true]
+        .into_iter()
+        .map(|ipv6| {
+            rule_for_table_mark(
+                family(ipv6),
+                priority,
+                u32::from(RouteHeader::RT_TABLE_MAIN),
+                TUN_EGRESS_MARK,
+            )
+        })
+        .collect()
+}
+
 fn build_rules(
     interface_name: &str,
     addresses: &[IpNet],
@@ -1990,11 +2020,12 @@ mod tests {
     use super::{
         DEFAULT_AUTO_REDIRECT_FALLBACK_RULE_PRIORITY, DEFAULT_ROUTE_TABLE,
         DEFAULT_RULE_PRIORITY, LinuxPolicyOptions, RedirectInterface,
-        RedirectRouteKey, USER_END, UidRange, bridge_policy_rules,
-        build_auto_redirect_rules, build_rules,
+        RedirectRouteKey, TUN_EGRESS_MARK, USER_END, UidRange,
+        bridge_policy_rules, build_auto_redirect_rules, build_rules,
         calculate_redirect_route_changes, calculate_redirect_route_keys,
         gateway, redirect_route_key_from_message, redirect_route_message,
         route_table, rp_filter_path, set_bridge_route_table,
+        tun_egress_bypass_rules,
     };
     use crate::option::TunInboundOptions;
 
@@ -2055,6 +2086,25 @@ mod tests {
         assert_eq!(route.header.table, RouteHeader::RT_TABLE_UNSPEC);
         assert!(route.attributes.contains(&RouteAttribute::Table(2200)));
         assert_eq!(route_table(&route), 2200);
+    }
+
+    #[test]
+    fn tun_egress_bypass_looks_up_main_by_mark() {
+        let rules = tun_egress_bypass_rules(DEFAULT_RULE_PRIORITY);
+        assert_eq!(rules.len(), 2);
+        assert_ne!(rules[0].header.family, rules[1].header.family);
+        for rule in &rules {
+            assert_eq!(rule.header.action, RuleAction::ToTable);
+            assert_eq!(rule.header.table, RouteHeader::RT_TABLE_MAIN);
+            assert!(
+                rule.attributes
+                    .contains(&RuleAttribute::FwMark(TUN_EGRESS_MARK))
+            );
+            assert!(
+                rule.attributes
+                    .contains(&RuleAttribute::Priority(DEFAULT_RULE_PRIORITY))
+            );
+        }
     }
 
     #[test]
