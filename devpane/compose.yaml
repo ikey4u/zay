@@ -1,0 +1,94 @@
+name: devpane
+
+networks:
+  lab:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.126.0/24
+          gateway: 172.30.126.1
+
+services:
+  be:
+    image: devpane-be
+    build:
+      context: ./be
+      network: host
+    environment:
+      DEVPANE_ROLE: edge
+      DEVPANE_ADVERTISE_HOST: 172.30.126.10
+    networks:
+      lab:
+        ipv4_address: 172.30.126.10
+    ports:
+      - "127.0.0.1:18090:8090"
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/devpane-be", "--healthcheck"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  sink:
+    image: devpane-be
+    environment:
+      DEVPANE_ROLE: sink
+    networks:
+      lab:
+        ipv4_address: 172.30.126.11
+
+  relay:
+    image: devpane-zay
+    build:
+      context: .
+      dockerfile: Dockerfile
+      network: host
+    entrypoint: ["/usr/local/bin/devpane-relay"]
+    environment:
+      DEVPANE_MESH_AUTH: devpane:devpane-mesh
+      DEVPANE_MESH_IP: 10.126.126.1/24
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    networks:
+      lab:
+        ipv4_address: 172.30.126.30
+
+  zay:
+    image: devpane-zay
+    build:
+      context: .
+      dockerfile: Dockerfile
+      network: host
+    depends_on:
+      be:
+        condition: service_healthy
+      relay:
+        condition: service_started
+      sink:
+        condition: service_started
+    environment:
+      ZAY_WEBUI_TOKEN: devpane-local-token
+      ZAY_LAB: devpane
+      ZAY_LAB_PROXY_URL: http://devpane.test/whoami
+      ZAY_LAB_DIRECT_URL: http://172.30.126.10:8090/whoami
+      ZAY_LAB_EXTERNAL_URL: https://www.gstatic.com/generate_204
+      ZAY_LAB_MESH_TCP: 10.126.126.1:11010
+    dns:
+      - 172.30.126.10
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    volumes:
+      - zay-data:/var/lib/zay
+    ports:
+      - "127.0.0.1:18787:8787"
+    networks:
+      lab:
+        ipv4_address: 172.30.126.20
+
+volumes:
+  zay-data:

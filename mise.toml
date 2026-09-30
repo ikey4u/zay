@@ -196,6 +196,15 @@ ROOT="${MISE_PROJECT_ROOT:-$PWD}"
 exec bash "${ROOT}/scripts/cross_build_on_macos.sh"
 """
 
+[tasks.devpane]
+description = "Build zay and start the isolated devpane Docker lab"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="${MISE_PROJECT_ROOT:-$PWD}"
+exec bash "${ROOT}/devpane/be/manage.sh" up
+"""
+
 [tasks.pkg]
 description = "Alias of macos:build:all (cross-builds + zip under dist/)"
 alias = ["cross-build"]

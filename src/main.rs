@@ -6,6 +6,7 @@ mod config;
 mod daemon;
 mod fwd;
 mod http;
+mod lab;
 mod logging;
 #[cfg(unix)]
 mod native_tun_worker;

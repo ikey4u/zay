@@ -1,0 +1,6 @@
+*
+!.build
+!.build/zay
+!entrypoint-node.sh
+!entrypoint-relay.sh
+!zay.toml

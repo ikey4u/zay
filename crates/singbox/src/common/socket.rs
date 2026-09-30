@@ -232,6 +232,16 @@ impl Drop for NetworkNamespaceGuard {
     }
 }
 
+/// Some container network stacks reject `TCP_KEEPIDLE` / `TCP_KEEPINTVL` with
+/// `EINVAL` even though `SO_KEEPALIVE` itself is accepted.
+fn ignore_unsupported_keepalive(error: io::Error) -> io::Result<()> {
+    if error.raw_os_error() == Some(22) {
+        Ok(())
+    } else {
+        Err(error)
+    }
+}
+
 fn build_tcp_listener(
     address: SocketAddr,
     options: &ListenOptions,
@@ -283,6 +293,7 @@ fn build_tcp_listener(
             );
         socket_ref
             .set_tcp_keepalive(&keepalive)
+            .or_else(ignore_unsupported_keepalive)
             .map_err(|error| context("configure keepalive", error))?;
     }
     apply_tcp_fast_open_listener(&socket_ref, options.tcp_fast_open)
@@ -334,9 +345,12 @@ pub(crate) fn apply_tcp_dialer_options(
                     .filter(|duration| !duration.is_zero())
                     .unwrap_or(std::time::Duration::from_secs(75)),
             );
-        socket.set_tcp_keepalive(&keepalive).inspect_err(|error| {
-            log_invalid_socket_error("set_tcp_keepalive", remote, error)
-        })?;
+        socket
+            .set_tcp_keepalive(&keepalive)
+            .inspect_err(|error| {
+                log_invalid_socket_error("set_tcp_keepalive", remote, error)
+            })
+            .or_else(ignore_unsupported_keepalive)?;
     }
     apply_tcp_fast_open(&socket, options.tcp_fast_open).inspect_err(
         |error| log_invalid_socket_error("tcp_fast_open", remote, error),

@@ -198,6 +198,32 @@ export type ProcessTrafficResponse = {
   records: ProcessTrafficRecord[]
 }
 
+export type LabPreset = {
+  id: string
+  label: string
+  url?: string | null
+  tcp?: string | null
+  expect_via?: string | null
+}
+
+export type LabProfile = {
+  active: boolean
+  name?: string | null
+  hint: string
+  presets: LabPreset[]
+}
+
+export type LabProbe = {
+  kind: "url" | "tcp"
+  target: string
+  ok: boolean
+  status?: number | null
+  elapsed_ms: number
+  via?: string | null
+  body: string
+  error?: string | null
+}
+
 export class ApiError extends Error {
   constructor(public status: number, public code: string, message: string) {
     super(message)

@@ -299,6 +299,8 @@ async fn run_async(
         .route("/api/v1/core/apply", post(apply_core))
         .route("/api/v1/core/proxy/apply", post(apply_proxy))
         .route("/api/v1/proxy/nodes/test", post(test_proxy_nodes))
+        .route("/api/v1/lab", get(get_lab))
+        .route("/api/v1/lab/probe", post(post_lab_probe))
         .route("/api/v1/exit", post(exit_webui))
         .route("/api/v1/logs", get(get_logs))
         .route("/api/v1/events", get(get_events))
@@ -383,6 +385,28 @@ fn static_asset(body: &'static str, content_type: &'static str) -> Response {
         .header("Content-Security-Policy", "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; base-uri 'none'; frame-ancestors 'none'")
         .body(Body::from(body))
         .expect("valid static response")
+}
+
+async fn get_lab(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> ApiResult<Json<JsonValue>> {
+    authorize(&state, &headers)?;
+    Ok(Json(crate::lab::profile_json()))
+}
+
+async fn post_lab_probe(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<crate::lab::ProbeRequest>,
+) -> ApiResult<Json<JsonValue>> {
+    authorize(&state, &headers)?;
+    let result =
+        tokio::task::spawn_blocking(move || crate::lab::run_probe(body))
+            .await
+            .map_err(|error| ApiError::internal(anyhow::anyhow!("{error}")))?
+            .map_err(ApiError::bad_request)?;
+    Ok(Json(result))
 }
 
 async fn get_state(

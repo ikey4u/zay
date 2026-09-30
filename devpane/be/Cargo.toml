@@ -1,0 +1,13 @@
+[package]
+name = "devpane-be"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Devpane lab edge: Clash subscription, HTTP proxy, DNS, and a direct sink"
+
+[[bin]]
+name = "devpane-be"
+path = "src/main.rs"
+
+# Keep this crate out of the zay workspace.
+[workspace]

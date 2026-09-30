@@ -6,5 +6,10 @@ Makefile.local
 mise.local.toml
 inner
 client/webui/node_modules/
+devpane/.build/
+devpane/be/target/
+devpane/be/.build/
+**/__pycache__/
+*.py[cod]
 client/webui/dist/
 client/webui/*.tsbuildinfo

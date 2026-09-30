@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   Activity, ArrowLeft, ArrowRight, Cable, Check, CheckCircle2, CircleStop,
-  Database, FileJson, Globe2, Info, KeyRound, List, LoaderCircle, Network,
+  Database, FileJson, FlaskConical, Globe2, Info, KeyRound, List, LoaderCircle, Network,
   Pencil, Play, Plus, Power, Radio, RefreshCw, RotateCw, Save, ScrollText,
   Search, Server, Settings2, ShieldCheck, TerminalSquare, Trash2,
   TriangleAlert, Upload, Users,
 } from "lucide-react"
+import { LabPage } from "@/lab"
 import {
   ApiError, api, setToken, type ConfigPayload, type EventRecord, type EventsResponse,
   type DomainRule, type MeshInstance, type NodeTestResult, type ProcessTrafficResponse, type ProxyNode, type RuleSetContent, type RuleSetEntry,
@@ -20,7 +21,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Switch } from "@/components/ui/switch"
 import { cn } from "@/lib/utils"
 
-type Page = "proxy" | "mesh" | "connections" | "logs"
+type Page = "proxy" | "mesh" | "connections" | "logs" | "lab"
 type Notice = { kind: "ok" | "error" | "warning"; text: string } | null
 
 function applyMessage(result: ApplyResponse): string {
@@ -49,6 +50,7 @@ const navItems = [
   { id: "mesh" as const, label: "Mesh 组网", icon: Network },
   { id: "connections" as const, label: "网络连接", icon: Globe2 },
   { id: "logs" as const, label: "运行日志", icon: ScrollText },
+  { id: "lab" as const, label: "Lab", icon: FlaskConical },
 ]
 
 function configToForm(state: StateResponse): ConfigPayload {
@@ -278,6 +280,7 @@ export default function App() {
           {loading && !state ? <Loading /> : page === "proxy" ? <ProxyWorkspace form={form} update={updateProxy} nodes={state?.proxy_nodes ?? []} ruleSets={state?.rule_sets ?? { builtin: [], external: [] }} busy={busy} onTestNodes={(nodes) => void testNodes(nodes)} onApplyProvider={() => void persistConfig(form, true)} onSectionChange={() => contentRef.current?.scrollTo({ top: 0 })} onRulesChanged={() => { void refresh(true) }} onApply={() => void persistConfig(form)} />
             : page === "mesh" ? <MeshWorkspace form={form} update={updateMesh} instances={meshInstances} onSectionChange={() => contentRef.current?.scrollTo({ top: 0 })} />
             : page === "connections" ? <Connections events={events} nodes={state?.proxy_nodes ?? []} subscriptions={form.proxy.subscriptions} busy={busy} processTraffic={processTraffic} processTrafficBusy={processTrafficBusy} onToggleProcessTraffic={(enabled) => void toggleProcessTraffic(enabled)} onCreateRule={createConnectionRule} />
+            : page === "lab" ? <LabPage />
             : <RuntimeLogs events={events} path={eventsPath} />}
         </div>
       </div>
