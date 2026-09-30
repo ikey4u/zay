@@ -446,31 +446,12 @@ pub fn builtin_route_rules(
         json!({ "action": "route", "rule_set": ["telegramcidr"], "outbound": proxy_tag }),
         json!({ "action": "route", "rule_set": ["lancidr"], "outbound": "direct" }),
         json!({ "action": "route", "rule_set": ["cncidr"], "outbound": "direct" }),
-        // curl http://IP:80 — real IP, no Host yet; Mihomo fake-ip avoids this path entirely.
-        foreign_http_proxy_fallback(proxy_tag),
+        // Unmatched TCP/80 stays on the direct final outbound. baidu.com:80
+        // resets when that traffic is sent through a foreign proxy exit.
         json!({ "action": "route", "ip_is_private": true, "outbound": "direct" }),
         json!({ "action": "route", "rule_set": ["geoip-cn"], "outbound": "direct" }),
     ]);
     rules
-}
-
-/// Non-CN HTTP to raw IP (no SNI/Host yet) → Proxy; skip when domain is in geosite-cn/direct.
-fn foreign_http_proxy_fallback(proxy_tag: &str) -> Value {
-    // Note: `ip_is_private: false` is NOT a valid sing-box condition (bool false ==
-    // zero-value → "missing conditions"). Use invert of private instead.
-    json!({
-        "type": "logical",
-        "mode": "and",
-        "rules": [
-            { "network": "tcp", "port": [80] },
-            { "ip_is_private": true, "invert": true },
-            { "rule_set": ["geoip-cn"], "invert": true },
-            { "rule_set": ["cncidr"], "invert": true },
-            { "rule_set": ["geosite-cn", "direct"], "invert": true }
-        ],
-        "action": "route",
-        "outbound": proxy_tag
-    })
 }
 
 pub fn proxy_fetch_rules(proxy_tag: &str) -> Vec<Value> {
@@ -753,21 +734,6 @@ mod tests {
         assert_eq!(geosite.get("type").and_then(|t| t.as_str()), Some("local"));
         assert!(!geosite.get("url").is_some());
         let _ = fs::remove_dir_all(&cleanup);
-    }
-
-    #[test]
-    fn foreign_http_fallback_skips_geosite_cn_domains() {
-        let rule = foreign_http_proxy_fallback("Proxy");
-        let logical = rule.get("rules").and_then(|r| r.as_array()).unwrap();
-        let excludes_geosite = logical.iter().any(|r| {
-            r.get("rule_set")
-                .and_then(|s| s.as_array())
-                .is_some_and(|a| {
-                    a.iter().any(|v| v.as_str() == Some("geosite-cn"))
-                })
-                && r.get("invert").and_then(|v| v.as_bool()) == Some(true)
-        });
-        assert!(excludes_geosite);
     }
 
     #[test]

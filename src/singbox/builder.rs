@@ -883,7 +883,10 @@ mod tests {
         assert!(with_rules.contains("\"reverse_mapping\": true"));
         assert!(with_rules.contains("\"fake-ip\""));
         assert!(with_rules.contains("\"store_fakeip\": true"));
-        assert!(with_rules.contains("\"type\": \"logical\""));
+        assert!(
+            !with_rules.contains("\"type\": \"logical\""),
+            "port 80 must not be forced to the proxy"
+        );
 
         let rules = serde_json::from_str::<Value>(&with_rules).unwrap();
         let inbounds = rules["inbounds"].as_array().unwrap();
