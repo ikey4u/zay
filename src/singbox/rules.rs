@@ -644,6 +644,16 @@ fn fetch_rule(
     dest: &Path,
     force: bool,
 ) -> Result<()> {
+    fetch_rule_from_sources(clients, id, dest, force, CLASH_RULES_SOURCES)
+}
+
+fn fetch_rule_from_sources(
+    clients: &[Client],
+    id: &str,
+    dest: &Path,
+    force: bool,
+    sources: &[&str],
+) -> Result<()> {
     if !force && rule_file_valid(dest) {
         return Ok(());
     }
@@ -652,12 +662,12 @@ fn fetch_rule(
         let _ = fs::remove_file(&legacy_txt);
     }
 
-    let urls: Vec<String> = CLASH_RULES_SOURCES
+    let urls: Vec<String> = sources
         .iter()
         .map(|base| format!("{base}/{id}.txt"))
         .collect();
     let mut last_err = None;
-    'url: for url in urls {
+    for url in urls {
         for client in clients {
             match client.get(&url).send() {
                 Ok(resp) if resp.status().is_success() => {
@@ -671,7 +681,7 @@ fn fetch_rule(
                     }
                     fs::write(dest, json.as_bytes())?;
                     eprintln!("saved rule-set {id} → {}", dest.display());
-                    continue 'url;
+                    return Ok(());
                 }
                 Ok(resp) => {
                     last_err = Some(format!("{url}: HTTP {}", resp.status()));
@@ -692,6 +702,69 @@ fn fetch_rule(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn forced_rule_download_stops_after_first_success() {
+        use std::{
+            io::{BufRead, BufReader, Write},
+            net::TcpListener,
+        };
+
+        let primary = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let backup = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        backup.set_nonblocking(true).unwrap();
+        let primary_url = format!("http://{}", primary.local_addr().unwrap());
+        let backup_url = format!("http://{}", backup.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let (mut stream, _) = primary.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut request = BufReader::new(&stream);
+            let mut line = String::new();
+            request.read_line(&mut line).unwrap();
+            assert!(line.starts_with("GET /applications.txt "));
+            loop {
+                line.clear();
+                assert!(request.read_line(&mut line).unwrap() > 0);
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            let body = "payload:\n  - PROCESS-NAME,curl\n";
+            write!(stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()).unwrap();
+        });
+        let directory = std::env::temp_dir()
+            .join(format!("zay-fetch-rule-success-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        let dest = directory.join("applications.json");
+        let client = Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+        let result = fetch_rule_from_sources(
+            &[client],
+            "applications",
+            &dest,
+            true,
+            &[&primary_url, &backup_url],
+        );
+        server.join().unwrap();
+        let valid = rule_file_valid(&dest);
+        let content = fs::read_to_string(&dest).unwrap();
+        let backup_request = backup.accept();
+        fs::remove_dir_all(&directory).unwrap();
+
+        result.unwrap();
+        assert!(valid);
+        assert!(content.contains("curl"));
+        assert!(matches!(backup_request, Err(error)
+            if error.kind() == std::io::ErrorKind::WouldBlock));
+    }
+
     #[test]
     fn geosite_cn_uses_local_when_srs_present() {
         let data_dir = std::env::temp_dir()
