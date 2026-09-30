@@ -74,6 +74,8 @@ pub struct StackController {
     native: Arc<Mutex<Option<singbox_core::RuntimeHandle>>>,
     running: Arc<AtomicBool>,
     stop_requested: Arc<AtomicBool>,
+    owns_mesh: AtomicBool,
+    ready: Arc<AtomicBool>,
     join: Mutex<Option<JoinHandle<()>>>,
     logs: LogBuffer,
 }
@@ -86,6 +88,8 @@ impl StackController {
             native: Arc::new(Mutex::new(None)),
             running: Arc::new(AtomicBool::new(false)),
             stop_requested: Arc::new(AtomicBool::new(false)),
+            owns_mesh: AtomicBool::new(false),
+            ready: Arc::new(AtomicBool::new(false)),
             join: Mutex::new(None),
             logs,
         }
@@ -109,6 +113,53 @@ impl StackController {
         cli: StackCli,
         sudo_password: Option<String>,
     ) -> Result<()> {
+        self.start_managed(cli, sudo_password, true)
+    }
+
+    /// The persistent runtime owns Mesh independently of the proxy worker.
+    pub fn start_proxy_cli(&self, cli: StackCli) -> Result<()> {
+        self.start_managed(cli, None, false)
+    }
+
+    pub async fn wait_started(&self) -> Result<()> {
+        let deadline = Instant::now() + Duration::from_secs(90);
+        loop {
+            let status = self.status();
+            if matches!(
+                status.state,
+                StackRunState::Failed | StackRunState::Stopped
+            ) {
+                bail!(
+                    "{}",
+                    status.error.unwrap_or_else(|| {
+                        "proxy stopped during startup".into()
+                    })
+                );
+            }
+            if self.ready.load(Ordering::SeqCst) {
+                return Ok(());
+            }
+            if status.state == StackRunState::Degraded {
+                bail!(
+                    "{}",
+                    status
+                        .error
+                        .unwrap_or_else(|| "proxy could not start".into())
+                );
+            }
+            if Instant::now() >= deadline {
+                bail!("proxy startup timed out after 90s");
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    fn start_managed(
+        &self,
+        cli: StackCli,
+        sudo_password: Option<String>,
+        manage_mesh: bool,
+    ) -> Result<()> {
         if self.running.load(Ordering::SeqCst) {
             bail!("stack is already running");
         }
@@ -120,6 +171,8 @@ impl StackController {
             };
         }
         self.stop_requested.store(false, Ordering::SeqCst);
+        self.ready.store(false, Ordering::SeqCst);
+        self.owns_mesh.store(manage_mesh, Ordering::SeqCst);
         self.running.store(true, Ordering::SeqCst);
 
         let status = self.status.clone();
@@ -129,6 +182,7 @@ impl StackController {
         let stop_requested = self.stop_requested.clone();
         let logs = self.logs.clone();
         let failure_logs = logs.clone();
+        let ready = self.ready.clone();
 
         let handle = thread::spawn(move || {
             let result = run_stack_managed(
@@ -139,6 +193,8 @@ impl StackController {
                 stop_requested,
                 status.clone(),
                 sudo_password,
+                manage_mesh,
+                ready,
             );
             running.store(false, Ordering::SeqCst);
             pid_atom.store(0, Ordering::SeqCst);
@@ -188,7 +244,9 @@ impl StackController {
         {
             handle.cancel();
         }
-        let _ = easytier::stop_all();
+        if self.owns_mesh.load(Ordering::SeqCst) {
+            let _ = easytier::stop_all();
+        }
         if let Some(handle) = self.join.lock().expect("stack join").take() {
             let _ = handle.join();
         }
@@ -209,6 +267,8 @@ fn run_stack_managed(
     stop_requested: Arc<AtomicBool>,
     status: Arc<Mutex<StackStatus>>,
     sudo_password: Option<String>,
+    manage_mesh: bool,
+    ready: Arc<AtomicBool>,
 ) -> Result<()> {
     let flags = StackFlags {
         mesh: cli.mesh.map(crate::stack::MeshCliMode::into),
@@ -229,7 +289,8 @@ fn run_stack_managed(
         prepared.settings.data_dir.display()
     ));
 
-    let mesh_started = start_mesh_if_needed(&prepared.settings, flags, &logs)?;
+    let mesh_started =
+        manage_mesh && start_mesh_if_needed(&prepared.settings, flags, &logs)?;
 
     let state = Arc::new(api::AppState::from(prepared));
     {
@@ -289,6 +350,7 @@ fn run_stack_managed(
             }
         };
         *native_handle.lock().expect("native runtime") = Some(runtime.handle());
+        ready.store(true, Ordering::SeqCst);
         if stop_requested.load(Ordering::SeqCst) {
             runtime.handle().cancel();
         }
@@ -358,6 +420,9 @@ fn run_stack_managed(
         match child.try_wait().context("waiting for native TUN worker")? {
             Some(s) => break s,
             None => {
+                if native_tun_worker_ready(&state.settings, &logs) {
+                    ready.store(true, Ordering::SeqCst);
+                }
                 if stop_requested.load(Ordering::SeqCst) {
                     let _ = child.kill();
                     break child.wait().context("wait after kill")?;

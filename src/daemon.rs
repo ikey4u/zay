@@ -14,13 +14,13 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
-    sync::oneshot,
+    sync::{Mutex, oneshot},
     task::JoinHandle,
 };
 
-use crate::{settings, stack::controller::StackController};
+use crate::{runtime::CoreRuntime, settings};
 
 #[derive(Clone, Debug)]
 pub struct Paths {
@@ -73,20 +73,42 @@ async fn mesh_status_json() -> String {
 
 /// Start a loopback-only control listener shared by foreground and daemon runs.
 /// The persisted port is intentionally private to the current user's data directory.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ControlEndpoint {
+    port: u16,
+    token: String,
+}
+
 pub async fn start_control(
     paths: &Paths,
     shutdown: oneshot::Sender<()>,
-    stack: Option<Arc<StackController>>,
+    core: Arc<Mutex<CoreRuntime>>,
 ) -> Result<JoinHandle<()>> {
-    fs::create_dir_all(&paths.run_dir)
-        .with_context(|| format!("creating {}", paths.run_dir.display()))?;
+    use std::io::Write;
+    fs::create_dir_all(&paths.run_dir)?;
+    crate::privilege::restore_invoker_ownership(&paths.run_dir);
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .context("binding local control listener")?;
-    let addr = listener.local_addr().context("reading control address")?;
-    fs::write(&paths.control, format!("{}\n", addr.port()))
-        .with_context(|| format!("writing {}", paths.control.display()))?;
-    crate::privilege::restore_invoker_ownership(&paths.control);
+    let token = uuid::Uuid::new_v4().to_string();
+    let endpoint = ControlEndpoint {
+        port: listener.local_addr()?.port(),
+        token: token.clone(),
+    };
+    let temp = paths
+        .run_dir
+        .join(format!("control-{}.tmp", uuid::Uuid::new_v4()));
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&temp)?;
+    file.write_all(&serde_json::to_vec(&endpoint)?)?;
+    crate::privilege::restore_invoker_ownership(&temp);
+    fs::rename(&temp, &paths.control)?;
 
     Ok(tokio::spawn(async move {
         let mut shutdown = Some(shutdown);
@@ -94,67 +116,100 @@ pub async fn start_control(
             let Ok((mut stream, _)) = listener.accept().await else {
                 break;
             };
-            let mut command = [0_u8; 32];
-            let Ok(n) = stream.read(&mut command).await else {
+            let mut line = String::new();
+            let read = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                async {
+                    BufReader::new(&mut stream)
+                        .take(4096)
+                        .read_line(&mut line)
+                        .await
+                },
+            )
+            .await;
+            if !matches!(read, Ok(Ok(_))) || !line.ends_with('\n') {
+                continue;
+            }
+            let Some((provided, command)) = line.trim().split_once(' ') else {
                 continue;
             };
-            match std::str::from_utf8(&command[..n]).unwrap_or("").trim() {
-                "status" => {
-                    let _ = stream.write_all(b"running\n").await;
-                }
-                "stop" => {
-                    let _ = stream.write_all(b"stopping\n").await;
-                    if let Some(tx) = shutdown.take() {
-                        let _ = tx.send(());
-                    }
-                    break;
-                }
-                "mesh-status" => {
-                    let _ = stream
-                        .write_all(mesh_status_json().await.as_bytes())
-                        .await;
-                }
-                "stack-status" => {
-                    let response = match &stack {
-                        Some(controller) => serde_json::to_string(&controller.status())
-                            .unwrap_or_else(|error| {
-                                serde_json::json!({ "error": format!("{error:#}") })
-                                    .to_string()
-                            }),
-                        None => serde_json::json!({ "error": "proxy stack is not enabled" })
-                            .to_string(),
-                    };
-                    let _ = stream.write_all(response.as_bytes()).await;
-                }
-                _ => {
-                    let _ = stream.write_all(b"unknown command\n").await;
-                }
+            if provided != token {
+                let _ = stream
+                    .write_all(
+                        b"{\"error\":\"unauthorized control request\"}\n",
+                    )
+                    .await;
+                continue;
             }
-            // `read_to_string` on the control client needs an EOF after the
-            // response; do not retain its connection while waiting for the
-            // next listener accept.
-            drop(stream);
+            if command == "stop" {
+                let _ = stream.write_all(b"stopping\n").await;
+                if let Some(tx) = shutdown.take() {
+                    let _ = tx.send(());
+                }
+                break;
+            }
+            let response = match command {
+                "status" => "running".to_string(),
+                "mesh-status" => mesh_status_json().await,
+                _ => {
+                    let mut core = core.lock().await;
+                    let result: Result<serde_json::Value> = match command {
+                        "core-status" => serde_json::to_value(core.status())
+                            .context("serializing core status"),
+                        "stack-status" => {
+                            serde_json::to_value(core.status().stack)
+                                .context("serializing stack status")
+                        }
+                        "components-start" => core
+                            .start()
+                            .await
+                            .map(|_| serde_json::json!({"ok": true})),
+                        "components-stop" => core
+                            .stop()
+                            .await
+                            .map(|_| serde_json::json!({"ok": true})),
+                        "components-restart" => core
+                            .restart()
+                            .await
+                            .map(|_| serde_json::json!({"ok": true})),
+                        "components-apply" | "proxy-apply" => core
+                            .apply(command == "proxy-apply")
+                            .await
+                            .and_then(|result| {
+                                serde_json::to_value(result)
+                                    .context("serializing apply result")
+                            }),
+                        _ => Err(anyhow::anyhow!("unknown control command")),
+                    };
+                    result.unwrap_or_else(|error| serde_json::json!({"error": format!("{error:#}")})).to_string()
+                }
+            };
+            let _ = stream.write_all(response.as_bytes()).await;
         }
     }))
 }
 
 pub async fn request(paths: &Paths, command: &str) -> Result<String> {
-    let raw = fs::read_to_string(&paths.control)
-        .with_context(|| format!("reading {}", paths.control.display()))?;
-    let port: u16 = raw.trim().parse().context("parsing control port")?;
-    let mut stream = TcpStream::connect(("127.0.0.1", port))
-        .await
-        .context("connecting to zay control runtime")?;
-    stream
-        .write_all(format!("{command}\n").as_bytes())
-        .await
-        .context("sending control command")?;
-    let mut response = String::new();
-    stream
-        .read_to_string(&mut response)
-        .await
-        .context("reading control response")?;
-    Ok(response.trim().to_string())
+    tokio::time::timeout(std::time::Duration::from_secs(120), async {
+        let raw = fs::read_to_string(&paths.control)
+            .context("reading core control endpoint")?;
+        let endpoint: ControlEndpoint = serde_json::from_str(&raw)
+            .context("decoding core control endpoint")?;
+        let mut stream = TcpStream::connect(("127.0.0.1", endpoint.port))
+            .await
+            .context("connecting to core host")?;
+        stream
+            .write_all(format!("{} {command}\n", endpoint.token).as_bytes())
+            .await?;
+        let mut response = String::new();
+        stream
+            .take(1024 * 1024)
+            .read_to_string(&mut response)
+            .await?;
+        Ok(response.trim().to_string())
+    })
+    .await
+    .context("core control request timed out")?
 }
 
 pub fn remove_control(paths: &Paths) {
@@ -222,7 +277,7 @@ pub fn terminate(data_dir: Option<&Path>, config: Option<&Path>) -> Result<()> {
 }
 
 #[cfg(unix)]
-fn process_is_alive(pid: u32) -> bool {
+pub(crate) fn process_is_alive(pid: u32) -> bool {
     // kill(pid, 0) does not send a signal; EPERM still proves a process exists.
     let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
     rc == 0
@@ -230,7 +285,7 @@ fn process_is_alive(pid: u32) -> bool {
 }
 
 #[cfg(windows)]
-fn process_is_alive(pid: u32) -> bool {
+pub(crate) fn process_is_alive(pid: u32) -> bool {
     // `tasklist` is available on supported Windows editions and avoids adding a
     // Windows-only FFI dependency just for stale PID cleanup.
     Command::new("tasklist")
@@ -244,4 +299,64 @@ fn process_is_alive(pid: u32) -> bool {
                     .any(|field| field == pid.to_string())
             })
         })
+}
+
+#[cfg(test)]
+mod control_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn authenticated_host_survives_component_stop_and_rejects_other_clients()
+     {
+        let directory = std::env::temp_dir()
+            .join(format!("zay-control-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+        let config = directory.join("zay.toml");
+        fs::write(&config, "[proxy]\nenabled = false\n").unwrap();
+        let paths = paths(Some(&directory), Some(&config));
+        let core =
+            Arc::new(Mutex::new(CoreRuntime::new(directory.clone(), config)));
+        let (tx, rx) = oneshot::channel();
+        let server = start_control(&paths, tx, core.clone()).await.unwrap();
+        let endpoint: ControlEndpoint =
+            serde_json::from_str(&fs::read_to_string(&paths.control).unwrap())
+                .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&paths.control).unwrap().permissions().mode()
+                    & 0o777,
+                0o600
+            );
+        }
+        let mut stranger = TcpStream::connect(("127.0.0.1", endpoint.port))
+            .await
+            .unwrap();
+        stranger
+            .write_all(b"wrong-token components-start\n")
+            .await
+            .unwrap();
+        let mut response = String::new();
+        stranger.read_to_string(&mut response).await.unwrap();
+        assert!(response.contains("unauthorized"));
+        assert!(!core.lock().await.status().running);
+        for command in
+            ["components-start", "components-stop", "components-start"]
+        {
+            assert!(request(&paths, command).await.unwrap().contains("true"));
+            let current: ControlEndpoint = serde_json::from_str(
+                &fs::read_to_string(&paths.control).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(current.port, endpoint.port);
+            assert_eq!(current.token, endpoint.token);
+        }
+        assert!(core.lock().await.status().running);
+        request(&paths, "stop").await.unwrap();
+        rx.await.unwrap();
+        server.await.unwrap();
+        core.lock().await.stop().await.unwrap();
+        fs::remove_dir_all(directory).unwrap();
+    }
 }

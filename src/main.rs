@@ -68,6 +68,10 @@ pub struct Cli {
     #[arg(long, hide = true)]
     run_core: bool,
 
+    /// Owning WebUI process for the internal authorized host.
+    #[arg(long, hide = true)]
+    core_parent_pid: Option<u32>,
+
     /// Internal elevated TUN worker owned by zay.
     #[arg(long, hide = true)]
     run_tun_worker: bool,
@@ -265,6 +269,15 @@ fn main() -> Result<()> {
         });
     }
     if cli.run_core {
+        if let Some(parent) = cli.core_parent_pid {
+            return tokio::runtime::Runtime::new()
+                .context("creating core tokio runtime")?
+                .block_on(runtime::run_supervised_core(
+                    cli.data_dir,
+                    cli.config,
+                    parent,
+                ));
+        }
         return tokio::runtime::Runtime::new()
             .context("creating core tokio runtime")?
             .block_on(runtime::run_foreground_core(cli.data_dir, cli.config));

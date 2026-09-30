@@ -66,6 +66,7 @@ export type StateResponse = {
   }
   core: {
     running: boolean
+    pending_changes: boolean
     health: "stopped" | "starting" | "healthy" | "degraded" | "failed" | "stopping"
     error?: string | null
     stack?: StackStatus | null
@@ -75,6 +76,11 @@ export type StateResponse = {
   rule_sets: RuleSetInventory
   config: ZayConfig
   paths: { data_dir: string; config: string; log: string }
+}
+
+export type ApplyResponse = {
+  saved: boolean
+  apply: { applied: boolean; components: string[]; error: string | null }
 }
 
 export type ConfigPayload = {
@@ -218,7 +224,7 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   return data as T
 }
 
-export async function uploadRuleSet(path: string, body: BodyInit): Promise<{ ok: boolean; restart_required: boolean }> {
+export async function uploadRuleSet(path: string, body: BodyInit): Promise<ApplyResponse> {
   const headers = new Headers()
   if (token) headers.set("Authorization", `Bearer ${token}`)
   const response = await fetch(path, { method: "PUT", headers, body })

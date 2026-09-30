@@ -10,9 +10,11 @@ Examples:
    ```
 
    `zay webui` stays in the foreground and never daemonizes. Use systemd,
-   launchd, or another process manager when it should persist. If the enabled
-   TUN or Mesh node needs privileges, authorization is requested in this
-   terminal before the WebUI starts; passwords never pass through HTTP.
+   launchd, or another process manager when it should persist. On macOS/Linux, administrator authorization is requested once in this
+   terminal before the WebUI starts, including with `--no-start-core`. The
+   supervised host stays available for browser-controlled start/stop and
+   configuration changes, even after sudo's timestamp expires. Passwords never
+   pass through HTTP. Saving configuration applies only affected components.
 
    `[[http]]`, `[[fwd]]`, and `[[ssh]]` define persistent services. Their
    experimental `zay x run` counterparts remain one-off foreground tools.

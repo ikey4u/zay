@@ -68,6 +68,7 @@ struct AppState {
     config_path: PathBuf,
     token: Option<Arc<str>>,
     core: Arc<CoreSupervisor>,
+    config_update: Arc<tokio::sync::Mutex<()>>,
     shutdown: Arc<Notify>,
     node_latencies: Arc<Mutex<HashMap<String, NodeTestResult>>>,
 }
@@ -88,6 +89,8 @@ struct NodeTestRequest {
 
 #[derive(Debug, Deserialize)]
 struct ConfigUpdate {
+    #[serde(default)]
+    refresh_proxy: bool,
     proxy: ProxyInput,
     #[serde(default)]
     mesh: MeshInput,
@@ -240,16 +243,9 @@ pub fn run(cli: WebUiCli) -> Result<()> {
     );
     settings::ensure_zay_toml(&data_dir, &config_path)?;
     #[cfg(unix)]
-    let startup_password = if cli.start_core {
-        let cfg = settings::load_persistent_config(
-            Some(&data_dir),
-            Some(&config_path),
-        )?;
-        if cfg.requires_root() && !crate::privilege::is_root() {
-            crate::privilege::prompt_core_authorization()?
-        } else {
-            None
-        }
+    let startup_password = if !crate::privilege::is_root() {
+        // Authorize the host once; component stop/apply must not depend on sudo's timestamp.
+        crate::privilege::prompt_core_authorization()?
     } else {
         None
     };
@@ -272,8 +268,9 @@ async fn run_async(
     let core =
         Arc::new(CoreSupervisor::new(data_dir.clone(), config_path.clone()));
     let shutdown = Arc::new(Notify::new());
+    core.initialize(startup_password).await?;
     let startup_error = if cli.start_core {
-        core.start(startup_password)
+        core.start(None)
             .await
             .err()
             .map(|error| format!("{error:#}"))
@@ -285,6 +282,7 @@ async fn run_async(
         config_path,
         token: cli.token.map(Arc::from),
         core: core.clone(),
+        config_update: Arc::new(tokio::sync::Mutex::new(())),
         shutdown: shutdown.clone(),
         node_latencies: Arc::new(Mutex::new(HashMap::new())),
     };
@@ -298,6 +296,8 @@ async fn run_async(
         .route("/api/v1/core/start", post(start_core))
         .route("/api/v1/core/stop", post(stop_core))
         .route("/api/v1/core/restart", post(restart_core))
+        .route("/api/v1/core/apply", post(apply_core))
+        .route("/api/v1/core/proxy/apply", post(apply_proxy))
         .route("/api/v1/proxy/nodes/test", post(test_proxy_nodes))
         .route("/api/v1/exit", post(exit_webui))
         .route("/api/v1/logs", get(get_logs))
@@ -339,7 +339,7 @@ async fn run_async(
         .with_graceful_shutdown(shutdown_signal(shutdown))
         .await
         .context("serving WebUI");
-    core.stop().await.context("stopping core")?;
+    core.shutdown().await.context("stopping core host")?;
     result
 }
 
@@ -399,15 +399,46 @@ async fn update_config(
     Json(input): Json<ConfigUpdate>,
 ) -> ApiResult<Json<JsonValue>> {
     authorize(&state, &headers)?;
+    let _update = state.config_update.lock().await;
     let raw =
         fs::read_to_string(&state.config_path).map_err(ApiError::internal)?;
     let mut doc = raw.parse::<DocumentMut>().map_err(ApiError::bad_request)?;
+    let force_proxy = input.refresh_proxy;
     apply_config(&mut doc, input).map_err(ApiError::bad_request)?;
     let next = doc.to_string();
     settings::validate_persistent_toml(&next).map_err(ApiError::bad_request)?;
     atomic_write(&state.config_path, next.as_bytes())
         .map_err(ApiError::internal)?;
-    Ok(Json(json!({ "ok": true, "restart_required": true })))
+    Ok(Json(apply_saved(&state, force_proxy).await))
+}
+
+async fn apply_saved(state: &AppState, force_proxy: bool) -> JsonValue {
+    let applied = state.core.apply(force_proxy).await.unwrap_or_else(|error| {
+        crate::runtime::ApplyResult {
+            applied: false,
+            components: Vec::new(),
+            error: Some(format!("{error:#}")),
+        }
+    });
+    json!({ "saved": true, "apply": applied })
+}
+
+async fn apply_core(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> ApiResult<Json<JsonValue>> {
+    authorize(&state, &headers)?;
+    let _update = state.config_update.lock().await;
+    Ok(Json(apply_saved(&state, false).await))
+}
+
+async fn apply_proxy(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> ApiResult<Json<JsonValue>> {
+    authorize(&state, &headers)?;
+    let _update = state.config_update.lock().await;
+    Ok(Json(apply_saved(&state, true).await))
 }
 
 async fn start_core(
@@ -415,7 +446,7 @@ async fn start_core(
     headers: HeaderMap,
 ) -> ApiResult<Json<JsonValue>> {
     authorize(&state, &headers)?;
-    state.core.start(None).await.map_err(core_error)?;
+    state.core.start(None).await.map_err(ApiError::internal)?;
     Ok(Json(snapshot(&state).await?))
 }
 
@@ -433,7 +464,7 @@ async fn restart_core(
     headers: HeaderMap,
 ) -> ApiResult<Json<JsonValue>> {
     authorize(&state, &headers)?;
-    state.core.restart(None).await.map_err(core_error)?;
+    state.core.restart(None).await.map_err(ApiError::internal)?;
     Ok(Json(snapshot(&state).await?))
 }
 
@@ -619,18 +650,6 @@ async fn exit_webui(
     Ok(Json(json!({ "ok": true })))
 }
 
-fn core_error(error: anyhow::Error) -> ApiError {
-    if format!("{error:#}").contains("administrator authorization expired") {
-        ApiError::new(
-            StatusCode::CONFLICT,
-            "terminal_authorization_required",
-            error,
-        )
-    } else {
-        ApiError::internal(error)
-    }
-}
-
 async fn get_logs(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -688,6 +707,7 @@ async fn put_rule_set(
             anyhow::anyhow!("built-in rule sets are read-only"),
         ));
     }
+    let _update = state.config_update.lock().await;
     let path = rule_set_path(&state, &group, &name)?;
     if name.ends_with(".json") {
         let value = serde_json::from_slice::<JsonValue>(&bytes)
@@ -703,7 +723,7 @@ async fn put_rule_set(
         )));
     }
     atomic_write(&path, &bytes).map_err(ApiError::internal)?;
-    Ok(Json(json!({ "ok": true, "restart_required": true })))
+    Ok(Json(apply_saved(&state, true).await))
 }
 
 fn rule_set_path(
@@ -1211,6 +1231,7 @@ mod tests {
         apply_config(
             &mut doc,
             ConfigUpdate {
+                refresh_proxy: false,
                 proxy: ProxyInput {
                     enabled: true,
                     subscriptions: vec!["https://example/sub".into()],

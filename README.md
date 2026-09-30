@@ -26,10 +26,19 @@ desktop browser, so the same command works on headless Linux. Use `--open` on a
 desktop. A non-loopback `--listen` requires a bearer `--token` (or
 `ZAY_WEBUI_TOKEN`).
 
-On macOS/Linux, if the enabled configuration needs TUN or a Mesh node,
-`zay webui` requests sudo authorization in the launching terminal before the
-HTTP server starts. Only the supervised core child is elevated. Passwords never
-pass through the browser or HTTP API.
+On macOS/Linux, `zay webui` requests administrator authorization once in the
+launching terminal (including with `--no-start-core`). The supervised core host
+keeps that authorization for the WebUI session, so stopping, starting, and
+applying configuration from the browser do not depend on sudo's timestamp.
+Exiting the WebUI also exits the host. System services running as root do not
+prompt. Passwords are not retained or sent through the browser or HTTP API.
+
+Saving configuration in the WebUI applies changes to affected components:
+proxy changes replace the proxy runtime while Mesh stays connected; Mesh
+identity changes replace Mesh only. Changes to Mesh addresses, peer/listener
+routes, or enablement also update the proxy's dependent routes. Unchanged
+configuration does not restart components. The UI reports application failures
+and offers a retry; the explicit full restart action still restarts all components.
 
 The former command-line interfaces are retained under the unstable `zay x`
 namespace: `zay x run`, `zay x config`, and `zay x service`. They are internal

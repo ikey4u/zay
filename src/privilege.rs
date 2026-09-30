@@ -234,7 +234,7 @@ pub fn command_for_program_with_password(
 }
 
 /// Build a privileged command that may only use an already-authorized sudo/doas
-/// session. It never prompts and is therefore safe for WebUI-triggered restarts.
+/// session. Used only to launch a core host without an interactive password.
 #[cfg(unix)]
 pub fn command_for_program_with_cached_authorization(
     program: &Path,
@@ -249,27 +249,6 @@ pub fn command_for_program_with_cached_authorization(
     let mut command = Command::new(wrapper);
     command.arg("-n").arg(program).stdin(Stdio::null());
     Ok(command)
-}
-
-#[cfg(unix)]
-pub fn validate_cached_authorization() -> Result<()> {
-    if is_root() {
-        return Ok(());
-    }
-    let wrapper = resolve_privilege_wrapper()?;
-    let status = if wrapper_is_sudo(&wrapper) {
-        Command::new(wrapper).args(["-n", "-v"]).status()
-    } else {
-        Command::new(wrapper).args(["-n", "true"]).status()
-    }
-    .context("checking cached administrator authorization")?;
-    if status.success() {
-        Ok(())
-    } else {
-        bail!(
-            "administrator authorization expired; restart `zay webui` from a terminal"
-        )
-    }
 }
 
 /// When the core runs as root via `sudo`, return the invoking user's uid/gid.

@@ -476,27 +476,18 @@ pub fn spawn_background_download(
     settings: Settings,
     config_json: Arc<RwLock<String>>,
 ) {
+    // Configuration belongs to the component lifecycle. A download started by
+    // an older proxy instance must never overwrite a newer generated config.
+    let _ = config_json;
     thread::spawn(move || {
-        if let Err(e) = update_rules_via_proxy(&settings) {
-            eprintln!("clash-rules update: {e:#}");
+        if let Err(error) = update_rules_via_proxy(&settings) {
+            eprintln!("clash-rules update: {error:#}");
             return;
         }
-        if !files_present(&settings.singbox_dir()) {
-            return;
-        }
-        match crate::singbox::builder::build_config(&settings, true) {
-            Ok(json) => {
-                let path = settings.config_path();
-                if let Err(e) = fs::write(&path, &json) {
-                    eprintln!("writing config after rules update: {e:#}");
-                    return;
-                }
-                *config_json.write().expect("config lock") = json;
-                eprintln!(
-                    "clash-rules updated on disk; restart `zay x run proxy` to apply"
-                );
-            }
-            Err(e) => eprintln!("rebuild config after rules update: {e:#}"),
+        if files_present(&settings.singbox_dir()) {
+            eprintln!(
+                "clash-rules updated on disk; apply proxy configuration to load them"
+            );
         }
     });
 }
