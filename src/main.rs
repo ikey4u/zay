@@ -15,6 +15,8 @@ mod settings;
 mod singbox;
 mod ssh;
 mod stack;
+#[cfg(any(target_os = "linux", test))]
+mod systemctl;
 mod webui;
 #[cfg(windows)]
 mod windows_tun_worker;
@@ -106,6 +108,9 @@ pub enum ExperimentalCommand {
     Config(config::ConfigCli),
     /// Manage configured persistent services
     Service(ServiceCli),
+    /// Print a ready-to-install Linux systemd service unit
+    #[cfg(target_os = "linux")]
+    Systemctl(systemctl::SystemctlCli),
 }
 
 #[derive(Args, Debug)]
@@ -280,6 +285,8 @@ fn main() -> Result<()> {
             },
             ExperimentalCommand::Config(config) => config::run(config),
             ExperimentalCommand::Service(service) => run_service(service),
+            #[cfg(target_os = "linux")]
+            ExperimentalCommand::Systemctl(opts) => systemctl::run(opts),
         },
     }
 }

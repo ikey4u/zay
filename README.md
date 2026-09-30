@@ -8,6 +8,19 @@ See `zay --help` for usage.
 foreground. It never daemonizes or installs a system service; use systemd,
 launchd, or your preferred process manager when persistence is required.
 
+On Linux, put the executable in its permanent location, then generate a systemd
+unit with the current executable and configuration paths:
+
+```bash
+zay x systemctl > zay.service                    # WebUI: 127.0.0.1:18888
+zay x systemctl --port 3333 > zay.service        # custom port
+```
+
+The generated comments include installation, startup, logging, and shutdown
+commands. `--config FILE` and `--data-dir DIR` select custom configuration paths.
+The service runs as root for TUN access; stop any manually started Zay before
+starting the system service.
+
 By default the WebUI listens on `127.0.0.1:8787` and does not try to open a
 desktop browser, so the same command works on headless Linux. Use `--open` on a
 desktop. A non-loopback `--listen` requires a bearer `--token` (or
