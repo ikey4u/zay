@@ -279,6 +279,15 @@ impl SingboxLogWriter {
         let Some(object) = value.as_object() else {
             return false;
         };
+        let is_error = object.get("event").and_then(|value| value.as_str())
+            == Some("flow_error");
+        let level = if is_error { "error" } else { "info" };
+        let kind = if is_error {
+            "connection_error"
+        } else {
+            "connection"
+        };
+        let error = object.get("error").and_then(|value| value.as_str());
         let mut fields = BTreeMap::new();
         for key in [
             "network",
@@ -296,6 +305,8 @@ impl SingboxLogWriter {
             "process_name",
             "process_path",
             "process_lookup",
+            "stage",
+            "error_kind",
         ] {
             if let Some(value) =
                 object.get(key).and_then(|value| value.as_str())
@@ -303,6 +314,11 @@ impl SingboxLogWriter {
             {
                 fields.insert(key.to_string(), value.to_string());
             }
+        }
+        if let Some(code) =
+            object.get("os_error").and_then(|value| value.as_i64())
+        {
+            fields.insert("os_error".into(), code.to_string());
         }
         if let Some(app) = fields
             .get("process_path")
@@ -315,7 +331,7 @@ impl SingboxLogWriter {
             fields.insert("node".into(), outbound);
         }
         let human = format!(
-            "proxy connection level=info app={:?} dst={:?} domain={:?} domain_source={:?} confidence={:?} node={:?}",
+            "proxy {kind} level={level} app={:?} dst={:?} domain={:?} domain_source={:?} confidence={:?} node={:?} stage={:?}{}",
             fields.get("app").map(String::as_str).unwrap_or("-"),
             fields.get("destination").map(String::as_str).unwrap_or("-"),
             fields.get("domain").map(String::as_str).unwrap_or("-"),
@@ -328,15 +344,13 @@ impl SingboxLogWriter {
                 .map(String::as_str)
                 .unwrap_or("none"),
             fields.get("node").map(String::as_str).unwrap_or("-"),
+            fields.get("stage").map(String::as_str).unwrap_or("-"),
+            error
+                .map(|value| format!(" error={value:?}"))
+                .unwrap_or_default(),
         );
         crate::logging::emit_with_source(
-            "singbox",
-            "info",
-            "proxy",
-            "connection",
-            clean,
-            None,
-            fields,
+            "singbox", level, "proxy", kind, clean, error, fields,
         );
         buffer.push(human);
         true
@@ -753,6 +767,37 @@ mod tests {
         let human = std::fs::read_to_string(dir.join("zay.log")).unwrap();
         assert!(human.contains("domain=\"www.google.com\""));
         assert!(human.contains("domain_source=\"sniff\""));
+    }
+
+    #[test]
+    fn captures_native_flow_errors_without_downgrading_level() {
+        let _guard =
+            TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let dir = std::env::temp_dir()
+            .join(format!("zay-log-native-flow-error-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::logging::init(&dir);
+        let writer = SingboxLogWriter::new(dir.clone());
+        let buffer = LogBuffer::with_default_capacity();
+        writer.write(
+            r#"+0800 2026-09-29 00:01:56 ERROR zay-flow: {"event":"flow_error","network":"tcp","destination":"110.242.74.102:80","domain":"baidu.com","domain_source":"sniff","outbound":"direct","stage":"dial","error":"Network is unreachable (os error 101)","error_kind":"NetworkUnreachable","os_error":101}"#,
+            &buffer,
+        );
+        crate::logging::flush();
+        let events = std::fs::read_to_string(dir.join("events.jsonl")).unwrap();
+        let event: serde_json::Value =
+            serde_json::from_str(events.lines().last().unwrap()).unwrap();
+        assert_eq!(event["level"], "error");
+        assert_eq!(event["event"], "connection_error");
+        assert_eq!(event["error"], "Network is unreachable (os error 101)");
+        assert_eq!(event["fields"]["stage"], "dial");
+        assert_eq!(event["fields"]["os_error"], "101");
+        assert_eq!(event["fields"]["node"], "direct");
+        assert_eq!(event["fields"]["domain"], "baidu.com");
+        let human = buffer.recent().pop().unwrap();
+        assert!(human.contains("connection_error level=error"));
+        assert!(human.contains("stage=\"dial\""));
+        assert!(human.contains("Network is unreachable"));
     }
 
     #[test]

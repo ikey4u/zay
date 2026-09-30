@@ -332,9 +332,25 @@ pub(crate) async fn proxy_routed_tcp_with_origin(
     let attribution = traffic_attribution(router, &metadata, &decision);
     let remote =
         dialer.dial_tcp_with_options(&destination, &connection_options.network);
-    let remote = with_traffic_attribution(attribution, remote).await?;
-    let mut remote = apply_routed_tcp_options(remote, &connection_options)?;
-    tokio::io::copy_bidirectional(&mut stream, &mut remote).await?;
+    let remote = with_traffic_attribution(attribution, remote)
+        .await
+        .inspect_err(|error| {
+            router.observe_flow_error(&metadata, &decision, "dial", error);
+        })?;
+    let mut remote = apply_routed_tcp_options(remote, &connection_options)
+        .inspect_err(|error| {
+            router.observe_flow_error(
+                &metadata,
+                &decision,
+                "stream_options",
+                error,
+            );
+        })?;
+    tokio::io::copy_bidirectional(&mut stream, &mut remote)
+        .await
+        .inspect_err(|error| {
+            router.observe_flow_error(&metadata, &decision, "relay", error);
+        })?;
     Ok(())
 }
 
@@ -922,7 +938,7 @@ pub(crate) async fn serve_hijacked_dns_stream_with_context(
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc, time::Duration};
+    use std::{io, sync::Arc, time::Duration};
 
     use hickory_proto::{
         op::{Message, MessageType, OpCode, Query},
@@ -1374,6 +1390,102 @@ mod tests {
             Err(error) => error,
         };
         assert_eq!(error.to_string(), "inbound detour loop: loop-a -> loop-b");
+    }
+
+    #[tokio::test]
+    async fn routed_tcp_dial_failure_logs_outbound_and_system_error() {
+        assert_routed_tcp_failure("dial", io::ErrorKind::ConnectionRefused)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn routed_tcp_reset_logs_relay_stage_and_system_error() {
+        assert_routed_tcp_failure("relay", io::ErrorKind::ConnectionReset)
+            .await;
+    }
+
+    async fn assert_routed_tcp_failure(stage: &str, expected: io::ErrorKind) {
+        let request = b"GET / HTTP/1.1\r\nHost: baidu.com\r\n\r\n";
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let destination = listener.local_addr().unwrap();
+        let remote_task = if stage == "relay" {
+            Some(tokio::spawn(async move {
+                let (mut remote, _) = listener.accept().await.unwrap();
+                let mut received = vec![0; request.len()];
+                remote.read_exact(&mut received).await.unwrap();
+                assert_eq!(received, request);
+                socket2::SockRef::from(&remote)
+                    .set_linger(Some(Duration::ZERO))
+                    .unwrap();
+                drop(remote);
+            }))
+        } else {
+            drop(listener);
+            None
+        };
+        let factory = crate::log::Factory::new(
+            &crate::option::LogOptions {
+                level: "fatal".into(),
+                ..crate::option::LogOptions::default()
+            },
+            true,
+        )
+        .unwrap();
+        let mut events = factory.subscribe().unwrap();
+        factory.start().unwrap();
+        let mut router = Router::from_json(
+            &[json!({"action":"sniff", "sniffer":"http"})],
+            "direct",
+        )
+        .unwrap();
+        router.configure_flow_logger(factory.new_logger("zay-flow"));
+        let options: Options = serde_json::from_value(json!({
+            "outbounds": [{"type":"direct", "tag":"direct"}],
+            "route": {"final":"direct"}
+        }))
+        .unwrap();
+        let outbounds =
+            OutboundManager::from_options(&options, "direct").unwrap();
+        let (stream, mut client) = tokio::io::duplex(1024);
+        client.write_all(request).await.unwrap();
+        let error = tokio::time::timeout(
+            Duration::from_secs(5),
+            proxy_routed_tcp_with_origin(
+                Box::new(stream),
+                "127.0.0.1:50000".parse().unwrap(),
+                "tun-in",
+                "",
+                destination.into(),
+                None,
+                None,
+                false,
+                &router,
+                &outbounds,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        if let Some(task) = remote_task {
+            task.await.unwrap();
+        }
+        assert_eq!(error.kind(), expected);
+        let selected = events.try_recv().unwrap();
+        assert_eq!(selected.level, crate::log::Level::Info);
+        let failed = events.try_recv().unwrap();
+        assert_eq!(failed.level, crate::log::Level::Error);
+        let payload: serde_json::Value = serde_json::from_str(
+            failed.message.strip_prefix("zay-flow: ").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(payload["event"], "flow_error");
+        assert_eq!(payload["stage"], stage);
+        assert_eq!(payload["outbound"], "direct");
+        assert_eq!(payload["domain"], "baidu.com");
+        assert_eq!(payload["domain_source"], "sniff");
+        assert_eq!(payload["routed_destination"], destination.to_string());
+        assert_eq!(payload["error_kind"], format!("{expected:?}"));
+        assert_eq!(payload["os_error"], error.raw_os_error().unwrap());
     }
 
     #[tokio::test]

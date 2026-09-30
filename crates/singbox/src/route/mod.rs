@@ -2205,6 +2205,25 @@ impl Router {
         metadata: &Metadata,
         decision: &RouteDecision<'_>,
     ) {
+        self.write_flow_event(metadata, decision, None);
+    }
+
+    pub(crate) fn observe_flow_error(
+        &self,
+        metadata: &Metadata,
+        decision: &RouteDecision<'_>,
+        stage: &str,
+        error: &std::io::Error,
+    ) {
+        self.write_flow_event(metadata, decision, Some((stage, error)));
+    }
+
+    fn write_flow_event(
+        &self,
+        metadata: &Metadata,
+        decision: &RouteDecision<'_>,
+        failure: Option<(&str, &std::io::Error)>,
+    ) {
         let Some(logger) = &self.flow_logger else {
             return;
         };
@@ -2242,7 +2261,7 @@ impl Router {
         let routed_destination = destination
             .map(|destination| decision.destination(destination).to_string())
             .unwrap_or_default();
-        let event = serde_json::json!({
+        let mut event = serde_json::json!({
             "event": "flow",
             "network": current.network.map(Network::as_str).unwrap_or(""),
             "inbound": current.inbound,
@@ -2260,7 +2279,17 @@ impl Router {
             "process_path": current.process_path,
             "process_lookup": current.process_lookup,
         });
-        let _ = logger.info(event.to_string());
+        if let Some((stage, error)) = failure {
+            event["event"] = Value::from("flow_error");
+            event["stage"] = Value::from(stage);
+            event["error"] = Value::from(error.to_string());
+            event["error_kind"] = Value::from(format!("{:?}", error.kind()));
+            event["os_error"] =
+                error.raw_os_error().map(Value::from).unwrap_or(Value::Null);
+            let _ = logger.error(event.to_string());
+        } else {
+            let _ = logger.info(event.to_string());
+        }
     }
 
     /// Resolve process and domain attribution for diagnostics and optional
