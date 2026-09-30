@@ -1,4 +1,4 @@
-//! TUN `route_exclude_address` helpers — keep LAN/SSH and mesh control traffic off the tunnel.
+//! TUN route exclusions for LAN, inbound SSH, and mesh control traffic.
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::process::Command;
@@ -97,14 +97,8 @@ pub fn tun_exclude_addresses(settings: &Settings) -> Result<Vec<String>> {
         excludes.extend(stun);
     }
     excludes.extend(detect_os_ipv4_cidrs());
-    let ssh_servers = detect_ssh_server_cidrs();
-    if !ssh_servers.is_empty() {
-        eprintln!(
-            "tun exclude: active SSH destination(s) → {}",
-            ssh_servers.join(", ")
-        );
-    }
-    excludes.extend(ssh_servers);
+    // Preserve remote administrators connected to this machine. Outbound SSH
+    // destinations must enter the TUN so user proxy rules can match them.
     let ssh_clients = detect_ssh_inbound_client_cidrs();
     if !ssh_clients.is_empty() {
         eprintln!(
@@ -623,53 +617,6 @@ fn mask_to_prefix(bits: u32) -> u8 {
     bits.count_ones() as u8
 }
 
-/// Outbound SSH from this machine (dport :22) — Mac/Linux clients must reach relay/VPS directly.
-fn detect_ssh_server_cidrs() -> Vec<String> {
-    #[cfg(target_os = "linux")]
-    {
-        for args in [
-            &["-H", "-tn", "state", "established", "dport", "=", ":22"][..],
-            &["-tn", "state", "established", "(", "dport", "=", ":22", ")"][..],
-        ] {
-            if let Ok(out) = Command::new("ss").args(args).output()
-                && out.status.success()
-            {
-                let cidrs =
-                    parse_ss_ssh_peers(&String::from_utf8_lossy(&out.stdout));
-                if !cidrs.is_empty() {
-                    return cidrs;
-                }
-            }
-        }
-    }
-    #[cfg(target_os = "macos")]
-    {
-        if let Ok(out) = Command::new("lsof")
-            .args(["-nP", "-iTCP", "-sTCP:ESTABLISHED"])
-            .output()
-            && out.status.success()
-        {
-            let cidrs =
-                parse_lsof_ssh_servers(&String::from_utf8_lossy(&out.stdout));
-            if !cidrs.is_empty() {
-                return cidrs;
-            }
-        }
-        if let Ok(out) =
-            Command::new("netstat").args(["-anv", "-p", "tcp"]).output()
-            && out.status.success()
-        {
-            let cidrs = parse_netstat_macos_ssh_servers(
-                &String::from_utf8_lossy(&out.stdout),
-            );
-            if !cidrs.is_empty() {
-                return cidrs;
-            }
-        }
-    }
-    Vec::new()
-}
-
 /// Inbound SSH on this machine (sport :22) — relay/VPS return traffic stays off TUN.
 fn detect_ssh_inbound_client_cidrs() -> Vec<String> {
     #[cfg(target_os = "linux")]
@@ -714,51 +661,6 @@ fn parse_netstat_ssh_clients(text: &str) -> Vec<String> {
             peer_to_ipv4_cidr(parts.last().copied().unwrap_or(""))
         {
             cidrs.push(cidr);
-        }
-    }
-    cidrs.sort();
-    cidrs.dedup();
-    cidrs
-}
-
-#[cfg(target_os = "macos")]
-fn parse_lsof_ssh_servers(text: &str) -> Vec<String> {
-    let mut cidrs = Vec::new();
-    for line in text.lines().skip(1) {
-        if !line.contains("->") || !line.contains(":22") {
-            continue;
-        }
-        let Some(remote) = line.split("->").nth(1) else {
-            continue;
-        };
-        let remote = remote.split_whitespace().next().unwrap_or("");
-        if let Some(cidr) =
-            peer_to_ipv4_cidr(remote.trim_end_matches("(ESTABLISHED)"))
-        {
-            cidrs.push(cidr);
-        }
-    }
-    cidrs.sort();
-    cidrs.dedup();
-    cidrs
-}
-
-#[cfg(target_os = "macos")]
-fn parse_netstat_macos_ssh_servers(text: &str) -> Vec<String> {
-    let mut cidrs = Vec::new();
-    for line in text.lines() {
-        if !line.contains("ESTABLISHED") {
-            continue;
-        }
-        let parts: Vec<_> = line.split_whitespace().collect();
-        if parts.len() < 5 {
-            continue;
-        }
-        let foreign = parts[4];
-        if foreign.ends_with(".22") || foreign.contains(":22") {
-            if let Some(cidr) = peer_to_ipv4_cidr(foreign) {
-                cidrs.push(cidr);
-            }
         }
     }
     cidrs.sort();
