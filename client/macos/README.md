@@ -32,6 +32,14 @@ xcodebuild -project ZayMac.xcodeproj -scheme ZayMac \
 An unsigned build verifies source and project structure but cannot install or
 activate the extension.
 
+To activate a signed development build, quit the running app, copy the complete
+`Zay.app` into `/Applications`, and open that copy before choosing Install and
+Enable. Replace the app as a whole after rebuilding; do not merge old contents.
+The embedded bundle is
+`Contents/Library/SystemExtensions/dev.zay.macos.process-filter.systemextension`.
+Keep its product name equal to its bundle identifier so macOS can discover it.
+The Swift module name stays `ZayProcessFilter` for the provider class reference.
+
 ## Signing setup
 
 1. Copy `project.local.yml.example` to `project.local.yml` and set the Team ID.

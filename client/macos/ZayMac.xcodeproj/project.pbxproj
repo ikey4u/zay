@@ -17,7 +17,7 @@
 		830E43F1AB0055B73C0780A6 /* NetworkExtension.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 8AA359A7D645BCF08E88D3F1 /* NetworkExtension.framework */; };
 		8D2F0675F159B6938B250D58 /* AppGroup.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD3A3CA7EBF65E2C481DD21D /* AppGroup.swift */; };
 		92C0686FFDD462378EC88A9F /* AttributionEvent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64924021DB8640B0705C555F /* AttributionEvent.swift */; };
-		96450E8DFADE50E3AB29F2CA /* ZayProcessFilter.systemextension in Embed System Extensions */ = {isa = PBXBuildFile; fileRef = 69588D59D44E0AC98A1C8241 /* ZayProcessFilter.systemextension */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		96450E8DFADE50E3AB29F2CA /* dev.zay.macos.process-filter.systemextension in Embed System Extensions */ = {isa = PBXBuildFile; fileRef = 69588D59D44E0AC98A1C8241 /* dev.zay.macos.process-filter.systemextension */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		997BADCA88A40ED56D745855 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E140660AC89584FEF74C304A /* ContentView.swift */; };
 		BAB12519103DB0D5C8CBC589 /* ProcessFilterController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 785EDD8361F7A5FB979341F0 /* ProcessFilterController.swift */; };
 		CF76C9C9357FF4BA5753A147 /* ProcessIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 494CFDECAB169BEAF3727246 /* ProcessIdentity.swift */; };
@@ -43,7 +43,7 @@
 			dstPath = "$(SYSTEM_EXTENSIONS_FOLDER_PATH)";
 			dstSubfolderSpec = 16;
 			files = (
-				96450E8DFADE50E3AB29F2CA /* ZayProcessFilter.systemextension in Embed System Extensions */,
+				96450E8DFADE50E3AB29F2CA /* dev.zay.macos.process-filter.systemextension in Embed System Extensions */,
 			);
 			name = "Embed System Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -57,7 +57,7 @@
 		494CFDECAB169BEAF3727246 /* ProcessIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProcessIdentity.swift; sourceTree = "<group>"; };
 		63D2E1787CD1E02ED950FEAA /* ZayMacApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZayMacApp.swift; sourceTree = "<group>"; };
 		64924021DB8640B0705C555F /* AttributionEvent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttributionEvent.swift; sourceTree = "<group>"; };
-		69588D59D44E0AC98A1C8241 /* ZayProcessFilter.systemextension */ = {isa = PBXFileReference; explicitFileType = "wrapper.system-extension"; includeInIndex = 0; path = ZayProcessFilter.systemextension; sourceTree = BUILT_PRODUCTS_DIR; };
+		69588D59D44E0AC98A1C8241 /* dev.zay.macos.process-filter.systemextension */ = {isa = PBXFileReference; explicitFileType = "wrapper.system-extension"; includeInIndex = 0; path = dev.zay.macos.process-filter.systemextension; sourceTree = BUILT_PRODUCTS_DIR; };
 		6CC35A184EFA433FA199F663 /* ZayProcessFilter.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = ZayProcessFilter.entitlements; sourceTree = "<group>"; };
 		6EA488BD6194F26E8631362B /* Security.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Security.framework; path = System/Library/Frameworks/Security.framework; sourceTree = SDKROOT; };
 		785EDD8361F7A5FB979341F0 /* ProcessFilterController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProcessFilterController.swift; sourceTree = "<group>"; };
@@ -144,7 +144,7 @@
 			isa = PBXGroup;
 			children = (
 				2D8745CD1C270428829BE902 /* ZayMac.app */,
-				69588D59D44E0AC98A1C8241 /* ZayProcessFilter.systemextension */,
+				69588D59D44E0AC98A1C8241 /* dev.zay.macos.process-filter.systemextension */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -178,7 +178,7 @@
 			packageProductDependencies = (
 			);
 			productName = ZayProcessFilter;
-			productReference = 69588D59D44E0AC98A1C8241 /* ZayProcessFilter.systemextension */;
+			productReference = 69588D59D44E0AC98A1C8241 /* dev.zay.macos.process-filter.systemextension */;
 			productType = "com.apple.product-type.system-extension";
 		};
 		BCB02B9F8B665DBFE4A058C2 /* ZayMac */ = {
@@ -446,7 +446,8 @@
 					"@executable_path/../Frameworks",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = "dev.zay.macos.process-filter";
-				PRODUCT_NAME = ZayProcessFilter;
+				PRODUCT_NAME = "dev.zay.macos.process-filter";
+				PRODUCT_MODULE_NAME = ZayProcessFilter;
 				SDKROOT = macosx;
 				SKIP_INSTALL = YES;
 			};
@@ -464,7 +465,8 @@
 					"@executable_path/../Frameworks",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = "dev.zay.macos.process-filter";
-				PRODUCT_NAME = ZayProcessFilter;
+				PRODUCT_NAME = "dev.zay.macos.process-filter";
+				PRODUCT_MODULE_NAME = ZayProcessFilter;
 				SDKROOT = macosx;
 				SKIP_INSTALL = YES;
 			};

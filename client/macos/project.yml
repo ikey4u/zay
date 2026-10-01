@@ -55,7 +55,8 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.zay.macos.process-filter
-        PRODUCT_NAME: ZayProcessFilter
+        PRODUCT_NAME: dev.zay.macos.process-filter
+        PRODUCT_MODULE_NAME: ZayProcessFilter
         INFOPLIST_FILE: ZayProcessFilter/Info.plist
         CODE_SIGN_ENTITLEMENTS: ZayProcessFilter/ZayProcessFilter.entitlements
         GENERATE_INFOPLIST_FILE: NO
