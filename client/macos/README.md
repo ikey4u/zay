@@ -38,9 +38,37 @@ activate the extension.
 2. Register `dev.zay.macos`, `dev.zay.macos.process-filter`, and the App Group
    `group.dev.zay.macos` in the Apple Developer portal.
 3. Enable System Extension and Network Extension / Content Filter capabilities.
-4. Create provisioning profiles authorizing the entitlements in both targets.
-5. Regenerate the project, sign both targets with the same Team ID, archive, and
-   notarize the containing app for Developer ID distribution.
+4. Use Apple Development signing with automatic provisioning for local builds.
+   Both targets use `content-filter-provider`, including when the provider is
+   packaged as a system extension. Sign both targets with the same Team ID.
+5. Regenerate the project after changing `project.local.yml`, then build in Xcode.
+
+### Provisioning profile entitlement mismatch
+
+If Xcode reports that a Mac Team Provisioning Profile does not match
+`com.apple.developer.networking.networkextension`, check both targets' entitlement
+files. Development builds must request `content-filter-provider`.
+`content-filter-provider-systemextension` is for Developer ID distribution;
+using it with a development profile causes this mismatch.
+
+If the error persists with the development value, check that Network Extensions
+is enabled for both App IDs and refresh the development profiles in Xcode.
+
+### Developer ID distribution
+
+The checked-in entitlements are for development and development-signed archives.
+For direct distribution, both the app and the system extension need Developer ID
+profiles and the `content-filter-provider-systemextension` entitlement value in
+their distribution signatures. A Release build alone does not switch signing
+identities or entitlement values.
+
+For Xcode 26 and earlier, follow Apple's
+[Exporting a Developer ID Network Extension](https://developer.apple.com/forums/thread/737894)
+instructions: copy the archived app, extract each component's signed entitlements,
+change the Network Extension value in those copies, replace both embedded profiles
+with Developer ID profiles, and re-sign the extension before the containing app.
+Then notarize the app. Keep the source entitlement files set to the development
+value. Apple reports that Xcode 27 adds support for this conversion during export.
 
 The user must approve the system extension and content-filter configuration on
 first installation unless an MDM policy pre-approves them.
