@@ -15,15 +15,17 @@ zay_packages=(
 
 case "${1:-}" in
     "")
-        exec cargo +nightly fmt \
+        cargo +nightly fmt \
             --manifest-path "${zay_workspace_root}/Cargo.toml" \
             "${zay_packages[@]}"
+        exec cargo +nightly fmt --manifest-path "${zay_workspace_root}/client/desktop/Cargo.toml" --package zay-desktop --package gpui --package gpui_platform
         ;;
     --check)
-        exec cargo +nightly fmt \
+        cargo +nightly fmt \
             --manifest-path "${zay_workspace_root}/Cargo.toml" \
             "${zay_packages[@]}" \
             --check
+        exec cargo +nightly fmt --manifest-path "${zay_workspace_root}/client/desktop/Cargo.toml" --package zay-desktop --package gpui --package gpui_platform --check
         ;;
     *)
         printf 'usage: %s [--check]\n' "$0" >&2

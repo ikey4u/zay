@@ -21,6 +21,11 @@ use crate::{
     stack::{MeshCliMode, StackCli, controller::StackController},
 };
 
+// Live-runtime tests share EasyTier's process-global instance manager.
+#[cfg(test)]
+pub(crate) static TEST_RUNTIME_LOCK: std::sync::Mutex<()> =
+    std::sync::Mutex::new(());
+
 /// Foreground core entry used only by the WebUI's supervised privileged child.
 /// It intentionally does not detach or create an operating-system service.
 pub async fn run_foreground_core(
@@ -965,6 +970,7 @@ mod tests {
 
     #[tokio::test]
     async fn core_host_can_stop_start_and_apply_without_being_recreated() {
+        let _guard = TEST_RUNTIME_LOCK.lock().unwrap();
         let directory = std::env::temp_dir()
             .join(format!("zay-core-lifecycle-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&directory).unwrap();
@@ -990,6 +996,7 @@ mod tests {
     #[tokio::test]
     async fn core_proxy_apply_preserves_other_tasks_and_retries_failed_config()
     {
+        let _guard = TEST_RUNTIME_LOCK.lock().unwrap();
         let directory = std::env::temp_dir()
             .join(format!("zay-core-proxy-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&directory).unwrap();

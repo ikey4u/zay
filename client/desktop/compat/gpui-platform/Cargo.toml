@@ -1,0 +1,10 @@
+[package]
+name = "gpui_platform"
+version = "0.1.0"
+edition = "2024"
+publish = false
+[dependencies]
+runtime = { package = "gpui-pre-platform", version = "=0.3.7" }
+[features]
+font-kit = ["runtime/font-kit"]
+runtime_shaders = ["runtime/runtime_shaders"]

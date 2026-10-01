@@ -308,6 +308,7 @@ mod control_tests {
     #[tokio::test]
     async fn authenticated_host_survives_component_stop_and_rejects_other_clients()
      {
+        let _guard = crate::runtime::TEST_RUNTIME_LOCK.lock().unwrap();
         let directory = std::env::temp_dir()
             .join(format!("zay-control-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&directory).unwrap();

@@ -1,6 +1,8 @@
 /target
 /dist
 /bin/
+client/desktop/target/
+client/desktop/dist/
 .DS_Store
 Makefile.local
 mise.local.toml

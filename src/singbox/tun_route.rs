@@ -771,6 +771,17 @@ pub fn wait_for_mesh_listeners(
 }
 
 fn tcp_port_listening(port: u16) -> bool {
+    // A GUI launch may not have shell tools in PATH, and macOS can restrict
+    // socket-table inspection. A local connection verifies actual readiness
+    // for wildcard/loopback listeners without relying on command output.
+    if std::net::TcpStream::connect_timeout(
+        &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+        Duration::from_millis(100),
+    )
+    .is_ok()
+    {
+        return true;
+    }
     #[cfg(target_os = "linux")]
     {
         if let Ok(out) = Command::new("ss").args(["-tln"]).output()
@@ -783,8 +794,9 @@ fn tcp_port_listening(port: u16) -> bool {
     }
     #[cfg(target_os = "macos")]
     {
-        if let Ok(out) =
-            Command::new("netstat").args(["-an", "-p", "tcp"]).output()
+        if let Ok(out) = Command::new("/usr/sbin/netstat")
+            .args(["-an", "-p", "tcp"])
+            .output()
             && out.status.success()
         {
             let text = String::from_utf8_lossy(&out.stdout);

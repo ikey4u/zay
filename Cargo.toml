@@ -7,6 +7,15 @@ repository = "https://github.com/ikey4u/zay"
 license = "MIT OR Apache-2.0"
 build = "build.rs"
 
+[features]
+default = ["webui"]
+webui = []
+
+[[bin]]
+name = "zay"
+path = "src/main.rs"
+required-features = ["webui"]
+
 [build-dependencies]
 ureq = { version = "2", default-features = false, features = ["tls"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
@@ -70,6 +79,7 @@ members = [
     "client/ios/Rust/zay-ios",
 ]
 exclude = [
+    "client/desktop",
     "vendor/Easytier",
     "crates/singbox/vendor/shadowsocks",
     "crates/singbox/vendor/quinn-proto-chrome",

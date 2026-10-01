@@ -1,0 +1,39 @@
+[package]
+name = "zay-desktop"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT OR Apache-2.0"
+
+# Keep the desktop UI's GPUI graph separate from the networking core.
+[workspace]
+members = ["compat/gpui", "compat/gpui-platform"]
+
+[target.'cfg(target_os = "macos")'.dependencies]
+gpui-kit = "=0.7.0"
+gpui = { package = "gpui-pre", version = "=0.3.7" }
+ely-gpui-component = { git = "https://github.com/ZacharyZhang-NY/Ely-GPUI-Components", rev = "cb45f5232f9fdf86453e18ea4991d5ac78a9cc6a" }
+tray-icon = "0.21"
+anyhow = "1"
+async-channel = "2"
+zay = { path = "../..", default-features = false }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync"] }
+serde_json = "1"
+toml = "0.8"
+
+# Ely names Zed's Git packages. Re-export Kit's pinned snapshots so both
+# libraries share identical App, Window, and Element types.
+[patch."https://github.com/zed-industries/zed"]
+gpui = { path = "compat/gpui" }
+gpui_platform = { path = "compat/gpui-platform" }
+
+[profile.dev]
+debug = 0
+
+# Path dependency patches must be repeated at this workspace root.
+[patch.crates-io]
+rustls = { path = "../../crates/singbox/vendor/rustls-shadowtls" }
+quinn-proto = { path = "../../crates/singbox/vendor/quinn-proto-chrome" }
+h3 = { path = "../../crates/singbox/vendor/h3-standard-connect" }
+[patch."https://github.com/EasyTier/kcp-sys"]
+kcp-sys = { path = "../../crates/singbox/vendor/kcp-sys" }

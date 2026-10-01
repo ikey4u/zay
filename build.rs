@@ -79,7 +79,9 @@ fn main() {
     prepare_windows_runtime(&out_dir, target);
 
     embed_clash_rules(&out_dir);
-    embed_webui(&out_dir);
+    if env::var_os("CARGO_FEATURE_WEBUI").is_some() {
+        embed_webui(&out_dir);
+    }
 }
 
 /// Build the WebUI and copy its outputs into OUT_DIR. `client/webui/dist` is a

@@ -2,6 +2,19 @@
 
 See `zay --help` for usage.
 
+## Native desktop (macOS)
+
+`client/desktop` is a GPUI Kit + Ely desktop app linked directly to the Zay Rust
+library. It provides native proxy and Mesh configuration, service controls, live
+status, and a persistent macOS menu-bar menu. Closing the window keeps services
+running; quitting stops the desktop-owned services.
+
+```sh
+cargo run --manifest-path client/desktop/Cargo.toml --locked
+```
+
+See [the desktop README](client/desktop/README.md) for packaging and authorization.
+
 ## WebUI
 
 `zay webui` starts the React control plane and all enabled components in the
