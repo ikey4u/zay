@@ -144,9 +144,17 @@ impl TcpListener {
     ) -> Poll<io::Result<(TcpStream, SocketAddr)>> {
         let mut socket = self.reactor.get_socket::<tcp::Socket>(*self.handle);
 
-        if socket.state() == tcp::State::Established {
+        if matches!(
+            socket.state(),
+            tcp::State::Established | tcp::State::CloseWait
+        ) {
             drop(socket);
             return Poll::Ready(Ok(TcpStream::accept(self)?));
+        }
+        // A client can reset after the handshake but before accept is polled.
+        // Re-arm that socket instead of leaving this destination closed forever.
+        if socket.state() == tcp::State::Closed {
+            socket.listen(sa2ep(self.local_addr)).map_err(map_err)?;
         }
         socket.register_send_waker(cx.waker());
         Poll::Pending
@@ -459,5 +467,53 @@ impl UdpSocket {
 
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         Ok(self.local_addr)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use smoltcp::{
+        iface::Config,
+        phy::{DeviceCapabilities, Medium},
+        wire::{HardwareAddress, IpCidr},
+    };
+
+    use super::{
+        super::{BufferSize, Net, NetConfig, channel_device::ChannelDevice},
+        *,
+    };
+
+    #[tokio::test]
+    async fn listener_recovers_after_reset_before_accept() {
+        let mut capabilities = DeviceCapabilities::default();
+        capabilities.medium = Medium::Ip;
+        capabilities.max_transmission_unit = 1500;
+        let (device, _ingress, _egress, _output, _) =
+            ChannelDevice::new(capabilities);
+        let config = NetConfig::new(
+            Config::new(HardwareAddress::Ip),
+            vec!["10.0.0.2/24".parse::<IpCidr>().unwrap()],
+            vec!["10.0.0.1".parse().unwrap()],
+            Some(BufferSize::default()),
+        );
+        let net = Net::new(device, config).unwrap();
+        let mut listener =
+            net.tcp_bind("10.0.0.2:443".parse().unwrap()).await.unwrap();
+        // Models the closed socket left by an RST arriving before the task
+        // observes an established connection (common with browser races).
+        listener
+            .reactor
+            .get_socket::<tcp::Socket>(*listener.handle)
+            .abort();
+        let waker = futures::task::noop_waker();
+        let context = Context::from_waker(&waker);
+        assert!(listener.poll_accept(&context).is_pending());
+        assert_eq!(
+            listener
+                .reactor
+                .get_socket::<tcp::Socket>(*listener.handle)
+                .state(),
+            tcp::State::Listen
+        );
     }
 }
