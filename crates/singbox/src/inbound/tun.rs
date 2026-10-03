@@ -836,8 +836,15 @@ impl TunInbound {
                     continue;
                 }
                 let data = &packet[..size];
-                if !read_router.prepare_packet(data).await? {
-                    continue;
+                match read_router.prepare_packet(data).await {
+                    Ok(true) => {}
+                    Ok(false) => continue,
+                    Err(error) => {
+                        // A rejected flow (for example a stale FakeIP) must not
+                        // terminate the reader for every other TUN connection.
+                        tracing::debug!(%error, "drop rejected TUN packet");
+                        continue;
+                    }
                 }
                 if ingress.send(Ok(data.to_vec())).await.is_err() {
                     break;
