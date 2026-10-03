@@ -9,6 +9,7 @@ if [[ -f "${devpane}/.build/host.env" ]]; then
   source "${devpane}/.build/host.env"
 fi
 export DEVPANE_ROLE=host
+export DEVPANE_IPV4_ONLY=1
 export DEVPANE_BIND="${DEVPANE_HOST_BIND:-127.0.0.1}"
 export DEVPANE_ADVERTISE_HOST="${DEVPANE_HOST_ADDR:-127.0.0.1}"
 export DEVPANE_CONTROL_PORT=18090 DEVPANE_PROXY_PORT=13128

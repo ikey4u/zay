@@ -363,6 +363,8 @@ pub async fn render_page(request: BrowserRequest) -> Result<Value> {
             "--disable-dev-shm-usage",
             "--disable-background-networking",
             "--no-proxy-server",
+            // The lab subscription is an HTTP CONNECT proxy without UDP support.
+            "--disable-quic",
             "--hide-scrollbars",
             "--window-size=1280,800",
             "--virtual-time-budget=3000",

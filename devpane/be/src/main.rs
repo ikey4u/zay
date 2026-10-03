@@ -8,7 +8,10 @@
 use std::{
     env, io,
     io::{Read, Write},
-    net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream, UdpSocket},
+    net::{
+        Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs,
+        UdpSocket,
+    },
     process::ExitCode,
     thread,
     time::Duration,
@@ -251,6 +254,31 @@ fn handle_proxy(
     }
 }
 
+fn connect_upstream(host: &str, port: u16) -> io::Result<TcpStream> {
+    // Match the lab's IPv4 data plane. A host VPN may accept a synthetic IPv6
+    // TCP connection but never carry its TLS traffic, preventing fallback.
+    let ipv4_only = env::var("DEVPANE_IPV4_ONLY").as_deref() == Ok("1");
+    let mut last_error = io::Error::new(
+        io::ErrorKind::AddrNotAvailable,
+        "no usable upstream address",
+    );
+    for address in (host, port).to_socket_addrs()? {
+        if ipv4_only && !address.is_ipv4() {
+            continue;
+        }
+        match TcpStream::connect_timeout(&address, Duration::from_secs(5)) {
+            Ok(stream) => {
+                eprintln!(
+                    "[devpane:proxy] upstream {host}:{port} via {address}"
+                );
+                return Ok(stream);
+            }
+            Err(error) => last_error = error,
+        }
+    }
+    Err(last_error)
+}
+
 fn dispatch_proxy(
     client: &mut TcpStream,
     pending: &mut Vec<u8>,
@@ -269,7 +297,7 @@ fn dispatch_proxy(
                 client, pending, peer, advertise, proxy_port,
             );
         }
-        let upstream = TcpStream::connect((host.as_str(), port))?;
+        let upstream = connect_upstream(&host, port)?;
         upstream.set_read_timeout(Some(Duration::from_secs(20)))?;
         client.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")?;
         relay(client.try_clone()?, upstream)?;
@@ -349,7 +377,7 @@ fn forward_http(
         );
         return write_http(client, status, content_type, "proxy", &body);
     }
-    let mut upstream = TcpStream::connect((host.as_str(), port))?;
+    let mut upstream = connect_upstream(&host, port)?;
     upstream.set_read_timeout(Some(Duration::from_secs(12)))?;
     let mut request = format!("{method} {path} HTTP/1.1\r\n").into_bytes();
     for line in String::from_utf8_lossy(head).split("\r\n").skip(1) {
