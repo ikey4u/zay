@@ -2,7 +2,7 @@
 
 [proxy]
 enabled = true
-subscriptions = ["http://172.30.126.10:8090/sub"]
+subscriptions = ["http://@DEVPANE_HOST@:18090/sub"]
 gateway = false
 mixed_port = 7890
 update_interval = 3600

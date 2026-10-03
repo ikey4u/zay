@@ -59,9 +59,12 @@ pub fn profile_json() -> Value {
         ));
         presets.push(preset(
             "mesh",
-            "Mesh Hub",
+            "Mesh peer HTTP",
+            Some(env_or(
+                "ZAY_LAB_MESH_URL",
+                "http://10.126.126.3:8090/whoami",
+            )),
             None,
-            Some(env_or("ZAY_LAB_MESH_TCP", "10.126.126.1:11010")),
             None,
         ));
     }

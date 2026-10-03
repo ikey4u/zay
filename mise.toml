@@ -212,6 +212,17 @@ hide = true
 tools = { colima = "0.10.3", lima = "2.2.0", docker-cli = "29.8.2", "aqua:docker/compose" = "5.5.1", "aqua:docker/buildx" = "0.37.2" }
 run = 'bash "{{config_root}}/devpane/be/macos-runtime.sh"'
 
+[tasks."devpane:host-build"]
+description = "Build the native host subscription/proxy fixture"
+hide = true
+tools = { rust = "1.91.0" }
+run = 'cargo build --locked --release --manifest-path "{{config_root}}/devpane/be/Cargo.toml" --target-dir "{{config_root}}/devpane/.build/host-target"'
+
+[tasks."devpane:test"]
+description = "Test host proxy, TUN, and Mesh data paths and recovery"
+tools = { python = "3.13.12" }
+run = 'bash "{{config_root}}/devpane/be/manage.sh" test'
+
 [tasks.pkg]
 description = "Alias of macos:build:all (cross-builds + zip under dist/)"
 alias = ["cross-build"]

@@ -38,7 +38,7 @@ fn main() -> ExitCode {
 
     let mut handles = Vec::new();
     match config.role.as_str() {
-        "edge" | "all" => {
+        "edge" | "all" | "host" | "dns" => {
             let control = config.control_port;
             let proxy = config.proxy_port;
             let advertise = config.advertise_host.clone();
@@ -46,19 +46,23 @@ fn main() -> ExitCode {
             let upstream = config.upstream_dns;
             let proxy_port = config.proxy_port;
             let advertise_http = advertise.clone();
+            let role = if config.role == "host" {
+                "host"
+            } else {
+                "edge"
+            };
             handles.push(thread::spawn(move || {
-                serve_http(
-                    control,
-                    "direct",
-                    "edge",
-                    &advertise_http,
-                    proxy_port,
-                )
+                serve_http(control, "direct", role, &advertise_http, proxy_port)
             }));
-            handles.push(thread::spawn(move || {
-                serve_proxy(proxy, lab_addr, &advertise)
-            }));
-            handles.push(thread::spawn(move || serve_dns(lab_addr, upstream)));
+            if config.role != "dns" {
+                handles.push(thread::spawn(move || {
+                    serve_proxy(proxy, lab_addr, &advertise)
+                }));
+            }
+            if config.role != "host" {
+                handles
+                    .push(thread::spawn(move || serve_dns(lab_addr, upstream)));
+            }
         }
         "sink" => {}
         other => {
@@ -115,7 +119,12 @@ fn env_u16(key: &str, default: u16) -> u16 {
 }
 
 fn healthcheck(port: u16) -> bool {
-    let mut stream = match TcpStream::connect(("127.0.0.1", port)) {
+    let mut stream = match TcpStream::connect((
+        env::var("DEVPANE_BIND")
+            .unwrap_or_else(|_| "127.0.0.1".into())
+            .as_str(),
+        port,
+    )) {
         Ok(stream) => stream,
         Err(error) => {
             eprintln!("healthcheck connect: {error}");
@@ -145,7 +154,13 @@ fn serve_http(
     advertise: &str,
     proxy_port: u16,
 ) {
-    let listener = TcpListener::bind(("0.0.0.0", port)).expect("bind http");
+    let listener = TcpListener::bind((
+        env::var("DEVPANE_BIND")
+            .unwrap_or_else(|_| "0.0.0.0".into())
+            .as_str(),
+        port,
+    ))
+    .expect("bind http");
     eprintln!("devpane {role} listening on :{port} via={via}");
     let advertise = advertise.to_string();
     for conn in listener.incoming() {
@@ -174,7 +189,13 @@ fn serve_http(
 }
 
 fn serve_proxy(port: u16, lab_addr: Ipv4Addr, advertise: &str) {
-    let listener = TcpListener::bind(("0.0.0.0", port)).expect("bind proxy");
+    let listener = TcpListener::bind((
+        env::var("DEVPANE_BIND")
+            .unwrap_or_else(|_| "0.0.0.0".into())
+            .as_str(),
+        port,
+    ))
+    .expect("bind proxy");
     eprintln!("devpane proxy listening on :{port}");
     let advertise = advertise.to_string();
     for conn in listener.incoming() {
@@ -286,8 +307,14 @@ fn answer_lab_tunnel(
         .as_deref()
         .map(request_path)
         .unwrap_or_else(|| "/whoami".into());
-    let (status, body, content_type) =
-        local_result(&path, "proxy", "edge", peer, advertise, proxy_port);
+    let (status, body, content_type) = local_result(
+        &path,
+        "proxy",
+        &env::var("DEVPANE_ROLE").unwrap_or_else(|_| "edge".into()),
+        peer,
+        advertise,
+        proxy_port,
+    );
     write_http(client, status, content_type, "proxy", &body)
 }
 
@@ -312,8 +339,14 @@ fn forward_http(
         );
     };
     if is_lab_target(&host, lab_addr) {
-        let (status, body, content_type) =
-            local_result(&path, "proxy", "edge", peer, advertise, proxy_port);
+        let (status, body, content_type) = local_result(
+            &path,
+            "proxy",
+            &env::var("DEVPANE_ROLE").unwrap_or_else(|_| "edge".into()),
+            peer,
+            advertise,
+            proxy_port,
+        );
         return write_http(client, status, content_type, "proxy", &body);
     }
     let mut upstream = TcpStream::connect((host.as_str(), port))?;
@@ -389,7 +422,7 @@ fn local_result(
     }
     if path.starts_with("/health") || path.starts_with("/whoami") {
         let body = format!(
-            "{{\"service\":\"devpane\",\"role\":\"{role}\",\"via\":\"{via}\",\"client\":\"{client}\",\"path\":\"{path}\"}}"
+            "{{\"service\":\"devpane\",\"role\":\"{role}\",\"pid\":{},\"via\":\"{via}\",\"client\":\"{client}\",\"path\":\"{path}\"}}", std::process::id()
         );
         return (200, body.into_bytes(), "application/json");
     }
@@ -598,8 +631,9 @@ fn decode_dns_name(data: &[u8], mut offset: usize) -> Option<(String, usize)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_dns_name, lab_dns_response};
     use std::net::Ipv4Addr;
+
+    use super::{decode_dns_name, lab_dns_response};
 
     #[test]
     fn answers_lab_name() {

@@ -15,13 +15,11 @@ services:
       context: ./be
       network: ${DEVPANE_BUILD_NETWORK:-default}
     environment:
-      DEVPANE_ROLE: edge
+      DEVPANE_ROLE: dns
       DEVPANE_ADVERTISE_HOST: 172.30.126.10
     networks:
       lab:
         ipv4_address: 172.30.126.10
-    ports:
-      - "127.0.0.1:18090:8090"
     healthcheck:
       test: ["CMD", "/usr/local/bin/devpane-be", "--healthcheck"]
       interval: 2s
@@ -55,6 +53,29 @@ services:
       lab:
         ipv4_address: 172.30.126.30
 
+  mesh-peer:
+    image: devpane-zay
+    init: true
+    entrypoint: ["/usr/local/bin/zay", "x", "run", "proxy", "--no-tun", "--mesh", "node", "--mesh-auth", "devpane:devpane-mesh@tcp://172.30.126.30:11010", "--mesh-ip", "10.126.126.3/24"]
+    depends_on:
+      relay:
+        condition: service_started
+    cap_add: [NET_ADMIN, NET_RAW]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    networks:
+      lab:
+        ipv4_address: 172.30.126.31
+
+  mesh-echo:
+    image: devpane-be
+    network_mode: "service:mesh-peer"
+    environment:
+      DEVPANE_ROLE: sink
+      DEVPANE_SINK_PORT: 8090
+    depends_on:
+      mesh-peer:
+        condition: service_started
+
   zay:
     image: devpane-zay
     # Reap Chromium helper processes and disconnected shell jobs.
@@ -72,10 +93,11 @@ services:
         condition: service_started
     environment:
       ZAY_LAB: devpane
+      DEVPANE_HOST_ADDR: ${DEVPANE_HOST_ADDR:?run mise devpane to set up the host proxy}
       ZAY_LAB_PROXY_URL: http://devpane.test/whoami
       ZAY_LAB_DIRECT_URL: http://172.30.126.10:8090/whoami
       ZAY_LAB_EXTERNAL_URL: https://www.gstatic.com/generate_204
-      ZAY_LAB_MESH_TCP: 10.126.126.1:11010
+      ZAY_LAB_MESH_URL: http://10.126.126.3:8090/whoami
     dns:
       - 172.30.126.10
     cap_add:

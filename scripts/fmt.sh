@@ -18,6 +18,7 @@ case "${1:-}" in
         cargo +nightly fmt \
             --manifest-path "${zay_workspace_root}/Cargo.toml" \
             "${zay_packages[@]}"
+        cargo +nightly fmt --manifest-path "${zay_workspace_root}/devpane/be/Cargo.toml"
         exec cargo +nightly fmt --manifest-path "${zay_workspace_root}/client/desktop/Cargo.toml" --package zay-desktop --package gpui --package gpui_platform
         ;;
     --check)
@@ -25,6 +26,7 @@ case "${1:-}" in
             --manifest-path "${zay_workspace_root}/Cargo.toml" \
             "${zay_packages[@]}" \
             --check
+        cargo +nightly fmt --manifest-path "${zay_workspace_root}/devpane/be/Cargo.toml" --check
         exec cargo +nightly fmt --manifest-path "${zay_workspace_root}/client/desktop/Cargo.toml" --package zay-desktop --package gpui --package gpui_platform --check
         ;;
     *)
