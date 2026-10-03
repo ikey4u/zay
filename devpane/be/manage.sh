@@ -64,9 +64,9 @@ case "${action}" in
     compose build
     bash "${devpane}/be/host-proxy.sh" stop
     # Recreate the old edge first to release its former host port 18090.
-    compose up -d be sink relay mesh-peer mesh-echo
+    compose up -d be sink relay
     bash "${devpane}/be/host-proxy.sh" start
-    compose up -d zay
+    compose up -d mesh-peer mesh-echo zay
     cat <<'EOF'
 
 devpane is up. Host routing is unchanged; TUN and EasyTier stay in the zay container.

@@ -58,8 +58,20 @@ services:
   mesh-peer:
     image: devpane-zay
     init: true
-    entrypoint: ["/usr/local/bin/zay", "x", "run", "proxy", "--no-tun", "--mesh", "node", "--mesh-auth", "devpane:devpane-mesh@tcp://172.30.126.30:11010", "--mesh-ip", "10.126.126.3/24"]
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        mkdir -p /var/lib/zay
+        sed "s/@DEVPANE_HOST@/$${DEVPANE_HOST_ADDR}/g" /etc/zay/mesh-peer.toml > /var/lib/zay/zay.toml
+        exec zay x service --data-dir /var/lib/zay --config /var/lib/zay/zay.toml start
+    environment:
+      DEVPANE_HOST_ADDR: ${DEVPANE_HOST_ADDR:?run mise devpane to set up the host proxy}
+    volumes:
+      - ./mesh-peer.toml:/etc/zay/mesh-peer.toml:ro
+    dns: [172.30.126.10]
     depends_on:
+      be:
+        condition: service_healthy
       relay:
         condition: service_started
     cap_add: [NET_ADMIN, NET_RAW]

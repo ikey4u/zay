@@ -1,0 +1,33 @@
+# Mesh Internet gateway. Clients reach the mixed proxy over the Mesh virtual IP.
+# No host ports are published; the listener is confined to the lab network.
+
+[proxy]
+# HTTPS DNS forwarding prevents host VPN FakeIP contamination.
+mixin = '{"dns":{"servers":[{"type":"udp","tag":"dns-direct","server":"172.30.126.10"},{"type":"udp","tag":"dns-direct-alt","server":"172.30.126.10"},{"type":"fakeip","tag":"fake-ip","inet4_range":"198.18.0.0/15","inet6_range":"fc00::/18"}]},"inbounds":[{"type":"mixed","tag":"mesh-internet","listen":"10.126.126.3","listen_port":7890}]}'
+enabled = true
+subscriptions = ["http://@DEVPANE_HOST@:18090/sub"]
+gateway = true
+mixed_port = 7890
+update_interval = 3600
+health_check_url = "http://172.30.126.10:8090/generate_204"
+log_level = "info"
+
+[proxy.tun]
+enabled = true
+# Upstream proxy and the mesh relay stay on the docker bridge.
+exclude_routes = ["172.30.126.10/32", "172.30.126.30/32"]
+
+[proxy.mesh]
+enabled = true
+role = "node"
+name = "devpane-peer"
+network_name = "devpane"
+network_secret = "devpane-mesh"
+ipv4 = "10.126.126.3/24"
+peers = ["tcp://172.30.126.30:11010"]
+
+[[proxy.domain_rule]]
+name = "devpane"
+by_suffix = ["devpane.test", "gstatic.com"]
+outbounds = ["sub0-devpane"]
+health_check_url = "http://172.30.126.10:8090/generate_204"

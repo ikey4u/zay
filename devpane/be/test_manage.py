@@ -66,7 +66,8 @@ if [[ "$1" == compose ]]; then exit "${TEST_COMPOSE_EXIT:-0}"; fi
         self.assertIn("colima --profile zay-devpane start --runtime docker --vm-type vz --activate=false", calls)
         self.assertIn(f"host=unix://{self.env['COLIMA_HOME']}/zay-devpane/docker.sock|context=|tls=", calls)
         self.assertIn("run devpane:host-build", calls)
-        self.assertIn("up -d zay", calls)
+        self.assertIn("up -d mesh-peer mesh-echo zay", calls)
+        self.assertLess(calls.index("host-proxy start"), calls.index("up -d mesh-peer mesh-echo zay"))
         self.assertIn("host-proxy start", calls)
         self.assertIn("network=default", calls)
         for plugin in ("compose", "buildx"):

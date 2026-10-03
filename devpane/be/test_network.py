@@ -61,14 +61,16 @@ def retry(check, timeout=40):
             time.sleep(1)
 
 
-def record(name, check):
+def record(name, check, fatal=True):
     start = time.monotonic()
     try:
         detail = check()
     except Exception as error:
         RESULTS.append({"name": name, "passed": False, "error": str(error)})
         print(f"FAIL {name}: {error}", flush=True)
-        raise
+        if fatal:
+            raise
+        return None
     RESULTS.append({"name": name, "passed": True, "seconds": round(time.monotonic() - start, 2), "detail": detail})
     print(f"PASS {name}", flush=True)
     return detail
@@ -103,6 +105,43 @@ def ready():
     assert any(m["connected_peers"] >= 1 for m in state["mesh"]), state["mesh"]
     return state["core"]["stack"]
 
+
+def external_page(path, domain):
+    # Mesh uses the peer's virtual IP, so the request must cross EasyTier first.
+    proxy = "http://10.126.126.3:7890" if path == "mesh" else None
+    args = ["curl", "--ipv4", "--silent", "--show-error", "--fail", "--location",
+            "--connect-timeout", "8", "--max-time", "25", "--output", "/tmp/lab-external.html",
+            "--write-out", "%{json}", "--noproxy", "" if proxy else "*"]
+    if proxy:
+        args += ["--proxy", proxy]
+    result = inside("zay", *args, f"https://{domain}", check=False)
+    metrics = json.loads(result.stdout or "{}")
+    assert result.returncode == 0 and metrics.get("http_code") == 200, {
+        "path": path, "domain": domain, "curl_exit": result.returncode,
+        "error": result.stderr, "status": metrics.get("http_code"),
+        "effective_url": metrics.get("url_effective"), "remote_ip": metrics.get("remote_ip")}
+    # A successful CONNECT or redirect alone is not a successful page load.
+    html = inside("zay", "cat", "/tmp/lab-external.html").stdout
+    assert "<html" in html.lower() and domain.split(".")[0] in html.lower(), html[:200]
+    screenshot = f"/tmp/{path}-{domain}-render.png"
+    profile = f"/tmp/lab-{path}-{time.time_ns()}"
+    try:
+        render = inside("zay", "timeout", "--kill-after=2s", "30s", "chromium",
+                        "--headless", "--no-sandbox", "--disable-dev-shm-usage",
+                        "--disable-background-networking", "--disable-quic",
+                        f"--proxy-server={proxy}" if proxy else "--no-proxy-server",
+                        f"--user-data-dir={profile}",
+                        "--window-size=1280,800", "--virtual-time-budget=3000",
+                        f"--screenshot={screenshot}", f"https://{domain}", check=False)
+    finally:
+        inside("zay", "rm", "-rf", profile, check=False)
+    assert render.returncode == 0 and "Page load failed:" not in render.stderr, render.stderr[-2000:]
+    artifact = ROOT / f".build/{path}-{domain}-render.png"
+    run(*COMPOSE, "cp", f"zay:{screenshot}", str(artifact))
+    image = artifact.read_bytes()
+    assert image.startswith(b"\x89PNG\r\n\x1a\n") and len(image) > 5000, "Missing or empty browser screenshot"
+    return {"status": metrics["http_code"], "effective_url": metrics["url_effective"],
+            "remote_ip": metrics["remote_ip"], "proxy": proxy, "rendered": True}
 
 stopped_core = stopped_host = stopped_peer = False
 try:
@@ -147,7 +186,7 @@ try:
         assert image.startswith(b"\x89PNG\r\n\x1a\n") and len(image) > 5000, len(image)
         (ROOT / ".build/baidu-render.png").write_bytes(image)
         return result["connection"]
-    record("Baidu HTTPS and Chromium rendering work", external_browser)
+    record("Baidu HTTPS and Chromium rendering work", external_browser, fatal=False)
     record("excluded control-plane HTTP stays direct", lambda: equal(json.loads(curl("http://172.30.126.10:8090/whoami").stdout)["via"], "direct"))
     record("Mesh HTTP crosses virtual IPs", lambda: retry(mesh_request))
     def mesh_route():
@@ -159,6 +198,10 @@ try:
     record("Mesh uses its own TUN interface", mesh_route)
     record("Mesh ICMP and 1200-byte payload", lambda: inside("zay", "ping", "-c", "3", "-W", "2", "-s", "1200", "10.126.126.3").stdout)
     record("reverse Mesh ICMP", lambda: inside("mesh-peer", "ping", "-c", "3", "-W", "2", "10.126.126.2").stdout)
+    for path in ("tun", "mesh"):
+        for domain in ("baidu.com", "google.com"):
+            record(f"{path.upper()} HTTPS and Chromium: {domain}",
+                   lambda path=path, domain=domain: external_page(path, domain), fatal=False)
 
     stopped_host = True
     run("bash", str(ROOT / "be/host-proxy.sh"), "stop")
@@ -172,6 +215,12 @@ try:
     stopped_peer = True
     run(*COMPOSE, "stop", "mesh-echo", "mesh-peer")
     record("Mesh peer outage breaks virtual-IP HTTP", lambda: equal(curl("http://10.126.126.3:8090/whoami", check=False).returncode != 0, True))
+    def mesh_gateway_unavailable():
+        result = inside("zay", "curl", "--noproxy", "", "--proxy", "http://10.126.126.3:7890",
+                        "--connect-timeout", "2", "--max-time", "4", "https://baidu.com", check=False)
+        assert result.returncode != 0, "Mesh Internet test bypassed the stopped peer"
+        return result.returncode
+    record("Mesh Internet path fails when peer is stopped", mesh_gateway_unavailable)
     record("TUN survives Mesh peer outage", lambda: proxy_request(resolve=True))
     run(*COMPOSE, "start", "mesh-peer", "mesh-echo")
     stopped_peer = False
@@ -202,4 +251,7 @@ finally:
     report = ROOT / ".build/network-test.json"
     report.write_text(json.dumps(RESULTS, indent=2) + "\n")
     print(f"Report: {report}", flush=True)
+failures = [result for result in RESULTS if not result["passed"]]
+if failures:
+    raise SystemExit(f"{len(failures)} of {len(RESULTS)} network checks failed; see the report above.")
 print(f"All {len(RESULTS)} network checks passed.", flush=True)
