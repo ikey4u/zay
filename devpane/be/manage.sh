@@ -17,8 +17,8 @@ compose() {
   docker compose -f "${devpane}/compose.yaml" --project-directory "${devpane}" "$@"
 }
 
-# Linux keeps the existing mirror/DNS workaround. Docker Desktop uses its
-# normal build network and does not require host-networking support.
+# Linux keeps the existing mirror/DNS workaround. Colima on macOS uses
+# the normal build network inside its Linux VM.
 if [[ -z "${DEVPANE_BUILD_NETWORK:-}" ]]; then
   case "$(uname -s)" in
     Linux) export DEVPANE_BUILD_NETWORK=host ;;
