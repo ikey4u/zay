@@ -2,8 +2,9 @@
 FROM node:22-trixie AS node
 FROM rust:1-trixie AS build
 COPY --from=node /usr/local/ /usr/local/
+# Debian ships google/protobuf/*.proto in libprotobuf-dev, not protobuf-compiler.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends protobuf-compiler cmake clang libssl-dev pkg-config \
+    && apt-get install -y --no-install-recommends protobuf-compiler libprotobuf-dev cmake clang libssl-dev pkg-config \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY client/webui/package*.json ./client/webui/
