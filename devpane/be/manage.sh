@@ -13,6 +13,20 @@ need() {
   fi
 }
 
+# Install and activate the macOS tools for every entry point, including direct
+# invocations of this script. Linux uses its existing Docker Engine.
+case "${action}" in
+  up|down|reset|logs|status) ;;
+  *)
+    echo "usage: $0 {up|down|reset|logs|status}" >&2
+    exit 2
+    ;;
+esac
+if [[ "$(uname -s)" == Darwin && "${DEVPANE_MACOS_READY:-}" != 1 ]]; then
+  need mise
+  exec mise -C "${root}" run devpane:macos -- "${action}"
+fi
+
 compose() {
   docker compose -f "${devpane}/compose.yaml" --project-directory "${devpane}" "$@"
 }

@@ -205,6 +205,13 @@ ROOT="${MISE_PROJECT_ROOT:-$PWD}"
 exec bash "${ROOT}/devpane/be/manage.sh" up
 """
 
+# Internal macOS bootstrap; invoked by manage.sh for all lab commands.
+[tasks."devpane:macos"]
+description = "Provision the macOS devpane runtime with mise-managed Colima"
+hide = true
+tools = { colima = "0.10.3", lima = "2.2.0", docker-cli = "29.8.2", "aqua:docker/compose" = "5.5.1", "aqua:docker/buildx" = "0.37.2" }
+run = 'bash "{{config_root}}/devpane/be/macos-runtime.sh"'
+
 [tasks.pkg]
 description = "Alias of macos:build:all (cross-builds + zip under dist/)"
 alias = ["cross-build"]
