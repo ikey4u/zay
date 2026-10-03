@@ -113,8 +113,9 @@ export function LabPage() {
           <div className="min-h-[300px] bg-white">
             {busy === "browser" ? <div className="flex h-[300px] items-center justify-center gap-2 text-slate-500"><LoaderCircle className="h-5 w-5 animate-spin" />Loading page through the container network…</div>
               : page?.image ? <img src={page.image} alt={`Rendered page: ${page.url}`} className="block h-auto w-full" />
-              : <div className="flex h-[300px] flex-col items-center justify-center gap-3 px-6 text-center text-slate-500"><Globe2 className="h-10 w-10" /><p>{page?.error ?? "Enter a URL to render a page from inside the lab."}</p><p className="text-xs">JavaScript, styles, and images load in the container. Enter another URL to navigate.</p></div>}
+              : <div className="flex min-h-[300px] flex-col items-center justify-center gap-3 overflow-hidden px-6 py-8 text-center text-sm text-slate-500"><Globe2 className="h-10 w-10" /><p className="max-w-full break-words">{page?.error ?? "Enter a URL to render a page from inside the lab."}</p><p className="text-xs">JavaScript, styles, and images load in the container. Enter another URL to navigate.</p></div>}
           </div>
+          {page?.error && page.diagnostics && <details className="border-t border-border p-4 text-xs"><summary className="cursor-pointer">Browser diagnostics</summary><pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-all">{page.diagnostics}</pre></details>}
           {page && <div className="space-y-3 border-t border-border p-4"><div className="text-xs text-muted-foreground">Connection check · separate curl request through the same container network</div><ProbeRow row={{ ...page.connection, label: "Connection" }} />{page.connection.headers && <details className="text-xs"><summary className="cursor-pointer text-muted-foreground">Response headers</summary><pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap font-mono">{page.connection.headers}</pre></details>}</div>}
         </div>
         <div hidden={tab !== "terminal"}><LabTerminal /></div>

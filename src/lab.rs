@@ -282,6 +282,20 @@ mod tests {
     use super::{header_value, parse_tcp_target, validate_http_url};
 
     #[test]
+    fn browser_error_uses_navigation_failure_instead_of_dbus_noise() {
+        assert_eq!(
+            super::browser_failure(
+                "ERROR:dbus: Failed to connect\nERROR Page load failed: net::ERR_CONNECTION_RESET\n"
+            ),
+            "Page could not load: net::ERR_CONNECTION_RESET"
+        );
+        assert!(
+            !super::browser_failure(&"dbus error\n".repeat(500))
+                .contains("dbus")
+        );
+    }
+
+    #[test]
     fn accepts_http_urls() {
         assert!(validate_http_url("http://devpane.test/whoami").is_ok());
         assert!(validate_http_url("file:///etc/passwd").is_err());
@@ -367,6 +381,12 @@ pub async fn render_page(request: BrowserRequest) -> Result<Value> {
         .await
         .context("starting the container browser");
     let connection = probe.await??;
+    let diagnostics = rendered.as_ref().ok().map(|output| {
+        String::from_utf8_lossy(&output.stderr)
+            .chars()
+            .take(12000)
+            .collect::<String>()
+    });
     let (image, render_error) = match rendered {
         Ok(output) if output.status.success() && screenshot.is_file() => (
             Some(format!(
@@ -385,21 +405,32 @@ pub async fn render_page(request: BrowserRequest) -> Result<Value> {
                     "The page did not finish rendering within 30 seconds"
                         .to_string()
                 } else {
-                    format!(
-                        "Browser rendering failed: {}",
-                        String::from_utf8_lossy(&output.stderr)
-                            .chars()
-                            .take(2000)
-                            .collect::<String>()
-                    )
+                    browser_failure(&String::from_utf8_lossy(&output.stderr))
                 },
             ),
         ),
         Err(error) => (None, Some(error.to_string())),
     };
     Ok(
-        json!({"url": url, "image": image, "error": render_error, "connection": connection}),
+        json!({"url": url, "image": image, "error": render_error, "diagnostics": diagnostics, "connection": connection}),
     )
+}
+
+fn browser_failure(stderr: &str) -> String {
+    stderr
+        .lines()
+        .find_map(|line| {
+            line.split_once("Page load failed: ").map(|(_, reason)| {
+                format!(
+                    "Page could not load: {}",
+                    reason.chars().take(160).collect::<String>()
+                )
+            })
+        })
+        .unwrap_or_else(|| {
+            "Browser rendering failed. Expand browser diagnostics for details."
+                .into()
+        })
 }
 
 /// One PTY per WebSocket: shell state persists until the user disconnects.

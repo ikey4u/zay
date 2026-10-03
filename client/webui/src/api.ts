@@ -268,6 +268,7 @@ export async function uploadRuleSet(path: string, body: BodyInit): Promise<Apply
 }
 
 export type LabBrowser = {
+  diagnostics?: string | null
   url: string
   image: string | null
   error: string | null
