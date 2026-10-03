@@ -17,35 +17,20 @@ compose() {
   docker compose -f "${devpane}/compose.yaml" --project-directory "${devpane}" "$@"
 }
 
-build_be() {
-  need cargo
-  echo "building devpane-be"
-  (cd "${devpane}/be" && cargo build --release)
-  mkdir -p "${devpane}/be/.build"
-  cp -f "${devpane}/be/target/release/devpane-be" "${devpane}/be/.build/devpane-be"
-  chmod 755 "${devpane}/be/.build/devpane-be"
-  if command -v strip >/dev/null 2>&1; then
-    strip --strip-unneeded "${devpane}/be/.build/devpane-be" || true
-  fi
-}
-
-build_zay() {
-  need cargo
-  echo "building zay (debug; the WebUI is embedded by the build)"
-  (cd "${root}" && cargo build)
-  mkdir -p "${devpane}/.build"
-  cp -f "${root}/target/debug/zay" "${devpane}/.build/zay"
-  chmod 755 "${devpane}/.build/zay"
-  if command -v strip >/dev/null 2>&1; then
-    strip --strip-unneeded "${devpane}/.build/zay" || true
-  fi
-}
+# Linux keeps the existing mirror/DNS workaround. Docker Desktop uses its
+# normal build network and does not require host-networking support.
+if [[ -z "${DEVPANE_BUILD_NETWORK:-}" ]]; then
+  case "$(uname -s)" in
+    Linux) export DEVPANE_BUILD_NETWORK=host ;;
+    *) export DEVPANE_BUILD_NETWORK=default ;;
+  esac
+fi
 
 case "${action}" in
   up)
     need docker
-    build_be
-    build_zay
+    docker info >/dev/null
+    echo "building Linux lab images (first build may take several minutes)"
     compose up -d --build
     cat <<'EOF'
 

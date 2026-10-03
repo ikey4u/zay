@@ -15,7 +15,11 @@ devpane.test            -> DNS answer 192.0.2.11, captured by TUN, then a domain
 mise devpane
 ```
 
-That runs `devpane/be/manage.sh up`. It builds the debug `zay` binary (WebUI embedded) and the Rust `devpane-be` lab edge, then starts the containers.
+Requires a running Linux Docker engine with Docker Compose and BuildKit (for example, Docker Desktop on macOS). Initialize repository submodules before the first build with `git submodule update --init --recursive`.
+
+That runs `devpane/be/manage.sh up`. Both the debug `zay` binary (WebUI embedded) and the Rust `devpane-be` lab edge are compiled inside Linux Docker build stages, then copied into the runtime images. This works on Linux and macOS, including Apple Silicon, using the Docker engine's default platform. Host Rust, Node.js, and cross-compilation tools are not required.
+
+The first build downloads the build tools and dependencies and can take several minutes. Docker caches subsequent builds; Linux build products do not overwrite host Cargo artifacts or WebUI dependencies.
 
 | Address | Use |
 | --- | --- |
@@ -32,4 +36,4 @@ devpane/be/manage.sh reset   # also deletes the saved container config
 
 The seed config is `devpane/zay.toml`. The container copies it into the volume on first start. After editing the seed, run `reset` to load it again.
 
-Image builds use the host network for `apt`, because Docker bridge DNS on this machine cannot resolve Debian mirrors. Running containers stay on `172.30.126.0/24` and do not change host routes.
+On Linux, the launcher uses host networking for image builds to preserve the Debian mirror DNS workaround. On macOS it uses Docker's default build network; Docker Desktop host networking does not need to be enabled. Override either choice with `DEVPANE_BUILD_NETWORK=default mise devpane` or `DEVPANE_BUILD_NETWORK=host mise devpane`. Running containers stay on `172.30.126.0/24` and do not change host routes.

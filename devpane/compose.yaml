@@ -13,7 +13,7 @@ services:
     image: devpane-be
     build:
       context: ./be
-      network: host
+      network: ${DEVPANE_BUILD_NETWORK:-default}
     environment:
       DEVPANE_ROLE: edge
       DEVPANE_ADVERTISE_HOST: 172.30.126.10
@@ -39,9 +39,9 @@ services:
   relay:
     image: devpane-zay
     build:
-      context: .
-      dockerfile: Dockerfile
-      network: host
+      context: ..
+      dockerfile: devpane/Dockerfile
+      network: ${DEVPANE_BUILD_NETWORK:-default}
     entrypoint: ["/usr/local/bin/devpane-relay"]
     environment:
       DEVPANE_MESH_AUTH: devpane:devpane-mesh
@@ -58,9 +58,9 @@ services:
   zay:
     image: devpane-zay
     build:
-      context: .
-      dockerfile: Dockerfile
-      network: host
+      context: ..
+      dockerfile: devpane/Dockerfile
+      network: ${DEVPANE_BUILD_NETWORK:-default}
     depends_on:
       be:
         condition: service_healthy

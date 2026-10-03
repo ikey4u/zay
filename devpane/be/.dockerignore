@@ -1,3 +1,5 @@
 *
-!.build
-!.build/devpane-be
+!Cargo.toml
+!Cargo.lock
+!src
+!src/**
