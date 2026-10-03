@@ -9,7 +9,7 @@ build = "build.rs"
 
 [features]
 default = ["webui"]
-webui = []
+webui = ["axum/ws", "dep:portable-pty"]
 
 [[bin]]
 name = "zay"
@@ -28,6 +28,7 @@ anyhow = "1"
 [dependencies]
 anyhow = "1"
 axum = "0.8"
+portable-pty = { version = "0.9", optional = true }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 clap = { version = "4", features = ["derive"] }
 ctrlc = "3.4"

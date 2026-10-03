@@ -22,7 +22,7 @@ RUN --mount=type=cache,id=devpane-cargo-registry,target=/usr/local/cargo/registr
 FROM debian:13
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl iproute2 netcat-openbsd \
+    && apt-get install -y --no-install-recommends ca-certificates curl iproute2 netcat-openbsd chromium iputils-ping dnsutils traceroute procps \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /usr/local/bin/zay /usr/local/bin/zay

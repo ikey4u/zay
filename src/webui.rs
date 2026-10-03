@@ -51,6 +51,9 @@ pub struct WebUiCli {
     /// Bearer token required when listening beyond loopback
     #[arg(long, env = "ZAY_WEBUI_TOKEN", hide_env_values = true)]
     token: Option<String>,
+    /// Disable authentication only inside the isolated devpane container
+    #[arg(long, hide = true)]
+    devpane_no_auth: bool,
     /// Start only the WebUI; leave enabled core components stopped
     #[arg(long = "no-start-core", default_value_t = true, action = clap::ArgAction::SetFalse)]
     start_core: bool,
@@ -229,8 +232,17 @@ impl IntoResponse for ApiError {
 
 type ApiResult<T> = std::result::Result<T, ApiError>;
 
-pub fn run(cli: WebUiCli) -> Result<()> {
-    if !cli.listen.ip().is_loopback()
+pub fn run(mut cli: WebUiCli) -> Result<()> {
+    if cli.devpane_no_auth {
+        if !crate::lab::is_devpane() {
+            bail!(
+                "--devpane-no-auth is only available inside the devpane container"
+            );
+        }
+        cli.token = None;
+    }
+    if !cli.devpane_no_auth
+        && !cli.listen.ip().is_loopback()
         && cli.token.as_deref().is_none_or(|token| token.len() < 16)
     {
         bail!(
@@ -301,6 +313,8 @@ async fn run_async(
         .route("/api/v1/proxy/nodes/test", post(test_proxy_nodes))
         .route("/api/v1/lab", get(get_lab))
         .route("/api/v1/lab/probe", post(post_lab_probe))
+        .route("/api/v1/lab/browser", post(post_lab_browser))
+        .route("/api/v1/lab/terminal", get(lab_terminal))
         .route("/api/v1/exit", post(exit_webui))
         .route("/api/v1/logs", get(get_logs))
         .route("/api/v1/events", get(get_events))
@@ -313,6 +327,7 @@ async fn run_async(
             "/api/v1/rules/{group}/{name}",
             get(get_rule_set).put(put_rule_set),
         )
+        .layer(axum::middleware::from_fn(lab_origin_guard))
         .layer(DefaultBodyLimit::max(32 * 1024 * 1024))
         .with_state(state);
 
@@ -330,7 +345,7 @@ async fn run_async(
     if let Some(error) = startup_error {
         eprintln!("core not started: {error}");
     }
-    if !address.ip().is_loopback() {
+    if !address.ip().is_loopback() && !cli.devpane_no_auth {
         println!("Remote API access requires the configured bearer token.");
     }
     if cli.open {
@@ -364,6 +379,38 @@ async fn shutdown_signal(shutdown: Arc<Notify>) {
     }
 }
 
+// The token-free container is published on host loopback. Reject browser
+// cross-origin requests and DNS-rebinding Host headers before any lab action.
+async fn lab_origin_guard(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    if crate::lab::is_devpane() && !lab_origin_allowed(request.headers()) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    next.run(request).await
+}
+
+fn lab_origin_allowed(headers: &HeaderMap) -> bool {
+    let Some(host) = headers.get(header::HOST).and_then(|v| v.to_str().ok())
+    else {
+        return false;
+    };
+    let Ok(url) = url::Url::parse(&format!("http://{host}")) else {
+        return false;
+    };
+    if !matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]")) {
+        return false;
+    }
+    match headers.get(header::ORIGIN) {
+        None => true,
+        Some(origin) => origin.to_str().is_ok_and(|origin| {
+            origin == format!("http://{host}")
+                || origin == format!("https://{host}")
+        }),
+    }
+}
+
 async fn index() -> Response {
     static_asset(INDEX_HTML, "text/html; charset=utf-8")
 }
@@ -382,7 +429,7 @@ fn static_asset(body: &'static str, content_type: &'static str) -> Response {
         .header(header::CONTENT_TYPE, content_type)
         .header(header::CACHE_CONTROL, "no-cache")
         .header("X-Content-Type-Options", "nosniff")
-        .header("Content-Security-Policy", "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; base-uri 'none'; frame-ancestors 'none'")
+        .header("Content-Security-Policy", "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; base-uri 'none'; frame-ancestors 'none'")
         .body(Body::from(body))
         .expect("valid static response")
 }
@@ -407,6 +454,64 @@ async fn post_lab_probe(
             .map_err(|error| ApiError::internal(anyhow::anyhow!("{error}")))?
             .map_err(ApiError::bad_request)?;
     Ok(Json(result))
+}
+
+async fn post_lab_browser(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<crate::lab::BrowserRequest>,
+) -> ApiResult<Json<JsonValue>> {
+    authorize(&state, &headers)?;
+    Ok(Json(
+        crate::lab::render_page(body)
+            .await
+            .map_err(ApiError::bad_request)?,
+    ))
+}
+
+async fn lab_terminal(
+    State(state): State<AppState>,
+    upgrade: axum::extract::ws::WebSocketUpgrade,
+) -> ApiResult<Response> {
+    if !crate::lab::is_devpane() {
+        return Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "not_available",
+            anyhow::anyhow!("terminal is only available in devpane"),
+        ));
+    }
+    Ok(upgrade.max_message_size(32768).on_upgrade(
+        move |mut socket| async move {
+            // Authenticate before starting a shell, without putting tokens in URLs.
+            let first = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                socket.recv(),
+            )
+            .await;
+            let authorized = match first {
+                Ok(Some(Ok(axum::extract::ws::Message::Text(text)))) => {
+                    let auth = serde_json::from_str::<JsonValue>(&text)
+                        .unwrap_or_default();
+                    auth["type"] == "auth"
+                        && state.token.as_deref().is_none_or(|expected| {
+                            constant_time_eq(
+                                expected.as_bytes(),
+                                auth["token"].as_str().unwrap_or("").as_bytes(),
+                            )
+                        })
+                }
+                _ => false,
+            };
+            if authorized {
+                if let Err(error) = crate::lab::terminal(socket).await {
+                    tracing::warn!("lab terminal: {error:#}");
+                }
+            } else {
+                let _ =
+                    socket.send(axum::extract::ws::Message::Close(None)).await;
+            }
+        },
+    ))
 }
 
 async fn get_state(
@@ -1296,6 +1401,25 @@ mod tests {
         assert!(output.contains("process = [\"curl\"]"));
         assert!(output.contains("source = [\"10.14.14.1\"]"));
         assert!(output.contains("destination = [\"203.0.113.8:443\"]"));
+    }
+
+    #[test]
+    fn lab_origin_rejects_foreign_sites_and_rebinding() {
+        use axum::http::{HeaderMap, header};
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, "127.0.0.1:18787".parse().unwrap());
+        assert!(super::lab_origin_allowed(&headers));
+        headers
+            .insert(header::ORIGIN, "http://127.0.0.1:18787".parse().unwrap());
+        assert!(super::lab_origin_allowed(&headers));
+        headers.insert(header::ORIGIN, "http://evil.example".parse().unwrap());
+        assert!(!super::lab_origin_allowed(&headers));
+        headers.remove(header::ORIGIN);
+        headers.insert(header::HOST, "evil.example:18787".parse().unwrap());
+        assert!(!super::lab_origin_allowed(&headers));
+        headers.insert(header::HOST, "localhost:18787".parse().unwrap());
+        headers.insert(header::ORIGIN, "null".parse().unwrap());
+        assert!(!super::lab_origin_allowed(&headers));
     }
 
     #[test]

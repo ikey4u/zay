@@ -381,6 +381,9 @@ fn local_result(
     advertise: &str,
     proxy_port: u16,
 ) -> (u16, Vec<u8>, &'static str) {
+    if path == "/" {
+        return (200, br#"<!doctype html><html><head><title>Devpane browser test</title><style>body{font:18px system-ui;background:#101827;color:#e2e8f0;padding:60px}main{max-width:780px;margin:auto;padding:40px;border:1px solid #334155;border-radius:24px}h1{font-size:44px}span{color:#6ee7b7}a{color:#93c5fd}</style></head><body><main><span>DEVPANE / NETWORK LAB</span><h1>The container browser is connected.</h1><p>This page was loaded inside the Zay network.</p><p id="js">JavaScript is loading...</p><script>document.getElementById('js').textContent='JavaScript rendering is working.';</script><p>Try a public URL in the address bar, or open the container terminal to inspect the network.</p></main></body></html>"#.to_vec(), "text/html; charset=utf-8");
+    }
     if path.starts_with("/generate_204") {
         return (204, Vec::new(), "text/plain");
     }

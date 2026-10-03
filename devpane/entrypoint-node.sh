@@ -7,6 +7,6 @@ if [ ! -f "$data/zay.toml" ]; then
 fi
 exec zay webui \
     --listen 0.0.0.0:8787 \
-    --token "${ZAY_WEBUI_TOKEN:?ZAY_WEBUI_TOKEN is required}" \
+    --devpane-no-auth \
     --data-dir "$data" \
     --config "$data/zay.toml"

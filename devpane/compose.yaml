@@ -57,6 +57,8 @@ services:
 
   zay:
     image: devpane-zay
+    # Reap Chromium helper processes and disconnected shell jobs.
+    init: true
     build:
       context: ..
       dockerfile: devpane/Dockerfile
@@ -69,7 +71,6 @@ services:
       sink:
         condition: service_started
     environment:
-      ZAY_WEBUI_TOKEN: devpane-local-token
       ZAY_LAB: devpane
       ZAY_LAB_PROXY_URL: http://devpane.test/whoami
       ZAY_LAB_DIRECT_URL: http://172.30.126.10:8090/whoami

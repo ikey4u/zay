@@ -51,9 +51,8 @@ case "${action}" in
 devpane is up. Host routing is unchanged; TUN and EasyTier stay in the zay container.
 
   WebUI  http://127.0.0.1:18787/
-  Token  devpane-local-token
 
-Open the WebUI, paste the token, then use the Lab sidebar.
+Open the WebUI, then use the Lab sidebar. No access token is required.
 The lab subscription is http://172.30.126.10:8090/sub inside the docker network
 (from the host: http://127.0.0.1:18090/sub).
 

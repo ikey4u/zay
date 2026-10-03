@@ -207,6 +207,7 @@ export type LabPreset = {
 }
 
 export type LabProfile = {
+  interactive: boolean
   active: boolean
   name?: string | null
   hint: string
@@ -214,6 +215,11 @@ export type LabProfile = {
 }
 
 export type LabProbe = {
+  remote_ip?: string
+  effective_url?: string
+  dns_ms?: number
+  connect_ms?: number
+  headers?: string
   kind: "url" | "tcp"
   target: string
   ok: boolean
@@ -259,4 +265,19 @@ export async function uploadRuleSet(path: string, body: BodyInit): Promise<Apply
     throw new ApiError(response.status, data.error ?? "request_failed", data.message ?? response.statusText)
   }
   return data
+}
+
+export type LabBrowser = {
+  url: string
+  image: string | null
+  error: string | null
+  connection: LabProbe
+}
+
+export function terminalSocket(): WebSocket {
+  const url = new URL("/api/v1/lab/terminal", window.location.href)
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:"
+  const socket = new WebSocket(url)
+  socket.addEventListener("open", () => socket.send(JSON.stringify({ type: "auth", token })))
+  return socket
 }

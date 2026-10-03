@@ -18,6 +18,12 @@ pub struct ProbeRequest {
     pub tcp: Option<String>,
 }
 
+pub fn is_devpane() -> bool {
+    cfg!(target_os = "linux")
+        && std::env::var("ZAY_LAB").as_deref() == Ok("devpane")
+        && std::path::Path::new("/.dockerenv").exists()
+}
+
 pub fn profile_json() -> Value {
     let name = std::env::var("ZAY_LAB")
         .ok()
@@ -61,6 +67,7 @@ pub fn profile_json() -> Value {
     }
     json!({
         "active": name.is_some(),
+        "interactive": is_devpane(),
         "name": name,
         "hint": "Probes run in the Zay process network, not in the browser that opened this page.",
         "presets": presets,
@@ -93,8 +100,13 @@ fn probe_url(raw: &str) -> Result<Value> {
             "--ipv4",
             "--proto",
             "=http,https",
+            "--location",
+            "--proto-redir",
+            "=http,https",
             "--max-redirs",
-            "0",
+            "5",
+            "--max-filesize",
+            "2097152",
             "-sS",
             "--max-time",
             "12",
@@ -106,16 +118,14 @@ fn probe_url(raw: &str) -> Result<Value> {
         .arg("-o")
         .arg(&body_path)
         .arg("-w")
-        .arg("%{http_code}")
+        .arg("%{json}")
         .arg(&url)
         .output()
         .context("running curl")?;
     let elapsed_ms = started.elapsed().as_millis() as u64;
-    let status = String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .parse::<u16>()
-        .ok()
-        .filter(|code| *code > 0);
+    let timing: Value =
+        serde_json::from_slice(&output.stdout).unwrap_or(Value::Null);
+    let status = timing["http_code"].as_u64().filter(|code| *code > 0);
     let headers = std::fs::read_to_string(&header_path).unwrap_or_default();
     let body = std::fs::read(&body_path).unwrap_or_default();
     let _ = std::fs::remove_file(&header_path);
@@ -128,6 +138,11 @@ fn probe_url(raw: &str) -> Result<Value> {
     };
     Ok(json!({
         "kind": "url",
+        "remote_ip": timing["remote_ip"],
+        "effective_url": timing["url_effective"],
+        "dns_ms": timing["time_namelookup"].as_f64().map(|v| v * 1000.0),
+        "connect_ms": timing["time_connect"].as_f64().map(|v| v * 1000.0),
+        "headers": headers,
         "target": url,
         "ok": error.is_none(),
         "status": status,
@@ -287,4 +302,189 @@ mod tests {
         );
         assert!(parse_tcp_target("10.126.126.1").is_err());
     }
+}
+
+#[derive(Deserialize)]
+pub struct BrowserRequest {
+    pub url: String,
+}
+
+/// Render in a separate Chromium process so requests take the container's TUN.
+pub async fn render_page(request: BrowserRequest) -> Result<Value> {
+    use base64::Engine;
+    static RENDERS: tokio::sync::Semaphore =
+        tokio::sync::Semaphore::const_new(2);
+    let _permit = RENDERS
+        .try_acquire()
+        .context("browser is busy; try again shortly")?;
+    if !is_devpane() {
+        bail!("browser rendering is only available inside devpane");
+    }
+    let url = validate_http_url(&request.url)?;
+    let directory = std::env::temp_dir().join(format!(
+        "zay-browser-{}-{}",
+        std::process::id(),
+        nanos()
+    ));
+    std::fs::create_dir(&directory)?;
+    struct Cleanup(std::path::PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _cleanup = Cleanup(directory.clone());
+    let screenshot = directory.join("page.png");
+    let mut command = tokio::process::Command::new("timeout");
+    command
+        .args([
+            "--kill-after=2s",
+            "30s",
+            "chromium",
+            "--headless",
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-background-networking",
+            "--no-proxy-server",
+            "--hide-scrollbars",
+            "--window-size=1280,800",
+            "--virtual-time-budget=3000",
+        ])
+        .arg(format!(
+            "--user-data-dir={}",
+            directory.join("profile").display()
+        ))
+        .arg(format!("--screenshot={}", screenshot.display()))
+        .arg(&url)
+        .kill_on_drop(true);
+    let target = url.clone();
+    let probe = tokio::task::spawn_blocking(move || probe_url(&target));
+    let rendered = command
+        .output()
+        .await
+        .context("starting the container browser");
+    let connection = probe.await??;
+    let (image, render_error) = match rendered {
+        Ok(output) if output.status.success() && screenshot.is_file() => (
+            Some(format!(
+                "data:image/png;base64,{}",
+                base64::engine::general_purpose::STANDARD
+                    .encode(std::fs::read(screenshot)?)
+            )),
+            None,
+        ),
+        Ok(output) => (
+            None,
+            Some(
+                if output.status.code() == Some(124)
+                    || output.status.code() == Some(137)
+                {
+                    "The page did not finish rendering within 30 seconds"
+                        .to_string()
+                } else {
+                    format!(
+                        "Browser rendering failed: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                            .chars()
+                            .take(2000)
+                            .collect::<String>()
+                    )
+                },
+            ),
+        ),
+        Err(error) => (None, Some(error.to_string())),
+    };
+    Ok(
+        json!({"url": url, "image": image, "error": render_error, "connection": connection}),
+    )
+}
+
+/// One PTY per WebSocket: shell state persists until the user disconnects.
+pub async fn terminal(mut socket: axum::extract::ws::WebSocket) -> Result<()> {
+    use std::io::{Read, Write};
+
+    use axum::extract::ws::Message;
+    use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+    static TERMINALS: tokio::sync::Semaphore =
+        tokio::sync::Semaphore::const_new(4);
+    let _permit = TERMINALS
+        .try_acquire()
+        .context("all terminal sessions are in use")?;
+    if !is_devpane() {
+        bail!("terminal is only available inside devpane");
+    }
+    let pair = native_pty_system().openpty(PtySize {
+        rows: 24,
+        cols: 100,
+        pixel_width: 0,
+        pixel_height: 0,
+    })?;
+    let mut command = CommandBuilder::new("/bin/bash");
+    command.args(["--noprofile", "--norc", "-i"]);
+    command.env("TERM", "xterm-256color");
+    command.env("PS1", "\\u@devpane:\\w\\$ ");
+    command.cwd("/var/lib/zay");
+    let mut child = pair.slave.spawn_command(command)?;
+    drop(pair.slave);
+    let mut reader = pair.master.try_clone_reader()?;
+    let mut writer = pair.master.take_writer()?;
+    let (input_tx, mut input_rx) = tokio::sync::mpsc::channel::<String>(16);
+    let writer_task = tokio::task::spawn_blocking(move || {
+        while let Some(data) = input_rx.blocking_recv() {
+            if writer.write_all(data.as_bytes()).is_err() {
+                break;
+            }
+        }
+    });
+    let (output_tx, mut output_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(32);
+    let reader_task = tokio::task::spawn_blocking(move || {
+        let mut buffer = [0u8; 8192];
+        while let Ok(count) = reader.read(&mut buffer) {
+            if count == 0
+                || output_tx.blocking_send(buffer[..count].to_vec()).is_err()
+            {
+                break;
+            }
+        }
+    });
+    // Dropping the PTY closes the controlling terminal; kill and reap the shell
+    // as well, so closing a browser tab cannot leave a shell session running.
+    loop {
+        tokio::select! {
+            output = output_rx.recv() => match output {
+                Some(bytes) => if socket.send(Message::Binary(bytes.into())).await.is_err() { break; },
+                None => break,
+            },
+            input = socket.recv() => match input {
+                Some(Ok(Message::Text(text))) => {
+                    let Ok(value) = serde_json::from_str::<Value>(&text) else { continue; };
+                    if value["type"] == "input" {
+                        if let Some(data) = value["data"].as_str() {
+                            if data.len() > 16384 || input_tx.try_send(data.to_string()).is_err() { break; }
+                        }
+                    } else if value["type"] == "resize" {
+                        let cols = value["cols"].as_u64().unwrap_or(100).clamp(20, 300) as u16;
+                        let rows = value["rows"].as_u64().unwrap_or(24).clamp(5, 100) as u16;
+                        let _ = pair.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+                    }
+                },
+                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                _ => {},
+            },
+        }
+    }
+    if let Some(pid) = child.process_id() {
+        let _ = tokio::process::Command::new("pkill")
+            .args(["-KILL", "-s", &pid.to_string()])
+            .status()
+            .await;
+    }
+    let _ = child.kill();
+    drop(input_tx);
+    drop(pair.master);
+    drop(output_rx);
+    let _ = tokio::task::spawn_blocking(move || child.wait()).await;
+    let _ = reader_task.await;
+    let _ = writer_task.await;
+    Ok(())
 }

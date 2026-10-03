@@ -46,7 +46,7 @@ The first build downloads the build tools and dependencies and can take several 
 
 | Address | Use |
 | --- | --- |
-| http://127.0.0.1:18787/ | Zay WebUI, token `devpane-local-token` |
+| http://127.0.0.1:18787/ | Zay WebUI, no access token required |
 | http://127.0.0.1:18090/sub | Lab subscription from the host |
 
 The WebUI **Lab** sidebar runs `curl` / `nc` inside the container. The browser that opened the page is not on that path.
@@ -60,3 +60,11 @@ devpane/be/manage.sh reset   # also deletes the saved container config
 The seed config is `devpane/zay.toml`. The container copies it into the volume on first start. After editing the seed, run `reset` to load it again.
 
 On Linux, the launcher uses host networking for image builds to preserve the Debian mirror DNS workaround. On macOS it uses the default build network inside Colima's Linux VM. Override either choice with `DEVPANE_BUILD_NETWORK=default mise devpane` or `DEVPANE_BUILD_NETWORK=host mise devpane`. Running containers stay on `172.30.126.0/24` and do not change host routes.
+
+## Browser and terminal
+
+The Lab panel includes a Chromium-rendered snapshot with an address bar, back/forward history, reload, and a separate connection check (HTTP status, remote IP, DNS/connect timing, and response headers). Page scripts, styles, and images load inside the Zay container. Snapshots are 1280 × 800 and are refreshed by navigation; they are not a live interactive browser session.
+
+The container terminal is a persistent Bash PTY with command history, resize, and Ctrl+C. It runs as the container user and supports arbitrary commands, including `curl`, `ping`, `dig`, `ip`, and `traceroute`. Disconnecting closes the shell session. Browser rendering and terminal endpoints are available only in the devpane container.
+
+The lab WebUI has no access token and is published only on `127.0.0.1`. It rejects cross-origin browser requests and non-local Host headers. Normal Zay WebUI authentication requirements are unchanged.
