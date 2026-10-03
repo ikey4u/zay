@@ -16,6 +16,8 @@ services:
       network: ${DEVPANE_BUILD_NETWORK:-default}
     environment:
       DEVPANE_ROLE: dns
+      DEVPANE_DOH: "1"
+      DEVPANE_IPV4_ONLY: "1"
       DEVPANE_ADVERTISE_HOST: 172.30.126.10
     networks:
       lab:

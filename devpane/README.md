@@ -80,7 +80,7 @@ The subscription advertises the host HTTP proxy on port 13128. Requests for `dev
 mise devpane:test
 ```
 
-This installs Python through mise and performs 24 checks against the running lab: native proxy identity and subscription, explicit proxy access, DNS, transparent TUN routing, stale FakeIP rejection without losing the TUN reader, direct exclusions, Mesh HTTP between virtual IPs, separate Mesh/TUN interfaces, bidirectional ICMP, and recovery after host proxy, Mesh peer, and Zay core outages. The outage checks temporarily interrupt the lab and restore services. Concurrent test runs are rejected. Tests expect the seeded lab routes and Mesh settings.
+This installs Python through mise and performs 27 checks against the running lab: native proxy identity and subscription, explicit proxy access, DNS, transparent TUN routing, stale FakeIP rejection without losing the TUN reader, direct exclusions, Mesh HTTP between virtual IPs, separate Mesh/TUN interfaces, bidirectional ICMP, and recovery after host proxy, Mesh peer, and Zay core outages. The outage checks temporarily interrupt the lab and restore services. Concurrent test runs are rejected. Tests expect the seeded lab routes and Mesh settings.
 
 Results are saved to `devpane/.build/network-test.json`. Launcher regression tests simulate both macOS and Linux without Docker:
 
@@ -89,3 +89,9 @@ python3 devpane/be/test_manage.py
 ```
 
 Use `devpane/be/host-proxy.sh status` to inspect the native process; its log is `devpane/.build/host-proxy.log`. `manage.sh down` and `reset` stop it along with the containers. The WebUI's Mesh preset probes the peer's HTTP service over `10.126.126.3`, so it verifies actual Mesh traffic.
+
+### External browsing and DNS
+
+The DNS fixture forwards external queries over certificate-verified HTTPS to AliDNS (`dns.alidns.com`, pinned to `223.5.5.5`). This keeps host VPN DNS interception from injecting FakeIPs into the container. Both the container resolver and Zay's upstream resolver use this fixture. `devpane.test` remains a local deterministic answer. The IPv4-only Docker bridge returns empty AAAA answers so Chromium does not select an IPv6 connection with no usable upstream route. Existing seeded configs are backed up before adding the lab DNS mixin; custom mixins are preserved.
+
+The network suite also checks real Baidu DNS answers and renders `https://baidu.com` with Chromium. These checks require Internet access and can fail during upstream outages. The screenshot is saved to `devpane/.build/baidu-render.png`; a passing local fixture alone no longer counts as successful external browsing.

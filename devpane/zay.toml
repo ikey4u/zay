@@ -1,6 +1,8 @@
 # Seed config for the devpane container. TUN and EasyTier stay inside this netns.
 
 [proxy]
+# HTTPS DNS forwarding prevents host VPN FakeIP contamination.
+mixin = '{"dns":{"servers":[{"type":"udp","tag":"dns-direct","server":"172.30.126.10"},{"type":"udp","tag":"dns-direct-alt","server":"172.30.126.10"},{"type":"fakeip","tag":"fake-ip","inet4_range":"198.18.0.0/15","inet6_range":"fc00::/18"}]}}'
 enabled = true
 subscriptions = ["http://@DEVPANE_HOST@:18090/sub"]
 gateway = false

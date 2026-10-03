@@ -388,8 +388,24 @@ fn serve_dns(lab_addr: Ipv4Addr, upstream: SocketAddr) {
             continue;
         };
         let query = &buf[..size];
-        if let Some(reply) = lab_dns_response(query, lab_addr) {
+        let local_reply = lab_dns_response(query, lab_addr).or_else(|| {
+            (env::var("DEVPANE_IPV4_ONLY").as_deref() == Ok("1"))
+                .then(|| ipv4_only_dns_response(query))
+                .flatten()
+        });
+        if let Some(reply) = local_reply {
             let _ = socket.send_to(&reply, peer);
+            continue;
+        }
+        if env::var("DEVPANE_DOH").as_deref() == Ok("1") {
+            let query = query.to_vec();
+            let response_socket = socket.try_clone().expect("clone DNS socket");
+            thread::spawn(move || match doh_query(&query) {
+                Ok(reply) => {
+                    let _ = response_socket.send_to(&reply, peer);
+                }
+                Err(error) => eprintln!("lab HTTPS DNS: {error}"),
+            });
             continue;
         }
         let Ok(upstream_socket) = UdpSocket::bind(("0.0.0.0", 0)) else {
@@ -404,6 +420,42 @@ fn serve_dns(lab_addr: Ipv4Addr, upstream: SocketAddr) {
             let _ = socket.send_to(&reply[..reply_size], peer);
         }
     }
+}
+
+// HTTPS to the existing AliDNS provider prevents host VPN FakeIP rewriting.
+fn doh_query(query: &[u8]) -> io::Result<Vec<u8>> {
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("curl")
+        .args([
+            "--silent",
+            "--show-error",
+            "--fail",
+            "--noproxy",
+            "*",
+            "--connect-timeout",
+            "3",
+            "--max-time",
+            "5",
+            "--resolve",
+            "dns.alidns.com:443:223.5.5.5",
+            "--header",
+            "Content-Type: application/dns-message",
+            "--header",
+            "Accept: application/dns-message",
+            "--data-binary",
+            "@-",
+            "https://dns.alidns.com/dns-query",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    child.stdin.take().expect("DNS stdin").write_all(query)?;
+    let output = child.wait_with_output()?;
+    if !output.status.success() || output.stdout.len() < 12 {
+        return Err(io::Error::other("upstream query failed"));
+    }
+    Ok(output.stdout)
 }
 
 fn local_result(
@@ -590,6 +642,22 @@ fn lab_dns_response(query: &[u8], lab_addr: Ipv4Addr) -> Option<Vec<u8>> {
     Some(response)
 }
 
+// The lab bridge has no IPv6 egress. Advertising AAAA records would let the
+// userspace TCP handshake succeed before the upstream IPv6 dial fails.
+fn ipv4_only_dns_response(query: &[u8]) -> Option<Vec<u8>> {
+    if query.len() < 12 {
+        return None;
+    }
+    let (_, offset) = decode_dns_name(query, 12)?;
+    if query.get(offset..offset + 4)? != [0, 28, 0, 1] {
+        return None;
+    }
+    let mut response = query[..offset + 4].to_vec();
+    response[2..4].copy_from_slice(&0x8180_u16.to_be_bytes());
+    response[4..12].copy_from_slice(&[0, 1, 0, 0, 0, 0, 0, 0]);
+    Some(response)
+}
+
 fn decode_dns_name(data: &[u8], mut offset: usize) -> Option<(String, usize)> {
     let mut labels = Vec::new();
     let mut cursor = offset;
@@ -634,6 +702,19 @@ mod tests {
     use std::net::Ipv4Addr;
 
     use super::{decode_dns_name, lab_dns_response};
+
+    #[test]
+    fn ipv4_lab_does_not_advertise_unreachable_ipv6() {
+        let query = b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x05baidu\x03com\x00\x00\x1c\x00\x01";
+        let response = super::ipv4_only_dns_response(query).unwrap();
+        assert_eq!(&response[..2], &query[..2]);
+        assert_eq!(&response[6..12], &[0; 6]);
+        assert_eq!(&response[12..], &query[12..]);
+        let mut a_query = query.to_vec();
+        let last = a_query.len() - 3;
+        a_query[last] = 1;
+        assert!(super::ipv4_only_dns_response(&a_query).is_none());
+    }
 
     #[test]
     fn answers_lab_name() {

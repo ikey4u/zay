@@ -1,5 +1,7 @@
 """Real data-path tests. Run with `mise devpane:test` after `mise devpane`."""
+import base64
 import fcntl
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -30,9 +32,9 @@ def inside(service, *args, check=True):
     return run(*COMPOSE, "exec", "-T", service, *args, check=check)
 
 
-def api(path, method="GET"):
+def api(path, method="GET", body=None):
     request = urllib.request.Request("http://127.0.0.1:18787/api/v1/" + path,
-                                     data=b"{}" if method == "POST" else None,
+                                     data=json.dumps(body or {}).encode() if method == "POST" else None,
                                      headers={"Content-Type": "application/json"}, method=method)
     with urllib.request.urlopen(request, timeout=40) as response:
         return json.load(response)
@@ -129,6 +131,23 @@ try:
         return proxy_request(resolve=True)
     record("TUN survives a stale FakeIP packet", stale_fakeip)
     record("DNS and transparent HTTP work together", proxy_request)
+    def external_dns():
+        output = inside("zay", "dig", "+short", "+time=6", "+tries=1", "@172.30.126.10", "baidu.com", "A").stdout
+        addresses = [ipaddress.ip_address(line) for line in output.splitlines() if line and line[0].isdigit()]
+        assert addresses and all(address.is_global for address in addresses), output
+        return [str(address) for address in addresses]
+    record("external DNS returns real Baidu addresses", external_dns)
+    record("IPv4 lab does not advertise unreachable IPv6", lambda: equal(inside("zay", "dig", "+short", "+time=2", "+tries=1", "@172.30.126.10", "www.baidu.com", "AAAA").stdout.strip(), ""))
+    def external_browser():
+        result = api("lab/browser", "POST", {"url": "https://baidu.com"})
+        assert not result.get("error"), result.get("error")
+        assert result["connection"]["ok"], result["connection"]
+        assert result.get("image", "").startswith("data:image/png;base64,"), result
+        image = base64.b64decode(result["image"].split(",", 1)[1])
+        assert image.startswith(b"\x89PNG\r\n\x1a\n") and len(image) > 5000, len(image)
+        (ROOT / ".build/baidu-render.png").write_bytes(image)
+        return result["connection"]
+    record("Baidu HTTPS and Chromium rendering work", external_browser)
     record("excluded control-plane HTTP stays direct", lambda: equal(json.loads(curl("http://172.30.126.10:8090/whoami").stdout)["via"], "direct"))
     record("Mesh HTTP crosses virtual IPs", lambda: retry(mesh_request))
     def mesh_route():
