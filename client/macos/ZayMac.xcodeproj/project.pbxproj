@@ -3,7 +3,7 @@
 	archiveVersion = 1;
 	classes = {
 	};
-	objectVersion = 77;
+	objectVersion = 63;
 	objects = {
 
 /* Begin PBXBuildFile section */
@@ -52,7 +52,7 @@
 
 /* Begin PBXFileReference section */
 		22070D9F9BB0847206691CCE /* ZayMacApp.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = ZayMacApp.entitlements; sourceTree = "<group>"; };
-		2D8745CD1C270428829BE902 /* ZayMac.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ZayMac.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		2D8745CD1C270428829BE902 /* Zay.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Zay.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		2E5C857D6F3B1DC95598C3CB /* Network.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Network.framework; path = System/Library/Frameworks/Network.framework; sourceTree = SDKROOT; };
 		494CFDECAB169BEAF3727246 /* ProcessIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProcessIdentity.swift; sourceTree = "<group>"; };
 		63D2E1787CD1E02ED950FEAA /* ZayMacApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZayMacApp.swift; sourceTree = "<group>"; };
@@ -143,7 +143,7 @@
 		CE9B9C5300D939F975B72942 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				2D8745CD1C270428829BE902 /* ZayMac.app */,
+				2D8745CD1C270428829BE902 /* Zay.app */,
 				69588D59D44E0AC98A1C8241 /* dev.zay.macos.process-filter.systemextension */,
 			);
 			name = Products;
@@ -198,7 +198,7 @@
 			packageProductDependencies = (
 			);
 			productName = ZayMac;
-			productReference = 2D8745CD1C270428829BE902 /* ZayMac.app */;
+			productReference = 2D8745CD1C270428829BE902 /* Zay.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
@@ -228,7 +228,6 @@
 			);
 			mainGroup = 90768439BF314E1585621EFD;
 			minimizedProjectReferenceProxies = 1;
-			preferredProjectObjectVersion = 77;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
@@ -281,6 +280,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = ZayMacApp/ZayMacApp.entitlements;
 				COMBINE_HIDPI_IMAGES = YES;
+				DEVELOPMENT_TEAM = 626VDC8V92;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = ZayMacApp/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -357,6 +357,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = ZayMacApp/ZayMacApp.entitlements;
 				COMBINE_HIDPI_IMAGES = YES;
+				DEVELOPMENT_TEAM = 626VDC8V92;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = ZayMacApp/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -439,6 +440,7 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = ZayProcessFilter/ZayProcessFilter.entitlements;
 				COMBINE_HIDPI_IMAGES = YES;
+				DEVELOPMENT_TEAM = 626VDC8V92;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = ZayProcessFilter/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -458,6 +460,7 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = ZayProcessFilter/ZayProcessFilter.entitlements;
 				COMBINE_HIDPI_IMAGES = YES;
+				DEVELOPMENT_TEAM = 626VDC8V92;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = ZayProcessFilter/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
