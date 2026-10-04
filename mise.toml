@@ -249,6 +249,20 @@ tart clone --concurrency "${DEVPANE_VM_DOWNLOAD_CONCURRENCY:-4}" \
   "${DEVPANE_MACOS_IMAGE:-ghcr.io/cirruslabs/macos-tahoe-base:latest}" "$name"
 '''
 
+[tasks."devpane:macos-vm"]
+description = "Build on the host and start a native macOS test VM (Apple Silicon)"
+tools = { tart = "2.40.1", rust = "stable", protoc = "36.2", node = "24.19.0", cmake = "4.4.3" }
+run = 'bash "{{config_root}}/devpane/be/macos-vm.sh"'
+
+[tasks."devpane:macos-test"]
+description = "Test native macOS guest TUN and Mesh, including Baidu and Google"
+tools = { python = "3.13.12" }
+run = '''
+mise run devpane
+mise run devpane:macos-vm
+bash "{{config_root}}/devpane/be/manage.sh" test-macos
+'''
+
 [tasks.pkg]
 description = "Alias of macos:build:all (cross-builds + zip under dist/)"
 alias = ["cross-build"]

@@ -16,9 +16,9 @@ need() {
 # Install and activate the macOS tools for every entry point, including direct
 # invocations of this script. Linux uses its existing Docker Engine.
 case "${action}" in
-  up|down|reset|logs|status|test) ;;
+  up|down|reset|logs|status|test|test-macos) ;;
   *)
-    echo "usage: $0 {up|down|reset|logs|status|test}" >&2
+    echo "usage: $0 {up|down|reset|logs|status|test|test-macos}" >&2
     exit 2
     ;;
 esac
@@ -106,6 +106,11 @@ EOF
   test)
     need docker
     python3 "${devpane}/be/test_network.py"
+    ;;
+  test-macos)
+    need docker
+    [[ "$(uname -s)" == Darwin ]] || { echo "macOS host required" >&2; exit 1; }
+    python3 "${devpane}/be/test_macos.py"
     ;;
   *)
     echo "usage: $0 {up|down|reset|logs|status|test}" >&2
