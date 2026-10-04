@@ -14,7 +14,7 @@ class LauncherTests(unittest.TestCase):
         self.root = Path(self.temp.name).resolve()
         self.be = self.root / "devpane" / "be"
         self.be.mkdir(parents=True)
-        for name in ("manage.sh", "macos-runtime.sh"):
+        for name in ("manage.sh", "macos-runtime.sh", "build-linux.sh"):
             shutil.copyfile(Path(__file__).parent / name, self.be / name)
         (self.be / "host-proxy.sh").write_text('#!/bin/bash\nprintf "host-proxy %s\\n" "$*" >> "$TEST_LOG"\n')
         self.bin = self.root / "bin"
@@ -41,6 +41,7 @@ printf 'docker %s|host=%s|context=%s|tls=%s|config=%s|network=%s\\n' \
   "$*" "${DOCKER_HOST:-}" "${DOCKER_CONTEXT:-}" "${DOCKER_TLS_VERIFY:-}" \
   "${DOCKER_CONFIG:-}" "${DEVPANE_BUILD_NETWORK:-}" >> "$TEST_LOG"
 if [[ "$1" == network ]]; then echo 172.17.0.1; fi
+if [[ "$1" == info && "${2:-}" == --format ]]; then echo aarch64; fi
 if [[ "$1" == compose ]]; then exit "${TEST_COMPOSE_EXIT:-0}"; fi
 ''')
         for name in ("docker-cli-plugin-docker-compose", "docker-cli-plugin-docker-buildx"):
@@ -66,6 +67,8 @@ if [[ "$1" == compose ]]; then exit "${TEST_COMPOSE_EXIT:-0}"; fi
         self.assertIn("colima --profile zay-devpane start --runtime docker --vm-type vz --activate=false", calls)
         self.assertIn(f"host=unix://{self.env['COLIMA_HOME']}/zay-devpane/docker.sock|context=|tls=", calls)
         self.assertIn("run devpane:host-build", calls)
+        self.assertIn("run devpane:linux-build", calls)
+        self.assertLess(calls.index("run devpane:linux-build"), calls.index(" build|"))
         self.assertIn("up -d mesh-peer mesh-echo zay", calls)
         self.assertLess(calls.index("host-proxy start"), calls.index("up -d mesh-peer mesh-echo zay"))
         self.assertIn("host-proxy start", calls)
@@ -73,6 +76,35 @@ if [[ "$1" == compose ]]; then exit "${TEST_COMPOSE_EXIT:-0}"; fi
         for plugin in ("compose", "buildx"):
             link = self.root / "devpane/.build/docker/cli-plugins" / f"docker-{plugin}"
             self.assertEqual(link.resolve(), self.bin / f"docker-cli-plugin-docker-{plugin}")
+
+    def test_linux_binaries_are_cross_compiled_on_host_for_engine_architecture(self):
+        include = self.root / "include/google/protobuf"
+        include.mkdir(parents=True)
+        (include / "duration.proto").write_text("")
+        self.mock("protoc", "exit 0")
+        self.mock("rustup", 'printf "rustup %s\\n" "$*" >> "$TEST_LOG"')
+        self.mock("cargo", '''
+printf 'cargo %s\\n' "$*" >> "$TEST_LOG"
+while [[ "$1" != --target ]]; do shift; done
+triple="${2%.2.28}"
+mkdir -p "$CARGO_TARGET_DIR/$triple/debug"
+touch "$CARGO_TARGET_DIR/$triple/debug/zay" "$CARGO_TARGET_DIR/$triple/debug/devpane-be"
+''')
+        for host in ("Darwin", "Linux"):
+            for arch, triple, directory in (("aarch64", "aarch64-unknown-linux-gnu", "arm64"),
+                                             ("x86_64", "x86_64-unknown-linux-gnu", "amd64")):
+                with self.subTest(host=host, arch=arch):
+                    self.log.write_text("")
+                    env = dict(self.env, TEST_OS=host, DEVPANE_TARGET_ARCH=arch)
+                    result = subprocess.run(["bash", str(self.be / "build-linux.sh")],
+                                            env=env, capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    calls = self.log.read_text()
+                    self.assertIn(f"rustup target add {triple}", calls)
+                    self.assertEqual(calls.count(f"--target {triple}.2.28"), 2)
+                    self.assertNotIn("docker", calls)
+                    self.assertTrue((self.root / f"devpane/.build/linux/{directory}/zay").is_file())
+                    self.assertTrue((self.root / f"devpane/.build/linux/{directory}/devpane-be").is_file())
 
     def test_running_vm_is_reused(self):
         self.env["TEST_COLIMA_STATUS"] = "0"
@@ -94,6 +126,8 @@ if [[ "$1" == compose ]]; then exit "${TEST_COMPOSE_EXIT:-0}"; fi
         self.env.update(TEST_OS="Linux", DOCKER_HOST="unix:///existing.sock")
         calls = self.run_action()
         self.assertIn("run devpane:host-build", calls)
+        self.assertIn("run devpane:linux-build", calls)
+        self.assertLess(calls.index("run devpane:linux-build"), calls.index(" build|"))
         self.assertNotIn("run devpane:macos", calls)
         self.assertNotIn("colima ", calls)
         self.assertIn("host=unix:///existing.sock", calls)

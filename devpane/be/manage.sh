@@ -60,7 +60,9 @@ case "${action}" in
     mkdir -p "${devpane}/.build"
     printf 'export DEVPANE_HOST_ADDR=%s\nexport DEVPANE_HOST_BIND=%s\n' "$DEVPANE_HOST_ADDR" "$DEVPANE_HOST_BIND" > "${devpane}/.build/host.env"
     mise -C "$root" run devpane:host-build
-    echo "building Linux lab images (first build may take several minutes)"
+    export DEVPANE_TARGET_ARCH="$(docker info --format '{{.Architecture}}')"
+    mise -C "$root" run devpane:linux-build
+    echo "packaging host-built Linux binaries into lab runtime images"
     compose build
     bash "${devpane}/be/host-proxy.sh" stop
     # Recreate the old edge first to release its former host port 18090.

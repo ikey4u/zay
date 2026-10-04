@@ -218,6 +218,12 @@ hide = true
 tools = { rust = "1.91.0" }
 run = 'cargo build --locked --release --manifest-path "{{config_root}}/devpane/be/Cargo.toml" --target-dir "{{config_root}}/devpane/.build/host-target"'
 
+[tasks."devpane:linux-build"]
+description = "Cross-compile Linux lab binaries on the host"
+hide = true
+tools = { rust = "stable", zig = "0.14.0", "cargo:cargo-zigbuild" = "0.23.4", protoc = "36.2", node = "24.19.0", cmake = "4.4.3" }
+run = 'bash "{{config_root}}/devpane/be/build-linux.sh"'
+
 [tasks."devpane:test"]
 description = "Test host proxy, TUN, and Mesh data paths and recovery"
 tools = { python = "3.13.12" }

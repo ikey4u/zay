@@ -12,7 +12,8 @@ services:
   be:
     image: devpane-be
     build:
-      context: ./be
+      context: ..
+      dockerfile: devpane/be/Dockerfile
       network: ${DEVPANE_BUILD_NETWORK:-default}
     environment:
       DEVPANE_ROLE: dns

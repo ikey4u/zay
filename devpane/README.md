@@ -41,9 +41,11 @@ mise devpane
 
 Initialize repository submodules before the first build with `git submodule update --init --recursive`.
 
-That runs `devpane/be/manage.sh up`. Both the debug `zay` binary (WebUI embedded) and the Rust `devpane-be` lab edge are compiled inside Linux Docker build stages, then copied into the runtime images. This works on Linux and macOS, including Apple Silicon, using the Docker engine's default platform. The small native host proxy is built separately with mise-managed Rust; host Node.js and cross-compilation tools are not required. A native C linker is needed (Xcode Command Line Tools on macOS, a C toolchain on Linux).
+That runs `devpane/be/manage.sh up`. Mise provisions Rust, Zig, cargo-zigbuild, Node.js, protoc (including the standard `.proto` files), and CMake on the host. The host cross-compiles `zay` with its embedded WebUI and `devpane-be` for the Docker engine’s Linux architecture (ARM64 or x86-64). This also works on macOS: the output is a Linux ELF executable, not a macOS executable.
 
-The first build downloads the build tools and dependencies and can take several minutes. Docker caches subsequent builds; Linux build products do not overwrite host Cargo artifacts or WebUI dependencies.
+Docker only packages the completed binaries with runtime tools and starts the lab. No Rust or WebUI compilation runs in the VM. Incremental compiler outputs stay under `devpane/.build/linux-target/`; packaged binaries are in `devpane/.build/linux/{arm64,amd64}/`. Set `DEVPANE_BUILD_JOBS` to change host compiler parallelism (default 2). The native host subscription proxy is built separately with mise-managed Rust. A host C linker is needed (Xcode Command Line Tools on macOS, a C toolchain on Linux).
+
+The first build downloads the build tools and dependencies and can take several minutes. Cargo caches subsequent host builds, and Docker caches runtime image layers. Linux Cargo outputs are kept separate from native host outputs.
 
 | Address | Use |
 | --- | --- |
@@ -80,7 +82,7 @@ The subscription advertises the host HTTP proxy on port 13128. Requests for `dev
 mise devpane:test
 ```
 
-This installs Python through mise and performs network checks against the running lab: native proxy identity and subscription, explicit proxy access, DNS, transparent TUN routing, stale FakeIP rejection without losing the TUN reader, direct exclusions, Mesh HTTP between virtual IPs, separate Mesh/TUN interfaces, bidirectional ICMP, and recovery after host proxy, Mesh peer, and Zay core outages. The outage checks temporarily interrupt the lab and restore services. Concurrent test runs are rejected. Tests expect the seeded lab routes and Mesh settings.
+This installs Python through mise and performs network checks against the running lab: native proxy identity and subscription, explicit proxy access, DNS, transparent TUN routing, stale FakeIP rejection without losing the TUN reader, 24 simultaneous connections to one destination, direct exclusions, Mesh HTTP between virtual IPs, separate Mesh/TUN interfaces, bidirectional ICMP, and recovery after host proxy, Mesh peer, and Zay core outages. The outage checks temporarily interrupt the lab and restore services. Concurrent test runs are rejected. Tests expect the seeded lab routes and Mesh settings.
 
 Results are saved to `devpane/.build/network-test.json`. Launcher regression tests simulate both macOS and Linux without Docker:
 
@@ -92,7 +94,7 @@ Use `devpane/be/host-proxy.sh status` to inspect the native process; its log is 
 
 ### External browsing and DNS
 
-The DNS fixture forwards external queries over certificate-verified HTTPS to AliDNS (`dns.alidns.com`, pinned to `223.5.5.5`). This keeps host VPN DNS interception from injecting FakeIPs into the container. Both the container resolver and Zay's upstream resolver use this fixture. `devpane.test` remains a local deterministic answer. The IPv4-only Docker bridge returns empty AAAA answers so Chromium does not select an IPv6 connection with no usable upstream route. Existing seeded configs are backed up before adding the lab DNS mixin; custom mixins are preserved.
+The DNS fixture forwards external queries over certificate-verified HTTPS to AliDNS (`dns.alidns.com`, pinned to `223.5.5.5`). This keeps host VPN DNS interception from injecting FakeIPs into the container. Container applications use Zay’s TUN DNS at `10.14.14.10`. Proxied domains receive Zay FakeIPs, preserving their hostnames for resolution at the host proxy; direct domains use the HTTPS DNS fixture. This prevents incorrect public DNS answers for proxied sites from becoming fixed upstream destinations. `devpane.test` remains a local deterministic answer. The IPv4-only Docker bridge returns empty AAAA answers so Chromium does not select an IPv6 connection with no usable upstream route. Existing seeded configs are backed up before adding the lab DNS mixin; custom mixins are preserved. The exact previous seed mixin is also migrated with a `.before-lab-proxy-dns` backup.
 
 The network suite requires all four external paths to pass: TUN → Baidu, TUN → Google, Mesh → Baidu, and Mesh → Google. Each follows HTTPS redirects, verifies certificates, requires a final HTTP 200 with the expected page content, and renders the page with Chromium. The Mesh tests use the Zay mixed proxy at `10.126.126.3:7890`, reached over the peer's EasyTier virtual address. The peer uses `mesh-peer.toml`, with its own TUN and the host subscription. No gateway ports are published to the host. Stopping the peer must break the Mesh Internet path.
 
