@@ -229,6 +229,26 @@ description = "Test host proxy, TUN, and Mesh data paths and recovery"
 tools = { python = "3.13.12" }
 run = 'bash "{{config_root}}/devpane/be/manage.sh" test'
 
+[tasks."setup:macosvm"]
+description = "Download the macOS lab VM without starting it (Apple Silicon)"
+tools = { tart = "2.40.1" }
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$(uname -s)/$(uname -m)" == Darwin/arm64 ]] || {
+  echo "The macOS VM lab requires an Apple Silicon Mac." >&2
+  exit 1
+}
+export TART_HOME="{{config_root}}/devpane/.build/macos-vm"
+name=zay-devpane-macos
+if tart get "$name" >/dev/null 2>&1; then
+  echo "macOS VM already downloaded: $name"
+  exit 0
+fi
+tart clone --concurrency "${DEVPANE_VM_DOWNLOAD_CONCURRENCY:-4}" \
+  "${DEVPANE_MACOS_IMAGE:-ghcr.io/cirruslabs/macos-tahoe-base:latest}" "$name"
+'''
+
 [tasks.pkg]
 description = "Alias of macos:build:all (cross-builds + zip under dist/)"
 alias = ["cross-build"]

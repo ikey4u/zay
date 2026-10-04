@@ -99,3 +99,12 @@ The DNS fixture forwards external queries over certificate-verified HTTPS to Ali
 The network suite requires all four external paths to pass: TUN → Baidu, TUN → Google, Mesh → Baidu, and Mesh → Google. Each follows HTTPS redirects, verifies certificates, requires a final HTTP 200 with the expected page content, and renders the page with Chromium. The Mesh tests use the Zay mixed proxy at `10.126.126.3:7890`, reached over the peer's EasyTier virtual address. The peer uses `mesh-peer.toml`, with its own TUN and the host subscription. No gateway ports are published to the host. Stopping the peer must break the Mesh Internet path.
 
 All four results are recorded even if an external destination fails. Screenshots are saved as `devpane/.build/{tun,mesh}-{baidu.com,google.com}-render.png`. The native fixture also uses IPv4 upstream connections, avoiding host VPN IPv6 addresses that accept TCP but stall TLS. Chromium disables QUIC because the fixture's HTTP CONNECT proxy supports TCP only. These checks require a working Internet exit: the native fixture uses the host's existing network and does not supply a remote proxy capable of bypassing upstream restrictions. A local fixture response, successful CONNECT, or HTTP redirect alone does not count as external browsing success.
+
+### Download a macOS VM
+
+On an Apple Silicon Mac, run `mise setup:macosvm`. Mise installs Tart and downloads
+the macOS Tahoe base image as `zay-devpane-macos`, showing progress in the terminal.
+The download is approximately 27 GB and is stored under `devpane/.build/macos-vm/`.
+An existing VM with that name is reused. This command only downloads the VM; it
+does not build Zay, boot the guest, run tests, or change host routes or DNS.
+Set `DEVPANE_VM_DOWNLOAD_CONCURRENCY` to adjust simultaneous transfers (default 4).
