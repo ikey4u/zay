@@ -179,7 +179,31 @@ fn send(command: Command, cx: &mut App) {
         );
     }
     if let Some(view) = state.view.clone() {
-        view.update(cx, |_, cx| cx.notify());
+        // A button listener may already be updating this entity.
+        cx.notify(view.entity_id());
+    }
+}
+
+fn start_services(cx: &mut App) {
+    let session = cx.global::<Session>();
+    if session.busy
+        || session.quitting
+        || session.snapshot.as_ref().is_some_and(|s| s.running)
+    {
+        return;
+    }
+    open_page(Page::Proxy, cx);
+    if let Some(window) = cx.global::<Session>().window {
+        let _ = window.update(cx, |_, window, cx| {
+            if let Some(view) = cx.global::<Session>().view.clone() {
+                view.update(cx, |view, cx| {
+                    view.load_fields(window, cx);
+                    if view.loaded {
+                        view.submit(true, window, cx);
+                    }
+                });
+            }
+        });
     }
 }
 fn quit(cx: &mut App) {
@@ -662,7 +686,7 @@ pub fn run() {
                 )
                 .join("Library/Application Support/Zay Desktop")
             });
-        let (sender, events) = backend::launch(data_dir.clone());
+        let (sender, events, stopped) = backend::launch(data_dir.clone());
         cx.set_global(Session {
             window: None,
             view: None,
@@ -677,9 +701,9 @@ pub fn run() {
         });
         cx.on_action(|_: &ShowWindow, cx| open_page(Page::Overview, cx));
         cx.on_action(|_: &Preferences, cx| open_page(Page::Preferences, cx));
-        cx.on_action(|_: &StartServices, cx| {
-            send(Command::Start(None, None), cx)
-        });
+        // Native menu actions can run while their window is being updated.
+        // Access the form after dispatch releases that window.
+        cx.on_action(|_: &StartServices, cx| cx.defer(start_services));
         cx.on_action(|_: &StopServices, cx| send(Command::Stop, cx));
         cx.on_action(|_: &Hide, cx| cx.hide());
         cx.on_action(|_: &Quit, cx| quit(cx));
@@ -723,7 +747,7 @@ pub fn run() {
                     } else if event.id == preferences.id() {
                         open_page(Page::Preferences, cx);
                     } else if event.id == start.id() {
-                        send(Command::Start(None, None), cx);
+                        start_services(cx);
                     } else if event.id == stop.id() {
                         send(Command::Stop, cx);
                     } else if event.id == quit_item.id() {
@@ -755,11 +779,18 @@ pub fn run() {
             }
         })
         .detach();
-        cx.on_app_quit(|cx| {
+        cx.on_app_quit(move |cx| {
             let sender = cx.global::<Session>().sender.clone();
-            async move {
-                let _ = sender.send(Command::Shutdown).await;
+            let _ = sender.try_send(Command::Shutdown);
+            // GPUI gives async quit observers only 200ms. Native termination
+            // must wait here for the independent networking thread instead.
+            // Bound the wait in case a networking operation never completes.
+            if let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
+                stopped.recv_timeout(std::time::Duration::from_secs(60))
+            {
+                eprintln!("Timed out waiting for networking shutdown");
             }
+            async {}
         })
         .detach();
         open_page(Page::Overview, cx);

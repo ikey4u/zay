@@ -83,3 +83,9 @@ Format owned code with `./scripts/fmt.sh`, or verify with `--check`.
 5. Close the window, switch apps, and reopen from the menu bar; services remain
    active and only one window opens. Check light/dark rendering.
 6. Choose Quit Zay and verify the proxy port and Mesh listeners close.
+7. Relaunch with services stopped and click **Save and apply** before starting;
+   the window must stay open. Change the port without saving, then use
+   **Network → Start services** and verify it uses the form's new port.
+8. With the proxy running, quit from the Dock and verify its listener closes.
+   Native termination waits for the networking worker, with a 60-second limit
+   if shutdown stalls.

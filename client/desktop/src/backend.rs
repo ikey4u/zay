@@ -21,9 +21,16 @@ pub struct Update {
     pub quit: bool,
 }
 
-pub fn launch(data_dir: PathBuf) -> (Sender<Command>, Receiver<Update>) {
+pub fn launch(
+    data_dir: PathBuf,
+) -> (
+    Sender<Command>,
+    Receiver<Update>,
+    std::sync::mpsc::Receiver<()>,
+) {
     let (sender, receiver) = async_channel::unbounded();
     let (events, updates) = async_channel::unbounded();
+    let (finished, stopped) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let runtime =
             tokio::runtime::Runtime::new().expect("create networking runtime");
@@ -64,6 +71,8 @@ pub fn launch(data_dir: PathBuf) -> (Sender<Command>, Receiver<Update>) {
                 if events.send(update).await.is_err() || quit { let _ = client.shutdown().await; break; }
             }
         });
+        drop(runtime);
+        let _ = finished.send(());
     });
-    (sender, updates)
+    (sender, updates, stopped)
 }
