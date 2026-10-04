@@ -17,6 +17,16 @@ if ! grep -Eq '^[[:space:]]*mixin[[:space:]]*=' "$data/zay.toml"; then
     awk 'FNR == NR { if (/^mixin =/) dns = $0; next } { print; if ($0 == "[proxy]") print dns }' /etc/zay/zay.toml "$data/zay.toml" > "$data/zay.toml.next"
     mv "$data/zay.toml.next" "$data/zay.toml"
 fi
+# Upgrade only the exact previous seed mixin; retain user-authored mixins.
+legacy_dns=$(cat <<'EOF'
+mixin = '{"dns":{"servers":[{"type":"udp","tag":"dns-direct","server":"172.30.126.10"},{"type":"udp","tag":"dns-direct-alt","server":"172.30.126.10"},{"type":"fakeip","tag":"fake-ip","inet4_range":"198.18.0.0/15","inet6_range":"fc00::/18"}]}}'
+EOF
+)
+if [ "$(sed -n '/^mixin = /p' "$data/zay.toml")" = "$legacy_dns" ]; then
+    cp "$data/zay.toml" "$data/zay.toml.before-lab-proxy-dns"
+    awk 'FNR == NR { if (/^mixin =/) dns = $0; next } /^mixin =/ { print dns; next } { print }' /etc/zay/zay.toml "$data/zay.toml" > "$data/zay.toml.next"
+    mv "$data/zay.toml.next" "$data/zay.toml"
+fi
 exec zay webui \
     --listen 0.0.0.0:8787 \
     --devpane-no-auth \

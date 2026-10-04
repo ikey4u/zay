@@ -170,12 +170,29 @@ try:
         return proxy_request(resolve=True)
     record("TUN survives a stale FakeIP packet", stale_fakeip)
     record("DNS and transparent HTTP work together", proxy_request)
+    def concurrent_tun():
+        for attempt in range(3):
+            result = inside("zay", "sh", "-c",
+                            "seq 1 24 | xargs -P 24 -I X curl -fsS --noproxy '*' "
+                            "--resolve devpane.test:80:192.0.2.11 --connect-timeout 2 --max-time 5 "
+                            "-o /dev/null -w '%{http_code}\\n' http://devpane.test/whoami")
+            statuses = result.stdout.splitlines()
+            assert len(statuses) == 24 and all(status == "200" for status in statuses), result.stdout
+        return {"rounds": 3, "concurrent_connections": 24, "successful": 72}
+    record("TUN accepts 24 concurrent connections to one destination", concurrent_tun)
+
     def external_dns():
         output = inside("zay", "dig", "+short", "+time=6", "+tries=1", "@172.30.126.10", "baidu.com", "A").stdout
         addresses = [ipaddress.ip_address(line) for line in output.splitlines() if line and line[0].isdigit()]
         assert addresses and all(address.is_global for address in addresses), output
         return [str(address) for address in addresses]
     record("external DNS returns real Baidu addresses", external_dns)
+    def proxy_dns():
+        output = inside("zay", "dig", "+short", "+time=6", "+tries=1", "google.com", "A").stdout
+        addresses = [ipaddress.ip_address(line) for line in output.splitlines() if line and line[0].isdigit()]
+        assert addresses and all(address in ipaddress.ip_network("198.18.0.0/15") for address in addresses), output
+        return [str(address) for address in addresses]
+    record("container DNS retains Google hostname with Zay FakeIP", proxy_dns)
     record("IPv4 lab does not advertise unreachable IPv6", lambda: equal(inside("zay", "dig", "+short", "+time=2", "+tries=1", "@172.30.126.10", "www.baidu.com", "AAAA").stdout.strip(), ""))
     def external_browser():
         result = api("lab/browser", "POST", {"url": "https://baidu.com"})

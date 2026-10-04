@@ -112,8 +112,9 @@ services:
       ZAY_LAB_DIRECT_URL: http://172.30.126.10:8090/whoami
       ZAY_LAB_EXTERNAL_URL: https://www.gstatic.com/generate_204
       ZAY_LAB_MESH_URL: http://10.126.126.3:8090/whoami
+    # Container applications must use Zay DNS to retain proxy-domain FakeIP mappings.
     dns:
-      - 172.30.126.10
+      - 10.14.14.10
     cap_add:
       - NET_ADMIN
       - NET_RAW
