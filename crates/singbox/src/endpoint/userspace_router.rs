@@ -100,7 +100,7 @@ enum TransportPacket {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct TcpProcessKey {
+struct TcpFlowKey {
     source: SocketAddr,
     destination: SocketAddr,
 }
@@ -143,9 +143,9 @@ pub(crate) struct UserspaceEndpointRouter {
     icmp_fragments: Mutex<IcmpFragmentCache>,
     cancellation: CancellationToken,
     tcp_connections: Arc<Mutex<HashMap<u64, CancellationToken>>>,
-    tcp_processes: Arc<Mutex<HashMap<TcpProcessKey, CachedTcpProcess>>>,
+    tcp_processes: Arc<Mutex<HashMap<TcpFlowKey, CachedTcpProcess>>>,
     udp_processes: Mutex<HashMap<UdpProcessKey, CachedUdpProcess>>,
-    tcp_listeners: Mutex<HashMap<SocketAddr, TcpListenerEntry>>,
+    tcp_listeners: Mutex<HashMap<TcpFlowKey, TcpListenerEntry>>,
     udp_listeners: Mutex<HashMap<SocketAddr, UdpListenerEntry>>,
     udp_state: Mutex<UdpState>,
 }
@@ -254,7 +254,7 @@ impl UserspaceEndpointRouter {
                     )
                     .await;
                 }
-                self.ensure_tcp_listener(destination).await?;
+                self.ensure_tcp_listener(source, destination).await?;
                 Ok(true)
             }
             TransportPacket::Udp {
@@ -450,10 +450,18 @@ impl UserspaceEndpointRouter {
 
     async fn ensure_tcp_listener(
         self: &Arc<Self>,
+        source: SocketAddr,
         destination: SocketAddr,
     ) -> io::Result<()> {
+        // smoltcp consumes a listening socket as soon as it receives a SYN.
+        // Reserve a socket per pending flow before queuing its first packet;
+        // one socket per destination rejects concurrent browser handshakes.
+        let key = TcpFlowKey {
+            source,
+            destination,
+        };
         let mut listeners = self.tcp_listeners.lock().await;
-        if let Some(listener) = listeners.get_mut(&destination) {
+        if let Some(listener) = listeners.get_mut(&key) {
             listener.updated_at = Instant::now();
             return Ok(());
         }
@@ -470,7 +478,7 @@ impl UserspaceEndpointRouter {
         let marker = Arc::new(());
         let listener_cancellation = self.cancellation.child_token();
         listeners.insert(
-            destination,
+            key,
             TcpListenerEntry {
                 marker: marker.clone(),
                 cancellation: listener_cancellation.clone(),
@@ -490,7 +498,7 @@ impl UserspaceEndpointRouter {
             self.translate_local_destination(destination);
         let hijack_dns = self.dns_hijack_addresses.contains(&destination.ip());
         tokio::spawn(async move {
-            tcp_accept_loop(
+            accept_tcp_flow(
                 listener,
                 route_destination,
                 destination,
@@ -508,10 +516,10 @@ impl UserspaceEndpointRouter {
             if let Some(this) = weak.upgrade() {
                 let mut listeners = this.tcp_listeners.lock().await;
                 if listeners
-                    .get(&destination)
+                    .get(&key)
                     .is_some_and(|active| Arc::ptr_eq(&active.marker, &marker))
                 {
-                    listeners.remove(&destination);
+                    listeners.remove(&key);
                 }
             }
         });
@@ -1005,7 +1013,7 @@ async fn cancel_tcp_connections(
 }
 
 async fn remember_tcp_process(
-    cache: &Mutex<HashMap<TcpProcessKey, CachedTcpProcess>>,
+    cache: &Mutex<HashMap<TcpFlowKey, CachedTcpProcess>>,
     source: SocketAddr,
     destination: SocketAddr,
     lookup: ProcessLookupResult,
@@ -1021,7 +1029,7 @@ async fn remember_tcp_process(
         cache.remove(&oldest);
     }
     cache.insert(
-        TcpProcessKey {
+        TcpFlowKey {
             source,
             destination,
         },
@@ -1033,14 +1041,14 @@ async fn remember_tcp_process(
 }
 
 async fn take_tcp_process(
-    cache: &Mutex<HashMap<TcpProcessKey, CachedTcpProcess>>,
+    cache: &Mutex<HashMap<TcpFlowKey, CachedTcpProcess>>,
     source: SocketAddr,
     destination: SocketAddr,
 ) -> Option<ProcessLookupResult> {
     let mut cache = cache.lock().await;
     prune_tcp_processes(&mut cache);
     cache
-        .remove(&TcpProcessKey {
+        .remove(&TcpFlowKey {
             source,
             destination,
         })
@@ -1054,7 +1062,7 @@ async fn take_tcp_process(
         .map(|cached| cached.lookup)
 }
 
-fn prune_tcp_processes(cache: &mut HashMap<TcpProcessKey, CachedTcpProcess>) {
+fn prune_tcp_processes(cache: &mut HashMap<TcpFlowKey, CachedTcpProcess>) {
     cache
         .retain(|_, value| value.captured_at.elapsed() < TCP_PROCESS_CACHE_TTL);
 }
@@ -1150,8 +1158,8 @@ impl Drop for UserspaceEndpointRouter {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn tcp_accept_loop(
-    mut listener: TcpListener,
+async fn accept_tcp_flow(
+    listener: TcpListener,
     destination: SocketAddr,
     lookup_destination: SocketAddr,
     origin_destination: Option<SocketAddr>,
@@ -1162,72 +1170,70 @@ async fn tcp_accept_loop(
     listener_cancellation: CancellationToken,
     connection_cancellation: CancellationToken,
     tcp_connections: Arc<Mutex<HashMap<u64, CancellationToken>>>,
-    tcp_processes: Arc<Mutex<HashMap<TcpProcessKey, CachedTcpProcess>>>,
+    tcp_processes: Arc<Mutex<HashMap<TcpFlowKey, CachedTcpProcess>>>,
 ) {
-    loop {
-        tokio::select! {
-            _ = listener_cancellation.cancelled() => break,
-            accepted = listener.accept() => {
-                let Ok((stream, source)) = accepted else { break };
-                let router = router.clone();
-                let outbounds = outbounds.clone();
-                let tag = tag.clone();
-                let connection_id =
-                    NEXT_TCP_CONNECTION_ID.fetch_add(1, Ordering::Relaxed);
-                let cancellation = connection_cancellation.child_token();
-                tcp_connections
-                    .lock()
-                    .await
-                    .insert(connection_id, cancellation.clone());
-                let active_connections = tcp_connections.clone();
-                let captured_process = take_tcp_process(
-                    &tcp_processes,
-                    source,
-                    lookup_destination,
-                )
-                .await;
-                tokio::spawn(async move {
-                    let proxy = async {
-                        if hijack_dns {
-                            let metadata = Metadata {
-                                inbound: tag,
-                                source: Some(source.into()),
-                                destination: Some(destination.into()),
-                                origin_destination: origin_destination
-                                    .map(SocksAddr::from),
-                                network: Some(Network::Tcp),
-                                protocol: "dns".into(),
-                                ..Metadata::default()
-                            };
-                            serve_hijacked_dns_stream_with_context(
-                                Box::new(stream),
-                                &outbounds,
-                                &metadata,
-                            )
-                            .await
-                        } else {
-                            proxy_routed_tcp_with_origin(
-                                Box::new(stream),
-                                source,
-                                &tag,
-                                "",
-                                destination.into(),
-                                origin_destination.map(SocksAddr::from),
-                                captured_process,
-                                false,
-                                &router,
-                                &outbounds,
-                            )
-                            .await
-                        }
-                    };
-                    tokio::select! {
-                        _ = cancellation.cancelled() => {}
-                        _ = proxy => {}
+    tokio::select! {
+        _ = listener_cancellation.cancelled() => return,
+        accepted = listener.accept_once() => {
+            let Ok((stream, source)) = accepted else { return };
+            let router = router.clone();
+            let outbounds = outbounds.clone();
+            let tag = tag.clone();
+            let connection_id =
+                NEXT_TCP_CONNECTION_ID.fetch_add(1, Ordering::Relaxed);
+            let cancellation = connection_cancellation.child_token();
+            tcp_connections
+                .lock()
+                .await
+                .insert(connection_id, cancellation.clone());
+            let active_connections = tcp_connections.clone();
+            let captured_process = take_tcp_process(
+                &tcp_processes,
+                source,
+                lookup_destination,
+            )
+            .await;
+            tokio::spawn(async move {
+                let proxy = async {
+                    if hijack_dns {
+                        let metadata = Metadata {
+                            inbound: tag,
+                            source: Some(source.into()),
+                            destination: Some(destination.into()),
+                            origin_destination: origin_destination
+                                .map(SocksAddr::from),
+                            network: Some(Network::Tcp),
+                            protocol: "dns".into(),
+                            ..Metadata::default()
+                        };
+                        serve_hijacked_dns_stream_with_context(
+                            Box::new(stream),
+                            &outbounds,
+                            &metadata,
+                        )
+                        .await
+                    } else {
+                        proxy_routed_tcp_with_origin(
+                            Box::new(stream),
+                            source,
+                            &tag,
+                            "",
+                            destination.into(),
+                            origin_destination.map(SocksAddr::from),
+                            captured_process,
+                            false,
+                            &router,
+                            &outbounds,
+                        )
+                        .await
                     }
-                    active_connections.lock().await.remove(&connection_id);
-                });
-            }
+                };
+                tokio::select! {
+                    _ = cancellation.cancelled() => {}
+                    _ = proxy => {}
+                }
+                active_connections.lock().await.remove(&connection_id);
+            });
         }
     }
 }
@@ -1245,7 +1251,7 @@ struct UdpListenerEntry {
 }
 
 fn evict_oldest_tcp_listener(
-    listeners: &mut HashMap<SocketAddr, TcpListenerEntry>,
+    listeners: &mut HashMap<TcpFlowKey, TcpListenerEntry>,
     max: usize,
 ) {
     if listeners.len() < max {
@@ -1279,7 +1285,7 @@ fn evict_oldest_udp_listener(
 }
 
 fn expire_tcp_listeners(
-    listeners: &mut HashMap<SocketAddr, TcpListenerEntry>,
+    listeners: &mut HashMap<TcpFlowKey, TcpListenerEntry>,
     now: Instant,
     timeout: Duration,
 ) {

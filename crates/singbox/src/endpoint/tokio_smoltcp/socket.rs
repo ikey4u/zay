@@ -142,14 +142,17 @@ impl TcpListener {
         &mut self,
         cx: &Context<'_>,
     ) -> Poll<io::Result<(TcpStream, SocketAddr)>> {
-        let mut socket = self.reactor.get_socket::<tcp::Socket>(*self.handle);
+        std::task::ready!(self.poll_ready(cx))?;
+        Poll::Ready(TcpStream::accept(self))
+    }
 
+    fn poll_ready(&self, cx: &Context<'_>) -> Poll<io::Result<()>> {
+        let mut socket = self.reactor.get_socket::<tcp::Socket>(*self.handle);
         if matches!(
             socket.state(),
             tcp::State::Established | tcp::State::CloseWait
         ) {
-            drop(socket);
-            return Poll::Ready(Ok(TcpStream::accept(self)?));
+            return Poll::Ready(Ok(()));
         }
         // A client can reset after the handshake but before accept is polled.
         // Re-arm that socket instead of leaving this destination closed forever.
@@ -162,6 +165,27 @@ impl TcpListener {
     pub async fn accept(&mut self) -> io::Result<(TcpStream, SocketAddr)> {
         poll_fn(|cx| self.poll_accept(cx)).await
     }
+    /// Consume a per-flow listener without creating a replacement socket that
+    /// could capture another SYN immediately before this listener is dropped.
+    pub async fn accept_once(self) -> io::Result<(TcpStream, SocketAddr)> {
+        poll_fn(|cx| self.poll_ready(cx)).await?;
+        let peer_addr = {
+            let socket = self.reactor.get_socket::<tcp::Socket>(*self.handle);
+            socket
+                .remote_endpoint()
+                .map(|endpoint| ep2sa(&endpoint))
+                .ok_or(io::ErrorKind::NotConnected)?
+        };
+        Ok((
+            TcpStream {
+                handle: self.handle,
+                reactor: self.reactor,
+                local_addr: self.local_addr,
+            },
+            peer_addr,
+        ))
+    }
+
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         Ok(self.local_addr)
     }
