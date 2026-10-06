@@ -97,7 +97,7 @@ impl SingboxLogWriter {
         }
     }
 
-    fn write(&self, line: &str, buffer: &LogBuffer) {
+    pub(crate) fn write(&self, line: &str, buffer: &LogBuffer) {
         let clean = redact_sensitive_text(&strip_ansi(line));
         if !clean.starts_with('+') {
             let lower = clean.trim_start().to_ascii_lowercase();

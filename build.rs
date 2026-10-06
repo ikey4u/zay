@@ -50,7 +50,59 @@ fn normalize_target(target: &str) -> &str {
         .unwrap_or(target)
 }
 
+fn build_desktop_helper() {
+    println!("cargo:rerun-if-changed=native/macos/helper.m");
+    if env::var_os("CARGO_FEATURE_DESKTOP_MACOS_HELPER").is_none()
+        || env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos")
+    {
+        return;
+    }
+    let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    let object = out.join("zay_macos_helper.o");
+    let architecture = match env::var("CARGO_CFG_TARGET_ARCH").unwrap().as_str()
+    {
+        "aarch64" => "arm64",
+        "x86_64" => "x86_64",
+        other => panic!("unsupported macOS architecture: {other}"),
+    };
+    let status = Command::new("xcrun")
+        .args([
+            "clang",
+            "-arch",
+            architecture,
+            "-mmacosx-version-min=13.0",
+            "-fobjc-arc",
+            "-fblocks",
+            "-Wall",
+            "-Wextra",
+            "-Wno-unused-parameter",
+            "-c",
+            "native/macos/helper.m",
+            "-o",
+        ])
+        .arg(&object)
+        .status()
+        .expect("compile native macOS helper bridge");
+    assert!(
+        status.success(),
+        "native macOS helper bridge compilation failed"
+    );
+    let status = Command::new("xcrun")
+        .args(["ar", "crs"])
+        .arg(out.join("libzay_macos_helper.a"))
+        .arg(object)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    println!("cargo:rustc-link-search=native={}", out.display());
+    println!("cargo:rustc-link-lib=static=zay_macos_helper");
+    for framework in ["Foundation", "Security", "ServiceManagement"] {
+        println!("cargo:rustc-link-lib=framework={framework}");
+    }
+}
+
 fn main() {
+    build_desktop_helper();
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-changed=.git/index");

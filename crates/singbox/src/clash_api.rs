@@ -1126,22 +1126,18 @@ fn connections(
 
 fn connections_value(outbounds: &OutboundManager) -> Value {
     let (upload_total, download_total) = outbounds.traffic_totals();
-    let connections: Vec<_> = outbounds
-        .connections()
-        .into_iter()
-        .map(|connection| {
-            let (source_ip, source_port) = match &connection.source {
-                Some(crate::common::network::SocksAddr::Ip(address)) => {
-                    (address.ip().to_string(), address.port().to_string())
-                }
-                Some(crate::common::network::SocksAddr::Domain { host, port }) => {
-                    (host.clone(), port.to_string())
-                }
-                None => (String::new(), "0".to_owned()),
-            };
-            let (destination_ip, host, destination_port) = match &connection
-                .destination
-            {
+    let serialize = |connection: crate::outbound::ConnectionSnapshot| {
+        let (source_ip, source_port) = match &connection.source {
+            Some(crate::common::network::SocksAddr::Ip(address)) => {
+                (address.ip().to_string(), address.port().to_string())
+            }
+            Some(crate::common::network::SocksAddr::Domain { host, port }) => {
+                (host.clone(), port.to_string())
+            }
+            None => (String::new(), "0".to_owned()),
+        };
+        let (destination_ip, host, destination_port) =
+            match &connection.destination {
                 crate::common::network::SocksAddr::Ip(address) => {
                     (address.ip().to_string(), String::new(), address.port())
                 }
@@ -1149,37 +1145,44 @@ fn connections_value(outbounds: &OutboundManager) -> Value {
                     (String::new(), host.clone(), *port)
                 }
             };
-            let start = time::OffsetDateTime::from(connection.created_at)
-                .format(&time::format_description::well_known::Rfc3339)
-                .unwrap_or_default();
-            json!({
-                "id": connection.id,
-                "metadata": {
-                    "network": connection.network,
-                    "type": "",
-                    "sourceIP": source_ip,
-                    "destinationIP": destination_ip,
-                    "sourcePort": source_port,
-                    "destinationPort": destination_port.to_string(),
-                    "host": if connection.domain.is_empty() { host } else { connection.domain.clone() },
-                    "dnsMode": "normal",
-                    "process": connection.process_name,
-                    "processPath": connection.process_path,
-                    "processLookup": connection.process_lookup
-                },
-                "upload": connection.upload,
-                "download": connection.download,
-                "start": start,
-                "chains": [connection.outbound],
-                "rule": if connection.rule.is_empty() { "final" } else { &connection.rule },
-                "rulePayload": ""
-            })
+        let start = time::OffsetDateTime::from(connection.created_at)
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_default();
+        json!({
+            "id": connection.id,
+            "metadata": {
+                "network": connection.network,
+                "type": "",
+                "sourceIP": source_ip,
+                "destinationIP": destination_ip,
+                "sourcePort": source_port,
+                "destinationPort": destination_port.to_string(),
+                "host": if connection.domain.is_empty() { host } else { connection.domain.clone() },
+                "dnsMode": "normal",
+                "process": connection.process_name,
+                "processPath": connection.process_path,
+                "processLookup": connection.process_lookup
+            },
+            "upload": connection.upload,
+            "download": connection.download,
+            "start": start,
+            "chains": [connection.outbound],
+            "rule": if connection.rule.is_empty() { "final" } else { &connection.rule },
+            "rulePayload": ""
         })
+    };
+    let connections: Vec<_> =
+        outbounds.connections().into_iter().map(serialize).collect();
+    let recent: Vec<_> = outbounds
+        .recent_connections()
+        .into_iter()
+        .map(serialize)
         .collect();
     json!({
         "downloadTotal": download_total,
         "uploadTotal": upload_total,
         "connections": connections,
+        "recentConnections": recent,
         "memory": inuse_memory()
     })
 }

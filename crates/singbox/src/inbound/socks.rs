@@ -558,12 +558,19 @@ where
             )
         })?
     };
-    let mut remote = match dialer
-        .dial_tcp_with_options(&routed_destination, &connection_options.network)
-        .await
+    router.observe_flow(&metadata, &decision);
+    let mut remote = match crate::outbound::with_traffic_attribution(
+        super::traffic_attribution(router, &metadata, &decision),
+        dialer.dial_tcp_with_options(
+            &routed_destination,
+            &connection_options.network,
+        ),
+    )
+    .await
     {
         Ok(stream) => stream,
         Err(error) => {
+            router.observe_flow_error(&metadata, &decision, "dial", &error);
             if !sniff_before_dial {
                 let _ = write_reply_for_version(
                     &mut client,

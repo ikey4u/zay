@@ -145,9 +145,14 @@ struct ZayFile {
 #[serde(deny_unknown_fields)]
 pub struct PersistentProxyFile {
     pub enabled: bool,
+    /// Desktop pause state; a paused service has enabled=false and retains settings.
+    pub paused: bool,
+    pub mesh_paused: bool,
     pub subscriptions: Vec<String>,
     /// Subscription node tags allowed to carry proxy traffic. Empty means all.
     pub active_nodes: Vec<String>,
+    /// Rules, global, or direct. Empty preserves the CLI rules default.
+    pub routing_mode: String,
     pub gateway: bool,
     pub mixed_port: Option<u16>,
     pub update_interval: Option<u64>,
@@ -283,7 +288,7 @@ impl PersistentConfig {
             .mesh
             .as_ref()
             .is_some_and(|mesh| mesh.role == MeshRole::Relay);
-        let singbox_tun = (self.stack.enabled || self.mesh.is_some())
+        let singbox_tun = self.stack.enabled
             && self.stack.tun.enabled
             && !relay_forces_tun_off;
         mesh_node || singbox_tun
@@ -346,6 +351,7 @@ impl StackFlags {
 pub struct Settings {
     pub subscriptions: Vec<String>,
     pub active_nodes: Vec<String>,
+    pub routing_mode: String,
     pub data_dir: PathBuf,
     pub mixed_port: u16,
     pub allow_lan: bool,
@@ -507,6 +513,13 @@ fn load_zay_toml(path: &Path) -> Result<ZayFile> {
 /// cannot leave the next core restart with an unreadable configuration.
 pub fn validate_persistent_toml(raw: &str) -> Result<()> {
     let mut file: ZayFile = toml::from_str(raw).context("parsing zay.toml")?;
+    anyhow::ensure!(
+        matches!(
+            file.proxy.routing_mode.as_str(),
+            "" | "rules" | "global" | "direct"
+        ),
+        "proxy.routing_mode must be rules, global, or direct"
+    );
     derive_node_mesh_routes(&mut file.proxy.mesh)?;
     if let Some(mesh) = file.proxy.mesh.as_ref().filter(|mesh| mesh.enabled) {
         crate::stack::easytier::to_easytier_toml(mesh)
@@ -653,6 +666,7 @@ pub fn resolve_transient_stack(
     Settings {
         subscriptions: cli.subscriptions.clone(),
         active_nodes: Vec::new(),
+        routing_mode: String::new(),
         data_dir,
         mixed_port: cli.mixed_port.unwrap_or(7890),
         allow_lan: stack.gateway,
@@ -710,6 +724,7 @@ fn resolve_inner(cli: &ProxyOpts, stack: StackFlags) -> Result<Settings> {
         } else {
             Vec::new()
         },
+        routing_mode: file.proxy.routing_mode.clone(),
         data_dir,
         mixed_port: cli.mixed_port.or(file.proxy.mixed_port).unwrap_or(7890),
         allow_lan,

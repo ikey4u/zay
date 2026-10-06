@@ -8,6 +8,7 @@ license = "MIT OR Apache-2.0"
 build = "build.rs"
 
 [features]
+desktop-macos-helper = []
 default = ["webui"]
 webui = ["axum/ws", "dep:portable-pty"]
 

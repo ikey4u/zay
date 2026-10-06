@@ -1,7 +1,7 @@
 //! Outbound registry, dependency resolution and protocol construction.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     future::Future,
     io,
     path::Path,
@@ -412,6 +412,7 @@ struct TrafficCounters {
     upload: AtomicU64,
     download: AtomicU64,
     connections: Mutex<HashMap<String, ActiveConnection>>,
+    recent: Mutex<VecDeque<ConnectionSnapshot>>,
     process_traffic_enabled: AtomicBool,
     process_traffic_generation: AtomicU64,
     process_traffic: Mutex<HashMap<String, ProcessTrafficEntry>>,
@@ -426,6 +427,7 @@ impl Default for TrafficCounters {
             upload: AtomicU64::new(0),
             download: AtomicU64::new(0),
             connections: Mutex::new(HashMap::new()),
+            recent: Mutex::new(VecDeque::new()),
             process_traffic_enabled: AtomicBool::new(false),
             process_traffic_generation: AtomicU64::new(0),
             process_traffic: Mutex::new(HashMap::new()),
@@ -599,8 +601,15 @@ impl TrafficCounters {
             .lock()
             .expect("traffic connections lock poisoned");
         if let Some(connection) = connections.remove(id) {
+            let snapshot = connection.snapshot();
+            let mut recent = self
+                .recent
+                .lock()
+                .expect("recent connections lock poisoned");
+            recent.push_front(snapshot.clone());
+            recent.truncate(100);
             let _ = self.events.send(TrafficConnectionEvent::Closed {
-                connection: connection.snapshot(),
+                connection: snapshot,
                 closed_at: SystemTime::now(),
             });
         }
@@ -613,8 +622,15 @@ impl TrafficCounters {
             .expect("traffic connections lock poisoned");
         if let Some(connection) = connections.remove(id) {
             connection.cancellation.cancel();
+            let snapshot = connection.snapshot();
+            let mut recent = self
+                .recent
+                .lock()
+                .expect("recent connections lock poisoned");
+            recent.push_front(snapshot.clone());
+            recent.truncate(100);
             let _ = self.events.send(TrafficConnectionEvent::Closed {
-                connection: connection.snapshot(),
+                connection: snapshot,
                 closed_at: SystemTime::now(),
             });
         }
@@ -729,7 +745,9 @@ struct ActiveConnectionCleanup {
 
 impl Drop for ActiveConnectionCleanup {
     fn drop(&mut self) {
-        self.traffic.remove(&self.id);
+        if !self.id.is_empty() {
+            self.traffic.remove(&self.id);
+        }
     }
 }
 
@@ -1849,6 +1867,17 @@ impl OutboundManager {
         }
     }
 
+    /// Bounded completed attempts, so brief and failed connections remain inspectable.
+    pub fn recent_connections(&self) -> Vec<ConnectionSnapshot> {
+        self.traffic
+            .recent
+            .lock()
+            .expect("recent connections lock poisoned")
+            .iter()
+            .cloned()
+            .collect()
+    }
+
     pub fn connections(&self) -> Vec<ConnectionSnapshot> {
         self.traffic
             .connections
@@ -1919,9 +1948,17 @@ impl Dialer for MeteredDialer {
         destination: &'a crate::common::network::SocksAddr,
     ) -> DialFuture<'a> {
         Box::pin(async move {
-            let inner = self.inner.dial_tcp(destination).await?;
             let active =
                 self.traffic.register(&self.outbound, destination, "tcp");
+            let mut cleanup = ActiveConnectionCleanup {
+                traffic: self.traffic.clone(),
+                id: active.id.clone(),
+            };
+            let inner = tokio::select! {
+                _ = active.cancellation.cancelled() => return Err(io::Error::new(io::ErrorKind::Interrupted, "connection closed")),
+                result = self.inner.dial_tcp(destination) => result?,
+            };
+            cleanup.id.clear();
             let inner =
                 interruptible_stream(inner, active.cancellation.clone());
             let socket = crate::adapter::stream_socket(&inner);
@@ -1942,12 +1979,17 @@ impl Dialer for MeteredDialer {
         options: &'a NetworkDialOptions,
     ) -> DialFuture<'a> {
         Box::pin(async move {
-            let inner = self
-                .inner
-                .dial_tcp_with_options(destination, options)
-                .await?;
             let active =
                 self.traffic.register(&self.outbound, destination, "tcp");
+            let mut cleanup = ActiveConnectionCleanup {
+                traffic: self.traffic.clone(),
+                id: active.id.clone(),
+            };
+            let inner = tokio::select! {
+                _ = active.cancellation.cancelled() => return Err(io::Error::new(io::ErrorKind::Interrupted, "connection closed")),
+                result = self.inner.dial_tcp_with_options(destination, options) => result?,
+            };
+            cleanup.id.clear();
             let inner =
                 interruptible_stream(inner, active.cancellation.clone());
             let socket = crate::adapter::stream_socket(&inner);
@@ -4399,6 +4441,91 @@ mod tests {
         },
         route::{Metadata, Router},
     };
+
+    struct PendingDialer;
+    impl crate::adapter::Dialer for PendingDialer {
+        fn dial_tcp<'a>(
+            &'a self,
+            _: &'a SocksAddr,
+        ) -> crate::adapter::DialFuture<'a> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_connection_is_visible_cancellable_and_retained() {
+        let traffic = Arc::new(TrafficCounters::default());
+        let dialer = super::MeteredDialer {
+            inner: Arc::new(PendingDialer),
+            traffic: traffic.clone(),
+            outbound: "test".into(),
+        };
+        let task = tokio::spawn(async move {
+            dialer
+                .dial_tcp_with_options(
+                    &SocksAddr::Domain {
+                        host: "lab.test".into(),
+                        port: 80,
+                    },
+                    &Default::default(),
+                )
+                .await
+        });
+        tokio::task::yield_now().await;
+        let id = traffic
+            .connections
+            .lock()
+            .unwrap()
+            .keys()
+            .next()
+            .cloned()
+            .expect("pending dial is registered");
+        traffic.close(&id);
+        assert_eq!(
+            task.await.unwrap().err().unwrap().kind(),
+            std::io::ErrorKind::Interrupted
+        );
+        assert!(traffic.connections.lock().unwrap().is_empty());
+        assert_eq!(traffic.recent.lock().unwrap().len(), 1);
+        // Completing cleanup after close must not duplicate the recent record.
+        traffic.remove(&id);
+        assert_eq!(traffic.recent.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn cancelled_dial_cleans_up_and_recent_history_is_bounded() {
+        let traffic = Arc::new(TrafficCounters::default());
+        let dialer = super::MeteredDialer {
+            inner: Arc::new(PendingDialer),
+            traffic: traffic.clone(),
+            outbound: "test".into(),
+        };
+        let task = tokio::spawn(async move {
+            dialer
+                .dial_tcp(&SocksAddr::Domain {
+                    host: "lab.test".into(),
+                    port: 80,
+                })
+                .await
+        });
+        tokio::task::yield_now().await;
+        assert_eq!(traffic.connections.lock().unwrap().len(), 1);
+        task.abort();
+        let _ = task.await;
+        assert!(traffic.connections.lock().unwrap().is_empty());
+        for _ in 0..120 {
+            let active = traffic.register(
+                "test",
+                &SocksAddr::Domain {
+                    host: "lab.test".into(),
+                    port: 80,
+                },
+                "tcp",
+            );
+            traffic.remove(&active.id);
+        }
+        assert_eq!(traffic.recent.lock().unwrap().len(), 100);
+    }
 
     #[tokio::test]
     async fn process_traffic_is_opt_in_and_cleared_when_disabled() {

@@ -408,7 +408,8 @@ fn relay(mut left: TcpStream, mut right: TcpStream) -> io::Result<()> {
 }
 
 fn serve_dns(lab_addr: Ipv4Addr, upstream: SocketAddr) {
-    let socket = UdpSocket::bind(("0.0.0.0", 53)).expect("bind dns");
+    let bind = env::var("DEVPANE_BIND").unwrap_or_else(|_| "0.0.0.0".into());
+    let socket = UdpSocket::bind((bind.as_str(), 53)).expect("bind dns");
     eprintln!("devpane dns listening on :53 ({LAB_NAME} -> {lab_addr})");
     let mut buf = [0_u8; 2048];
     loop {

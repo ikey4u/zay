@@ -2823,6 +2823,26 @@ impl Router {
         self.route_internal(metadata, false, false)
     }
 
+    /// Evaluate supplied metadata without performing DNS resolution or sniffing.
+    /// Return the terminal rule, rather than the first preprocessing action.
+    pub fn preview_route(&self, metadata: &Metadata) -> Value {
+        let decision = self.route_after_actions(metadata, true, true);
+        let index = decision.action().and_then(|action| {
+            self.rules.iter().position(|rule| {
+                rule.action()
+                    .is_some_and(|candidate| std::ptr::eq(candidate, action))
+            })
+        });
+        serde_json::json!({
+            "outbound": decision.outbound(),
+            "action": describe_action(decision.action()),
+            "rule_index": index,
+            "rule": index.map(|i| describe_rule(&self.raw_rules[i])),
+            "blocked": matches!(decision.action(), Some(Action::Reject { .. })),
+            "direct": matches!(decision.action(), Some(Action::Direct | Action::DirectOptions { .. })) || decision.outbound() == Some("direct"),
+        })
+    }
+
     /// Start an ordered route evaluation.  Non-terminal actions in sing-box
     /// are executed while walking the rule list once; rules before a sniff or
     /// resolve action must not be reconsidered after metadata changes.

@@ -995,8 +995,6 @@ impl Lifecycle for TunInbound {
                     Err(error) => errors.push(error.to_string()),
                 }
             }
-            self.flow_router.take();
-            self.net.take();
             #[cfg(target_os = "macos")]
             if let Some(mut route_lease) = self.route_lease.take()
                 && let Err(error) = route_lease.close().await
@@ -1023,6 +1021,11 @@ impl Lifecycle for TunInbound {
             {
                 errors.push(error.to_string());
             }
+            // Keep the TUN device alive until its routes have been removed.
+            // macOS removes interface routes when the device closes, which
+            // otherwise makes lease cleanup report spurious ESRCH failures.
+            self.flow_router.take();
+            self.net.take();
             if errors.is_empty() {
                 Ok(())
             } else {

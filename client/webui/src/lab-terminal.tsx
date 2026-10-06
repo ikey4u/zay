@@ -5,7 +5,7 @@ import "@xterm/xterm/css/xterm.css"
 import { Button } from "@/components/ui/button"
 import { terminalSocket } from "@/api"
 
-export function LabTerminal() {
+export function LabTerminal({ platform }: { platform: string }) {
   const element = useRef<HTMLDivElement>(null)
   const connection = useRef<WebSocket | null>(null)
   const [session, setSession] = useState(0)
@@ -47,7 +47,7 @@ export function LabTerminal() {
 
   return <section className="overflow-hidden rounded-xl border border-border bg-[#090f1a]">
     <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 px-4 py-3">
-      <div><div className="font-mono text-sm text-blue-100">root@devpane / bash</div><div className="mt-1 text-xs text-slate-400">{status} · Shell inside the Zay container. Ctrl+C interrupts commands.</div></div>
+      <div><div className="font-mono text-sm text-blue-100">{platform} / bash</div><div className="mt-1 text-xs text-slate-400">{status} · Shell inside {platform}. Ctrl+C interrupts commands.</div></div>
       <div className="flex gap-2"><Button variant="outline" size="sm" onClick={() => { connection.current?.close(); setSession((value) => value + 1) }}>Connect / reconnect</Button><Button variant="ghost" size="sm" disabled={status !== "Connected"} onClick={() => connection.current?.close()}>Disconnect</Button></div>
     </div>
     {!session && <div className="px-4 pt-4 font-mono text-xs text-slate-400">Connect to run curl, ping, dig, ip, traceroute, or any shell command. Shell state persists during the session.</div>}

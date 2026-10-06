@@ -1,5 +1,19 @@
 # devpane
 
+Run `mise devpane` to start the lab matching the host OS: macOS on macOS,
+Linux on Linux. The native macOS VM requires Apple Silicon; Intel Mac users
+can explicitly run the Linux lab. There is no silent fallback.
+
+Or choose the lab explicitly:
+
+| Command | Supported host | WebUI |
+| --- | --- | --- |
+| `mise devpane:linux` | Linux or macOS (ARM64/x86-64; macOS 13+) | http://127.0.0.1:18787/ |
+| `mise devpane:macos` | Apple Silicon macOS 13+ | http://127.0.0.1:18788/ |
+
+Both launchers reject unsupported hosts before provisioning or stopping any lab.
+The macOS lab also starts the Linux lab for its remote Mesh peer.
+
 Isolated Zay lab. The host does not gain a TUN device and its routes stay unchanged. The fake subscription and HTTP proxy run as a native host process, outside Docker and the Colima VM. TUN and EasyTier stay in containers on Docker network `172.30.126.0/24`.
 
 ```text
@@ -11,7 +25,7 @@ devpane.test            -> DNS answer 192.0.2.11, captured by TUN, then a domain
 
 ## Automatic macOS setup
 
-On macOS 13 or newer (Intel or Apple Silicon), run `mise devpane`. The launcher uses the pinned tools in the internal `devpane:macos` mise task to:
+On macOS 13 or newer (Intel or Apple Silicon), run `mise devpane:linux`. The launcher uses the pinned tools in the internal `devpane:colima-runtime` mise task to:
 
 1. Install Colima, Lima, the Docker CLI, Compose, and Buildx automatically.
 2. Register the Docker plugins under the ignored `devpane/.build/docker` directory.
@@ -36,7 +50,7 @@ Use an installed, running Docker Engine with Compose and BuildKit. The launcher 
 ## Start
 
 ```bash
-mise devpane
+mise devpane:linux
 ```
 
 Initialize repository submodules before the first build with `git submodule update --init --recursive`.
@@ -62,7 +76,7 @@ devpane/be/manage.sh reset   # also deletes the saved container config
 
 The seed config is `devpane/zay.toml`. The container copies it into the volume on first start. After editing the seed, run `reset` to load it again.
 
-On Linux, the launcher uses host networking for image builds to preserve the Debian mirror DNS workaround. On macOS it uses the default build network inside Colima's Linux VM. Override either choice with `DEVPANE_BUILD_NETWORK=default mise devpane` or `DEVPANE_BUILD_NETWORK=host mise devpane`. Running containers stay on `172.30.126.0/24` and do not change host routes.
+On Linux, the launcher uses host networking for image builds to preserve the Debian mirror DNS workaround. On macOS it uses the default build network inside Colima's Linux VM. Override either choice with `DEVPANE_BUILD_NETWORK=default mise devpane:linux` or `DEVPANE_BUILD_NETWORK=host mise devpane:linux`. Running containers stay on `172.30.126.0/24` and do not change host routes.
 
 ## Browser and terminal
 
@@ -108,3 +122,70 @@ The download is approximately 27 GB and is stored under `devpane/.build/macos-vm
 An existing VM with that name is reused. This command only downloads the VM; it
 does not build Zay, boot the guest, run tests, or change host routes or DNS.
 Set `DEVPANE_VM_DOWNLOAD_CONCURRENCY` to adjust simultaneous transfers (default 4).
+
+### Test the native macOS guest
+
+Start the lab with `mise devpane:macos` to build on the host and provision the
+guests. Then stop the persistent pane and run the test harness:
+
+```sh
+bash devpane/be/macos-pane.sh stop
+mise exec python@3.13.12 -- bash devpane/be/manage.sh test-macos
+```
+
+The harness runs Zay inside the macOS VM. Browser checks currently require Google Chrome in the host's
+`/Applications` directory; only the application is copied, never its profile.
+
+The suite checks native TUN routing and system DNS, separate Mesh interfaces,
+bidirectional ping, 72 concurrent requests, Baidu and Google HTTPS and rendering
+over both paths, and proxy/peer/core outage recovery. Mesh requests cross the
+Linux peer's virtual address. The HTTP fixture restarts with that peer because
+they share a network namespace.
+
+Results and screenshots are saved under `devpane/.build/macos/`, including
+`network-test.json`. Guest DNS is restored and the guest test services are stopped
+afterward; the VM remains available. Host routes, DNS, and Clash configuration
+are not modified. The host subscription proxy uses the VM's virtual network
+interface, and the lab relay is exposed on host loopback for an SSH forward.
+
+### Interactive native macOS devpane
+
+Run `mise devpane:macos` on an Apple Silicon Mac. It builds Zay and the
+WebUI on the host, deploys them into the Tart macOS guest, and keeps the lab
+running in the background. The existing Linux lab supplies the remote Mesh peer.
+
+- **macOS:** http://127.0.0.1:18788/ — Lab terminal runs inside the Darwin guest;
+  browser snapshots use Chrome inside that same guest.
+- **Linux:** http://127.0.0.1:18787/ — remains the separate Linux container lab.
+- Status: `bash devpane/be/macos-pane.sh status`
+- Log: `tail -f devpane/.build/macos/devpane.log`
+- Stop: `bash devpane/be/macos-pane.sh stop` — stops guest services and restores guest DNS.
+
+The macOS WebUI listens on guest loopback and is forwarded to host loopback over
+SSH. No token is needed for this local connection. Interactive lab tools require
+both `ZAY_LAB=devpane-macos` and the guest-only `/etc/zay-devpane-macos` marker.
+Host TUN, DNS, default routes, and Clash are unchanged. Browser provisioning copies
+only the Chrome application, never the developer's browser profile. Automated
+macOS tests and the persistent pane share a lock; stop the pane before running
+the test harness above.
+
+### Native GPUI desktop in its own macOS VM
+
+Set `APPLE_SIGN_IDENTITY` in your shell to an existing Apple signing certificate,
+then run `mise dev:desktop`. This builds/signs the app on the host and deploys it
+to a separate `zay-desktop-macos` Tart guest. Screen Sharing opens the guest's
+native desktop. The guest login and administrator password are `admin`; these
+are the base image's disposable lab credentials. Test TUN, Mesh node mode, helper
+installation/cancellation, and background item labeling inside that guest.
+
+The desktop VM uses default NAT without host folder or Tart clipboard sharing.
+It receives the signed application and keeps its inherited DNS settings by default.
+`ZAY_DESKTOP_VM_DNS=alidns mise dev:desktop` additionally installs the repository's
+small DNS lab fixture inside the guest. This opt-in forwards guest DNS queries to
+AliDNS (`dns.alidns.com`) over HTTPS with IPv4 answers, avoiding a host VPN's
+synthetic addresses during TUN tests.
+Host routes, DNS, proxy settings, and Zay services
+are untouched. The existing CLI/WebUI lab VM remains separate. Use
+`mise dev:desktop:open` to reopen it, `mise dev:desktop:logs` to collect guest
+helper logs under `devpane/.build/desktop-macos/`, and `mise dev:desktop:stop`
+to shut it down. `mise dev:desktop:host` explicitly opts into running on the host.

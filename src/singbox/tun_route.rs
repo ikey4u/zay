@@ -444,6 +444,22 @@ pub fn bind_outbound_to_interface(outbound: &mut Value, interface: &str) {
     let Some(object) = outbound.as_object_mut() else {
         return;
     };
+    let loopback =
+        object
+            .get("server")
+            .and_then(Value::as_str)
+            .is_some_and(|server| {
+                server.eq_ignore_ascii_case("localhost")
+                    || server
+                        .parse::<std::net::IpAddr>()
+                        .is_ok_and(|ip| ip.is_loopback())
+            });
+    #[cfg(target_os = "macos")]
+    let interface = if loopback { "lo0" } else { interface };
+    #[cfg(target_os = "linux")]
+    let interface = if loopback { "lo" } else { interface };
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let _ = loopback;
     object
         .entry("bind_interface")
         .or_insert_with(|| json!(interface));
@@ -907,6 +923,7 @@ mod tests {
         let settings = Settings {
             subscriptions: vec!["https://example.com/sub".into()],
             active_nodes: Vec::new(),
+            routing_mode: String::new(),
             data_dir: PathBuf::from("/tmp"),
             mixed_port: 7890,
             allow_lan: false,
@@ -1005,6 +1022,7 @@ Destination        Gateway            Flags               Netif Expire
         let settings = Settings {
             subscriptions: Vec::new(),
             active_nodes: Vec::new(),
+            routing_mode: String::new(),
             data_dir: PathBuf::from("/tmp"),
             mixed_port: 7890,
             allow_lan: false,
@@ -1052,6 +1070,7 @@ Destination        Gateway            Flags               Netif Expire
         let settings = Settings {
             subscriptions: Vec::new(),
             active_nodes: Vec::new(),
+            routing_mode: String::new(),
             data_dir: PathBuf::from("/tmp"),
             mixed_port: 7890,
             allow_lan: false,
@@ -1102,6 +1121,7 @@ Destination        Gateway            Flags               Netif Expire
         let settings = Settings {
             subscriptions: Vec::new(),
             active_nodes: Vec::new(),
+            routing_mode: String::new(),
             data_dir: PathBuf::from("/tmp"),
             mixed_port: 7890,
             allow_lan: false,
@@ -1153,6 +1173,7 @@ Destination        Gateway            Flags               Netif Expire
         let settings = Settings {
             subscriptions: vec!["https://example.com/sub".into()],
             active_nodes: Vec::new(),
+            routing_mode: String::new(),
             data_dir: PathBuf::from("/tmp"),
             mixed_port: 7890,
             allow_lan: false,
@@ -1203,6 +1224,7 @@ Destination        Gateway            Flags               Netif Expire
         let settings = Settings {
             subscriptions: vec!["https://example.com/sub".into()],
             active_nodes: Vec::new(),
+            routing_mode: String::new(),
             data_dir: PathBuf::from("/tmp"),
             mixed_port: 7890,
             allow_lan: false,
@@ -1289,6 +1311,7 @@ Destination        Gateway            Flags               Netif Expire
         let settings = Settings {
             subscriptions: vec!["https://example.com/sub".into()],
             active_nodes: Vec::new(),
+            routing_mode: String::new(),
             data_dir: PathBuf::from("/tmp"),
             mixed_port: 7890,
             allow_lan: false,

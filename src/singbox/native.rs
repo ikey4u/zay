@@ -33,6 +33,10 @@ impl NativeRuntime {
                     config_path.display()
                 )
             })?;
+        // TUN workers already forward stdout through the supervisor's log writer.
+        // In-process engines need an explicit subscription instead.
+        let capture_logs =
+            !options.inbounds.iter().any(|inbound| inbound.kind == "tun");
         let cache_path = options
             .experimental
             .as_ref()
@@ -89,6 +93,14 @@ impl NativeRuntime {
             restore_cache_ownership(cache_path);
         }
         let handle = runtime.handle();
+        let engine_logs = if capture_logs {
+            runtime.subscribe_logs().ok()
+        } else {
+            None
+        };
+        let log_writer = crate::stack::log_buf::SingboxLogWriter::new(
+            base_path.join("../logs"),
+        );
         let runtime_handle = handle.clone();
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         let clash_api_path = base_path.join("clash-api-port");
@@ -109,6 +121,22 @@ impl NativeRuntime {
                     .build()
                     .context("creating native sing-box executor")?;
                 executor.block_on(async move {
+                    let log_task = engine_logs.map(|mut entries| {
+                        tokio::spawn(async move {
+                            let buffer =
+                                crate::stack::log_buf::LogBuffer::new(100);
+                            while let Some(entry) = entries.recv().await {
+                                let line = format!(
+                                    "+0000 {} {} {}",
+                                    chrono::Utc::now()
+                                        .format("%Y-%m-%d %H:%M:%S"),
+                                    entry.level.as_str().to_ascii_uppercase(),
+                                    entry.message
+                                );
+                                log_writer.write(&line, &buffer);
+                            }
+                        })
+                    });
                     if let Err(error) = runtime.start().await {
                         let message = format!(
                             "starting native sing-box runtime: {error:#}"
@@ -137,6 +165,9 @@ impl NativeRuntime {
                         .close()
                         .await
                         .context("closing native sing-box runtime");
+                    if let Some(task) = log_task {
+                        task.abort();
+                    }
                     let _ = fs::remove_file(&clash_api_path);
                     result
                 })

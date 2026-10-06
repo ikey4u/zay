@@ -12,6 +12,9 @@ use tokio::{
     task::JoinHandle,
 };
 
+#[cfg(target_os = "macos")]
+mod macos_authorization;
+
 use crate::{
     ProxyOpts, daemon,
     fwd::{self, FwdCli},
@@ -113,6 +116,36 @@ struct RunningComponents {
     startup_error: Option<String>,
 }
 
+fn persistent_stack_cli(cfg: &PersistentConfig) -> StackCli {
+    let mesh = cfg.mesh.as_ref().map(|mesh| match mesh.role {
+        MeshRole::Relay => MeshCliMode::Relay,
+        MeshRole::Node => MeshCliMode::Node,
+    });
+    let stack = &cfg.stack;
+    StackCli {
+        dump_config: false,
+        common: ProxyOpts {
+            // Persistent subscriptions and active_nodes must be resolved
+            // together from the file. CLI subscription overrides deliberately
+            // clear active_nodes, which previously discarded desktop selection.
+            subscriptions: Vec::new(),
+            data_dir: Some(cfg.data_dir.clone()),
+            config: Some(cfg.toml_path.clone()),
+            mixed_port: stack.mixed_port,
+            update_interval: stack.update_interval,
+            health_check_url: stack.health_check_url.clone(),
+            log_level: stack.log_level.clone(),
+            no_tun: !stack.tun.enabled,
+            tun_exclude_routes: stack.tun.exclude_routes.clone(),
+            bootstrap_proxy: None,
+        },
+        mesh,
+        gateway: stack.gateway,
+        mesh_auth: None,
+        mesh_ip: None,
+    }
+}
+
 impl RunningComponents {
     async fn from_config(cfg: &PersistentConfig) -> Result<Self> {
         let mut running = Self {
@@ -127,7 +160,7 @@ impl RunningComponents {
             let _ = on_thread(crate::stack::easytier::stop_all).await;
             return Err(error);
         }
-        if cfg.stack.enabled || cfg.mesh.is_some() {
+        if cfg.stack.enabled {
             if let Err(error) = running.start_stack(cfg).await {
                 // A proxy failure must not tear down an already-started Mesh
                 // or prevent unrelated services from starting.
@@ -188,7 +221,7 @@ impl RunningComponents {
             self.start_mesh(cfg).await?;
             self.config.mesh = cfg.mesh.clone();
         }
-        if plan.proxy && (cfg.stack.enabled || cfg.mesh.is_some()) {
+        if plan.proxy && (cfg.stack.enabled) {
             self.start_stack(cfg).await?;
         }
         if plan.http {
@@ -218,30 +251,7 @@ impl RunningComponents {
     }
 
     async fn start_stack(&mut self, cfg: &PersistentConfig) -> Result<()> {
-        let mesh = cfg.mesh.as_ref().map(|mesh| match mesh.role {
-            MeshRole::Relay => MeshCliMode::Relay,
-            MeshRole::Node => MeshCliMode::Node,
-        });
-        let stack = &cfg.stack;
-        let cli = StackCli {
-            dump_config: false,
-            common: ProxyOpts {
-                subscriptions: stack.subscriptions.clone(),
-                data_dir: Some(cfg.data_dir.clone()),
-                config: Some(cfg.toml_path.clone()),
-                mixed_port: stack.mixed_port,
-                update_interval: stack.update_interval,
-                health_check_url: stack.health_check_url.clone(),
-                log_level: stack.log_level.clone(),
-                no_tun: !stack.tun.enabled,
-                tun_exclude_routes: stack.tun.exclude_routes.clone(),
-                bootstrap_proxy: None,
-            },
-            mesh,
-            gateway: stack.gateway,
-            mesh_auth: None,
-            mesh_ip: None,
-        };
+        let cli = persistent_stack_cli(cfg);
         let controller = Arc::new(StackController::new(
             crate::stack::log_buf::LogBuffer::with_default_capacity(),
         ));
@@ -381,11 +391,13 @@ impl ChangePlan {
         new: &PersistentConfig,
         force_proxy: bool,
     ) -> Result<Self> {
-        let proxy_active =
-            |cfg: &PersistentConfig| cfg.stack.enabled || cfg.mesh.is_some();
+        let proxy_active = |cfg: &PersistentConfig| cfg.stack.enabled;
         let proxy_view = |cfg: &PersistentConfig| -> Result<serde_json::Value> {
             let mut proxy = cfg.stack.clone();
             proxy.mesh = None;
+            // Desktop lifecycle labels do not change the proxy's routes.
+            proxy.paused = false;
+            proxy.mesh_paused = false;
             proxy.mixed_port.get_or_insert(7890);
             proxy.update_interval.get_or_insert(3600);
             proxy.log_level.get_or_insert_with(|| "info".into());
@@ -577,6 +589,8 @@ pub struct CoreSupervisor {
 enum CoreHandle {
     InProcess(CoreRuntime),
     PrivilegedChild(Child),
+    #[cfg(target_os = "macos")]
+    NativeHelper(macos_authorization::Worker),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -601,6 +615,19 @@ pub enum CoreHealth {
 }
 
 impl CoreStatus {
+    /// Interface activity is independent of an external health URL's availability.
+    pub fn tun_active(&self) -> bool {
+        use crate::stack::controller::StackRunState;
+        self.running
+            && self.stack.as_ref().is_some_and(|stack| {
+                stack.tun_enabled
+                    && stack.pid.is_some()
+                    && matches!(
+                        stack.state,
+                        StackRunState::Running | StackRunState::Degraded
+                    )
+            })
+    }
     fn running(stack: Option<crate::stack::controller::StackStatus>) -> Self {
         use crate::stack::controller::StackRunState;
 
@@ -661,18 +688,87 @@ impl CoreSupervisor {
     }
 
     pub async fn initialize(&self, password: Option<String>) -> Result<()> {
+        self.initialize_inner(password, false).await
+    }
+
+    /// Native macOS clients use the system authorization dialog. Existing
+    /// sessions are reused without presenting another prompt.
+    pub(crate) async fn initialize_for_desktop(
+        &self,
+        password: Option<String>,
+    ) -> Result<()> {
+        self.initialize_inner(password, true).await
+    }
+
+    async fn initialize_inner(
+        &self,
+        password: Option<String>,
+        desktop: bool,
+    ) -> Result<()> {
         let mut guard = self.running.lock().await;
+        // Detect an exited worker even when the next status poll has not run.
+        if desktop
+            && let Some(CoreHandle::PrivilegedChild(child)) = guard.as_mut()
+            && child.try_wait()?.is_some()
+        {
+            *guard = None;
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(CoreHandle::NativeHelper(worker)) = guard.as_ref()
+            && !worker.is_alive()
+        {
+            *guard = None;
+        }
         if guard.is_some() {
             return Ok(());
         }
+        #[cfg(target_os = "macos")]
+        if desktop && !crate::privilege::is_root() {
+            let paths =
+                daemon::paths(Some(&self.data_dir), Some(&self.config_path));
+            if paths.control.exists()
+                && daemon::request(&paths, "status").await.is_ok()
+            {
+                bail!("another Zay core already manages this data directory");
+            }
+            daemon::remove_control(&paths);
+            let data = self.data_dir.clone();
+            let config = self.config_path.clone();
+            let worker = tokio::task::spawn_blocking(move || {
+                macos_authorization::start(&data, &config)
+            })
+            .await??;
+            for _ in 0..450 {
+                if paths.control.is_file() {
+                    *guard = Some(CoreHandle::NativeHelper(worker));
+                    return Ok(());
+                }
+                if !worker.is_alive() {
+                    bail!(
+                        "The native networking worker exited during startup; check its logs."
+                    );
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            bail!("Timed out waiting for the native networking worker.");
+        }
         #[cfg(unix)]
         if !crate::privilege::is_root() {
+            if desktop
+                && !cfg!(target_os = "macos")
+                && password.as_deref().is_none_or(str::is_empty)
+            {
+                bail!(
+                    "Administrator authorization required. Enter your Mac login password in the Administrator authorization section, then retry. TUN and Mesh node connections require authorization once per desktop session."
+                );
+            }
             *guard = Some(CoreHandle::PrivilegedChild(
-                self.spawn_privileged_child(password.as_deref()).await?,
+                self.spawn_privileged_child(password.as_deref(), desktop)
+                    .await?,
             ));
             return Ok(());
         }
-        let _ = password;
+        let _ = (password, desktop);
         *guard = Some(CoreHandle::InProcess(CoreRuntime::new(
             self.data_dir.clone(),
             self.config_path.clone(),
@@ -689,10 +785,7 @@ impl CoreSupervisor {
         let raw = daemon::request(&paths, command).await?;
         let response: serde_json::Value =
             serde_json::from_str(&raw).context("decoding core response")?;
-        if let Some(error) = response.get("error").and_then(|v| v.as_str()) {
-            bail!("{error}");
-        }
-        serde_json::from_value(response).context("decoding core result")
+        decode_core_response(response)
     }
 
     pub async fn start(&self, password: Option<String>) -> Result<()> {
@@ -704,6 +797,11 @@ impl CoreSupervisor {
                 self.remote::<serde_json::Value>("components-start").await?;
                 Ok(())
             }
+            #[cfg(target_os = "macos")]
+            CoreHandle::NativeHelper(_) => {
+                self.remote::<serde_json::Value>("components-start").await?;
+                Ok(())
+            }
         }
     }
 
@@ -712,6 +810,11 @@ impl CoreSupervisor {
         match guard.as_mut() {
             Some(CoreHandle::InProcess(core)) => core.stop().await,
             Some(CoreHandle::PrivilegedChild(_)) => {
+                self.remote::<serde_json::Value>("components-stop").await?;
+                Ok(())
+            }
+            #[cfg(target_os = "macos")]
+            Some(CoreHandle::NativeHelper(_)) => {
                 self.remote::<serde_json::Value>("components-stop").await?;
                 Ok(())
             }
@@ -728,6 +831,12 @@ impl CoreSupervisor {
                     .await?;
                 Ok(())
             }
+            #[cfg(target_os = "macos")]
+            CoreHandle::NativeHelper(_) => {
+                self.remote::<serde_json::Value>("components-restart")
+                    .await?;
+                Ok(())
+            }
         }
     }
 
@@ -736,6 +845,15 @@ impl CoreSupervisor {
         match guard.as_mut() {
             Some(CoreHandle::InProcess(core)) => core.apply(force_proxy).await,
             Some(CoreHandle::PrivilegedChild(_)) => {
+                self.remote(if force_proxy {
+                    "proxy-apply"
+                } else {
+                    "components-apply"
+                })
+                .await
+            }
+            #[cfg(target_os = "macos")]
+            Some(CoreHandle::NativeHelper(_)) => {
                 self.remote(if force_proxy {
                     "proxy-apply"
                 } else {
@@ -774,6 +892,20 @@ impl CoreSupervisor {
                     )),
                 }
             }
+            #[cfg(target_os = "macos")]
+            Some(CoreHandle::NativeHelper(worker)) => {
+                if !worker.is_alive() {
+                    *guard = None;
+                    return CoreStatus::failed(
+                        "The native networking worker exited; check its logs.",
+                    );
+                }
+                self.remote("core-status").await.unwrap_or_else(|error| {
+                    CoreStatus::failed(format!(
+                        "Failed to read core status: {error:#}"
+                    ))
+                })
+            }
             None => CoreStatus::stopped(),
         }
     }
@@ -798,6 +930,24 @@ impl CoreSupervisor {
                 }
                 child.kill().context("terminating unresponsive core host")?;
                 let _ = child.wait();
+                daemon::remove_control(&paths);
+                Ok(())
+            }
+            #[cfg(target_os = "macos")]
+            Some(CoreHandle::NativeHelper(worker)) => {
+                let paths = daemon::paths(
+                    Some(&self.data_dir),
+                    Some(&self.config_path),
+                );
+                let _ = daemon::request(&paths, "stop").await;
+                for _ in 0..100 {
+                    if !worker.is_alive() {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                // Closing XPC asks the native helper to terminate any remaining worker.
+                drop(worker);
                 daemon::remove_control(&paths);
                 Ok(())
             }
@@ -829,6 +979,10 @@ impl CoreSupervisor {
                 });
                 receiver.await.context("mesh status thread exited")?
             }
+            #[cfg(target_os = "macos")]
+            Some(CoreHandle::NativeHelper(_)) => {
+                self.remote("mesh-status").await
+            }
             None => Ok(serde_json::json!([])),
         }
     }
@@ -837,6 +991,7 @@ impl CoreSupervisor {
     async fn spawn_privileged_child(
         &self,
         password: Option<&str>,
+        desktop: bool,
     ) -> Result<Child> {
         let paths =
             daemon::paths(Some(&self.data_dir), Some(&self.config_path));
@@ -848,6 +1003,7 @@ impl CoreSupervisor {
         daemon::remove_control(&paths);
         let executable =
             std::env::current_exe().context("locating zay executable")?;
+        let _ = desktop;
         let (mut command, write_password) = if let Some(password) = password {
             crate::privilege::command_for_program_with_password(
                 &executable,
@@ -855,12 +1011,7 @@ impl CoreSupervisor {
                 Some(password),
             )?
         } else {
-            (
-                crate::privilege::command_for_program_with_cached_authorization(
-                    &executable,
-                )?,
-                false,
-            )
+            (crate::privilege::command_for_program_with_cached_authorization(&executable)?, false)
         };
         command
             .arg("--run-core")
@@ -878,6 +1029,7 @@ impl CoreSupervisor {
                 password.context("sudo password missing")?,
             )?;
         }
+        // Allow time to respond to the system prompt without blocking the UI.
         for _ in 0..450 {
             if paths.control.is_file() {
                 return Ok(child);
@@ -896,11 +1048,119 @@ impl CoreSupervisor {
     }
 }
 
+fn decode_core_response<T: serde::de::DeserializeOwned>(
+    response: serde_json::Value,
+) -> Result<T> {
+    // CoreStatus includes an error field for a degraded, still-running stack.
+    // Only the daemon's error-only envelope represents a failed RPC.
+    if response.as_object().is_some_and(|object| object.len() == 1) {
+        if let Some(error) = response.get("error").and_then(|v| v.as_str()) {
+            bail!("{error}");
+        }
+    }
+    serde_json::from_value(response).context("decoding core result")
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn core_response_preserves_degraded_status() {
+        let expected =
+            CoreStatus::running(Some(crate::stack::controller::StackStatus {
+                state: crate::stack::controller::StackRunState::Degraded,
+                pid: Some(42),
+                tun_enabled: true,
+                proxy_error: Some("health check timed out".into()),
+                error: Some("health check timed out".into()),
+                ..Default::default()
+            }));
+        let actual: CoreStatus =
+            decode_core_response(serde_json::to_value(expected).unwrap())
+                .unwrap();
+        assert!(actual.running);
+        assert!(actual.tun_active());
+        assert!(matches!(actual.health, CoreHealth::Degraded));
+        let stack = actual.stack.unwrap();
+        assert_eq!(stack.pid, Some(42));
+        assert!(stack.tun_enabled);
+        assert_eq!(
+            stack.proxy_error.as_deref(),
+            Some("health check timed out")
+        );
+        assert!(
+            decode_core_response::<CoreStatus>(
+                json!({"error":"worker unavailable"})
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("worker unavailable")
+        );
+    }
+
+    #[test]
+    fn persistent_runtime_preserves_selected_candidate_pool() {
+        let directory = std::env::temp_dir()
+            .join(format!("zay-pool-regression-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("zay.toml");
+        std::fs::write(&path, "[proxy]\nenabled=true\nsubscriptions=['http://example.invalid/sub']\nactive_nodes=['sub0-only-this-node']\nrouting_mode='global'\n[proxy.tun]\nenabled=false\n").unwrap();
+        let config =
+            settings::load_persistent_config(Some(&directory), Some(&path))
+                .unwrap();
+        let cli = persistent_stack_cli(&config);
+        let resolved = settings::resolve_stack(
+            &cli.common,
+            settings::StackFlags::default(),
+        )
+        .unwrap();
+        assert_eq!(resolved.active_nodes, ["sub0-only-this-node"]);
+        assert_eq!(resolved.subscriptions, ["http://example.invalid/sub"]);
+        assert_eq!(resolved.routing_mode, "global");
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[tokio::test]
+    async fn desktop_authorization_rejects_missing_password_before_spawning() {
+        if crate::privilege::is_root() {
+            return;
+        }
+        let dir = std::env::temp_dir()
+            .join(format!("zay-auth-test-{}", uuid::Uuid::new_v4()));
+        let supervisor = CoreSupervisor::new(dir.clone(), dir.join("zay.toml"));
+        for password in [None, Some(String::new())] {
+            let error = supervisor
+                .initialize_for_desktop(password)
+                .await
+                .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("Administrator authorization required")
+            );
+            assert!(supervisor.running.lock().await.is_none());
+            assert!(!dir.exists(), "authorization must precede worker setup");
+        }
+    }
+
+    #[tokio::test]
+    async fn desktop_authorization_reuses_existing_session_without_password() {
+        let dir = std::env::temp_dir()
+            .join(format!("zay-auth-test-{}", uuid::Uuid::new_v4()));
+        let config = dir.join("zay.toml");
+        let supervisor = CoreSupervisor::new(dir.clone(), config.clone());
+        // A stopped in-process handle exercises session reuse without starting
+        // a worker, opening sockets, or requesting any system privileges.
+        *supervisor.running.lock().await =
+            Some(CoreHandle::InProcess(CoreRuntime::new(dir.clone(), config)));
+        supervisor.initialize_for_desktop(None).await.unwrap();
+        assert!(supervisor.running.lock().await.is_some());
+        assert!(!dir.exists());
+    }
 
     fn config() -> PersistentConfig {
         let mesh: settings::MeshConfig = serde_json::from_value(json!({
@@ -921,6 +1181,17 @@ mod tests {
             fwd: vec![],
             ssh: vec![],
         }
+    }
+
+    #[test]
+    fn mesh_alone_does_not_activate_the_proxy() {
+        let mut old = config();
+        old.stack.enabled = false;
+        let mut next = old.clone();
+        next.mesh = None;
+        let plan = ChangePlan::between(&old, &next, false).unwrap();
+        assert!(plan.mesh);
+        assert!(!plan.proxy);
     }
 
     #[test]
@@ -1045,4 +1316,9 @@ mod tests {
         core.stop().await.unwrap();
         std::fs::remove_dir_all(directory).unwrap();
     }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn run_native_privileged_helper() -> Result<()> {
+    macos_authorization::run_helper()
 }

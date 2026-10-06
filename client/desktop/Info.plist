@@ -6,6 +6,7 @@
     <key>CFBundleName</key><string>Zay</string>
     <key>CFBundleDisplayName</key><string>Zay Desktop</string>
     <key>CFBundleExecutable</key><string>zay-desktop</string>
+    <key>CFBundleIconFile</key><string>Zay.icns</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>0.1.0</string>
     <key>CFBundleVersion</key><string>1</string>

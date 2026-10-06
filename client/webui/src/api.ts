@@ -207,6 +207,7 @@ export type LabPreset = {
 }
 
 export type LabProfile = {
+  platform: string
   interactive: boolean
   active: boolean
   name?: string | null

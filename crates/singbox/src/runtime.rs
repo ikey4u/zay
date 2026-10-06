@@ -1940,6 +1940,13 @@ impl Runtime {
         self.log.logger()
     }
 
+    /// Subscribe to observable engine logs for an embedding application's diagnostics.
+    pub fn subscribe_logs(
+        &self,
+    ) -> Result<tokio::sync::mpsc::Receiver<crate::log::Entry>, LogError> {
+        self.log.subscribe()
+    }
+
     pub fn clash_mode(&self) -> Option<String> {
         self.router.clash_mode()
     }

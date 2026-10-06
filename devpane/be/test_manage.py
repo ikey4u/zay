@@ -14,7 +14,7 @@ class LauncherTests(unittest.TestCase):
         self.root = Path(self.temp.name).resolve()
         self.be = self.root / "devpane" / "be"
         self.be.mkdir(parents=True)
-        for name in ("manage.sh", "macos-runtime.sh", "build-linux.sh"):
+        for name in ("manage.sh", "macos-runtime.sh", "build-linux.sh", "start.sh", "check-host.sh"):
             shutil.copyfile(Path(__file__).parent / name, self.be / name)
         (self.be / "host-proxy.sh").write_text('#!/bin/bash\nprintf "host-proxy %s\\n" "$*" >> "$TEST_LOG"\n')
         self.bin = self.root / "bin"
@@ -25,10 +25,11 @@ class LauncherTests(unittest.TestCase):
                         COLIMA_HOME=str(self.root / "colima"))
         for key in ("DEVPANE_MACOS_READY", "DEVPANE_BUILD_NETWORK"):
             self.env.pop(key, None)
-        self.mock("uname", 'echo "$TEST_OS"')
+        self.mock("uname", 'if [[ "$1" == -m ]]; then echo "${TEST_ARCH:-arm64}"; else echo "$TEST_OS"; fi')
+        self.mock("sw_vers", 'echo "${TEST_MACOS_VERSION:-26.0}"')
         self.mock("mise", '''
 printf 'mise %s\\n' "$*" >> "$TEST_LOG"
-if [[ "$4" == devpane:macos ]]; then exec /bin/bash "$2/devpane/be/macos-runtime.sh" "$6"; fi
+if [[ "$4" == devpane:colima-runtime ]]; then exec /bin/bash "$2/devpane/be/macos-runtime.sh" "$6"; fi
 ''')
         self.mock("colima", '''
 printf 'colima %s\\n' "$*" >> "$TEST_LOG"
@@ -59,11 +60,48 @@ if [[ "$1" == compose ]]; then exit "${TEST_COMPOSE_EXIT:-0}"; fi
         self.assertEqual(result.returncode, expected, result.stderr)
         return self.log.read_text()
 
+    def test_start_selects_host_default_and_explicit_guest(self):
+        (self.be / "macos-pane.sh").write_text(
+            '#!/bin/bash\nprintf "macos-pane %s\\n" "$*" >> "$TEST_LOG"\n')
+        for host, lab, expected_guest in (("Darwin", "auto", "macos"),
+                                         ("Linux", "auto", "linux"),
+                                         ("Darwin", "linux", "linux"),
+                                         ("Darwin", "macos", "macos")):
+            with self.subTest(host=host, lab=lab):
+                self.log.write_text("")
+                result = subprocess.run(["bash", str(self.be / "start.sh"), lab],
+                                        env=dict(self.env, TEST_OS=host), capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                calls = self.log.read_text()
+                if expected_guest == "macos":
+                    self.assertIn("run devpane:linux", calls)
+                    self.assertIn("exec tart@2.40.1 rust@stable protoc@36.2 node@24.19.0 cmake@4.4.3 -- bash", calls)
+                    self.assertIn("/devpane/be/macos-vm.sh", calls)
+                    self.assertIn("run devpane:macos-serve", calls)
+                else:
+                    self.assertIn("up -d mesh-peer mesh-echo zay", calls)
+                    self.assertNotIn("/devpane/be/macos-vm.sh", calls)
+
+    def test_unsupported_host_rejected_before_side_effects(self):
+        for host, arch, version, lab in (("Linux", "arm64", "26", "macos"),
+                                        ("Darwin", "x86_64", "26", "auto"),
+                                        ("Darwin", "arm64", "12.6", "linux"),
+                                        ("FreeBSD", "x86_64", "26", "auto"),
+                                        ("Linux", "riscv64", "26", "linux")):
+            with self.subTest(host=host, arch=arch, lab=lab):
+                self.log.write_text("")
+                result = subprocess.run(["bash", str(self.be / "start.sh"), lab],
+                                        env=dict(self.env, TEST_OS=host, TEST_ARCH=arch,
+                                                 TEST_MACOS_VERSION=version), capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("host", result.stderr)
+                self.assertEqual(self.log.read_text(), "")
+
     def test_macos_installs_tools_and_starts_isolated_vm(self):
         self.env.update(DOCKER_HOST="tcp://elsewhere:2376", DOCKER_CONTEXT="other",
                         DOCKER_TLS_VERIFY="1", DOCKER_CONFIG="/do/not/change")
         calls = self.run_action()
-        self.assertIn("run devpane:macos -- up", calls)
+        self.assertIn("run devpane:colima-runtime -- up", calls)
         self.assertIn("colima --profile zay-devpane start --runtime docker --vm-type vz --activate=false", calls)
         self.assertIn(f"host=unix://{self.env['COLIMA_HOME']}/zay-devpane/docker.sock|context=|tls=", calls)
         self.assertIn("run devpane:host-build", calls)
@@ -120,7 +158,7 @@ touch "$CARGO_TARGET_DIR/$triple/debug/zay" "$CARGO_TARGET_DIR/$triple/debug/dev
             with self.subTest(action=action):
                 calls = self.run_action(action)
                 self.assertNotIn("colima ", calls)
-                self.assertIn(f"run devpane:macos -- {action}", calls)
+                self.assertIn(f"run devpane:colima-runtime -- {action}", calls)
 
     def test_linux_uses_existing_engine(self):
         self.env.update(TEST_OS="Linux", DOCKER_HOST="unix:///existing.sock")

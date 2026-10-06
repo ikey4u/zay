@@ -439,7 +439,11 @@ impl TunRouteBackend for DarwinRouteBackend {
     }
 
     async fn remove_route(&mut self, route: IpNet) -> io::Result<()> {
-        self.execute(libc::RTM_DELETE as u8, route)
+        match self.execute(libc::RTM_DELETE as u8, route) {
+            // The kernel can already have removed an interface route.
+            Err(error) if error.raw_os_error() == Some(libc::ESRCH) => Ok(()),
+            result => result,
+        }
     }
 }
 

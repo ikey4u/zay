@@ -12,7 +12,7 @@ type Row = LabProbe & { label: string; expect_via?: string | null }
 
 export function LabPage() {
   const [profile, setProfile] = useState<LabProfile | null>(null)
-  const [url, setUrl] = useState("http://172.30.126.10:8090/")
+  const [url, setUrl] = useState("https://baidu.com")
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [rows, setRows] = useState<Row[]>([])
@@ -74,7 +74,7 @@ export function LabPage() {
           <CardTitle className="flex items-center gap-2"><FlaskConical className="h-4 w-4" />Lab</CardTitle>
           <CardDescription>
             {profile?.active
-              ? `Environment ${profile.name}. The browser only opens this page; probes stay in the Zay network.`
+              ? `${profile.platform} · ${profile.name}. The browser only opens this page; probes stay in the Zay network.`
               : "devpane is not detected. A manual probe still uses this machine's egress."}
           </CardDescription>
         </CardHeader>
@@ -97,7 +97,7 @@ export function LabPage() {
       {profile?.interactive && <>
         <div className="flex gap-2" role="tablist" aria-label="Lab tools">
           <Button role="tab" aria-selected={tab === "browser"} variant={tab === "browser" ? "secondary" : "ghost"} onClick={() => setTab("browser")}><Globe2 className="h-4 w-4" />Browser</Button>
-          <Button role="tab" aria-selected={tab === "terminal"} variant={tab === "terminal" ? "secondary" : "ghost"} onClick={() => setTab("terminal")}><TerminalSquare className="h-4 w-4" />Container terminal</Button>
+          <Button role="tab" aria-selected={tab === "terminal"} variant={tab === "terminal" ? "secondary" : "ghost"} onClick={() => setTab("terminal")}><TerminalSquare className="h-4 w-4" />{profile?.platform} terminal</Button>
         </div>
         <div hidden={tab !== "browser"} className="overflow-hidden rounded-xl border border-border bg-card">
           <div className="flex items-center gap-2 border-b border-border bg-background/50 p-3">
@@ -109,16 +109,16 @@ export function LabPage() {
               <Button type="submit" disabled={busy != null || !url.trim()}>{busy === "browser" ? <LoaderCircle className="h-4 w-4 animate-spin" /> : "Go"}</Button>
             </form>
           </div>
-          <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-2 text-xs text-muted-foreground"><span className="h-2 w-2 rounded-full bg-emerald-400" />Chromium inside devpane · 1280 × 800 · Rendered snapshot</div>
+          <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-2 text-xs text-muted-foreground"><span className="h-2 w-2 rounded-full bg-emerald-400" />Browser inside {profile?.platform} · 1280 × 800 · Rendered snapshot</div>
           <div className="min-h-[300px] bg-white">
-            {busy === "browser" ? <div className="flex h-[300px] items-center justify-center gap-2 text-slate-500"><LoaderCircle className="h-5 w-5 animate-spin" />Loading page through the container network…</div>
+            {busy === "browser" ? <div className="flex h-[300px] items-center justify-center gap-2 text-slate-500"><LoaderCircle className="h-5 w-5 animate-spin" />Loading page through the lab network…</div>
               : page?.image ? <img src={page.image} alt={`Rendered page: ${page.url}`} className="block h-auto w-full" />
-              : <div className="flex min-h-[300px] flex-col items-center justify-center gap-3 overflow-hidden px-6 py-8 text-center text-sm text-slate-500"><Globe2 className="h-10 w-10" /><p className="max-w-full break-words">{page?.error ?? "Enter a URL to render a page from inside the lab."}</p><p className="text-xs">JavaScript, styles, and images load in the container. Enter another URL to navigate.</p></div>}
+              : <div className="flex min-h-[300px] flex-col items-center justify-center gap-3 overflow-hidden px-6 py-8 text-center text-sm text-slate-500"><Globe2 className="h-10 w-10" /><p className="max-w-full break-words">{page?.error ?? "Enter a URL to render a page from inside the lab."}</p><p className="text-xs">JavaScript, styles, and images load in the lab. Enter another URL to navigate.</p></div>}
           </div>
           {page?.error && page.diagnostics && <details className="border-t border-border p-4 text-xs"><summary className="cursor-pointer">Browser diagnostics</summary><pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-all">{page.diagnostics}</pre></details>}
-          {page && <div className="space-y-3 border-t border-border p-4"><div className="text-xs text-muted-foreground">Connection check · separate curl request through the same container network</div><ProbeRow row={{ ...page.connection, label: "Connection" }} />{page.connection.headers && <details className="text-xs"><summary className="cursor-pointer text-muted-foreground">Response headers</summary><pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap font-mono">{page.connection.headers}</pre></details>}</div>}
+          {page && <div className="space-y-3 border-t border-border p-4"><div className="text-xs text-muted-foreground">Connection check · separate curl request through the same lab network</div><ProbeRow row={{ ...page.connection, label: "Connection" }} />{page.connection.headers && <details className="text-xs"><summary className="cursor-pointer text-muted-foreground">Response headers</summary><pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap font-mono">{page.connection.headers}</pre></details>}</div>}
         </div>
-        <div hidden={tab !== "terminal"}><LabTerminal /></div>
+        <div hidden={tab !== "terminal"}><LabTerminal platform={profile?.platform ?? "Lab"} /></div>
       </>}
       {!profile?.interactive && <Card><CardHeader><CardTitle>Custom URL</CardTitle></CardHeader><CardContent className="flex gap-2"><Input aria-label="Probe URL" value={url} onChange={(event) => setUrl(event.target.value)} /><Button disabled={busy != null || !url.trim()} onClick={() => void run("custom", url, { url })}>Probe</Button></CardContent></Card>}
 

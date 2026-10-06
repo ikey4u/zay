@@ -51,7 +51,7 @@ pub struct WebUiCli {
     /// Bearer token required when listening beyond loopback
     #[arg(long, env = "ZAY_WEBUI_TOKEN", hide_env_values = true)]
     token: Option<String>,
-    /// Disable authentication only inside the isolated devpane container
+    /// Disable authentication only inside the isolated devpane lab
     #[arg(long, hide = true)]
     devpane_no_auth: bool,
     /// Start only the WebUI; leave enabled core components stopped
@@ -235,9 +235,7 @@ type ApiResult<T> = std::result::Result<T, ApiError>;
 pub fn run(mut cli: WebUiCli) -> Result<()> {
     if cli.devpane_no_auth {
         if !crate::lab::is_devpane() {
-            bail!(
-                "--devpane-no-auth is only available inside the devpane container"
-            );
+            bail!("--devpane-no-auth is only available inside the devpane lab");
         }
         cli.token = None;
     }

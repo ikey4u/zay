@@ -6,6 +6,11 @@ root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 devpane="${root}/devpane"
 action="${1:-up}"
 
+case "$action" in
+  test-macos|serve-macos) bash "$devpane/be/check-host.sh" macos ;;
+  *) bash "$devpane/be/check-host.sh" linux ;;
+esac
+
 need() {
   if ! command -v "$1" >/dev/null 2>&1; then
     echo "missing $1" >&2
@@ -16,7 +21,7 @@ need() {
 # Install and activate the macOS tools for every entry point, including direct
 # invocations of this script. Linux uses its existing Docker Engine.
 case "${action}" in
-  up|down|reset|logs|status|test|test-macos) ;;
+  up|down|reset|logs|status|test|test-macos|serve-macos) ;;
   *)
     echo "usage: $0 {up|down|reset|logs|status|test|test-macos}" >&2
     exit 2
@@ -24,7 +29,7 @@ case "${action}" in
 esac
 if [[ "$(uname -s)" == Darwin && "${DEVPANE_MACOS_READY:-}" != 1 ]]; then
   need mise
-  exec mise -C "${root}" run devpane:macos -- "${action}"
+  exec mise -C "${root}" run devpane:colima-runtime -- "${action}"
 fi
 
 if [[ "$action" != up && -f "${devpane}/.build/host.env" ]]; then source "${devpane}/.build/host.env"; fi
@@ -106,6 +111,9 @@ EOF
   test)
     need docker
     python3 "${devpane}/be/test_network.py"
+    ;;
+  serve-macos)
+    exec python3 -u "${devpane}/be/test_macos.py" --serve
     ;;
   test-macos)
     need docker

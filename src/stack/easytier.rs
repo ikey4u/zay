@@ -465,6 +465,95 @@ mod imp {
         Ok(id)
     }
 
+    /// Check an isolated Mesh session without touching production instances,
+    /// configuration, virtual interfaces or routes. Node tests authenticate a
+    /// peer; relay tests verify that the requested listeners can start.
+    pub fn test_connection(mesh: &MeshConfig) -> Result<String> {
+        outside_tokio(|| {
+            anyhow::ensure!(
+                !mesh.network_name.trim().is_empty()
+                    && !mesh.network_secret.is_empty(),
+                "Mesh network name and secret are required."
+            );
+            if mesh.role == MeshRole::Node {
+                anyhow::ensure!(
+                    mesh.peers.as_ref().is_some_and(|p| !p.is_empty()),
+                    "Add a peer URL to test the Mesh connection."
+                );
+            }
+            if let Some(address) =
+                mesh.ipv4.as_deref().filter(|s| !s.trim().is_empty())
+            {
+                crate::settings::ipv4_network_cidr(address)?;
+            }
+            let mut probe = mesh.clone();
+            probe.ipv4 = None;
+            probe.dhcp = Some(false);
+            probe.wireguard_listen = None;
+            probe.wireguard_client_cidr = None;
+            probe.mesh_routes = None;
+            if probe.role == MeshRole::Node {
+                probe.listeners = Some(vec!["tcp://127.0.0.1:0".into()]);
+            }
+            let text = to_easytier_toml(&probe)?
+                .replace("no_tun = false", "no_tun = true");
+            let cfg = TomlConfigLoader::new_from_str(&text)
+                .context("checking Mesh configuration")?;
+            // Own manager and runtime: cleanup never stops the running Mesh.
+            let ctx = Ctx::new();
+            let id = ctx
+                .runtime
+                .block_on(ctx.process_management.run_owned_network_instance(
+                    cfg,
+                    ConfigFileControl::STATIC_CONFIG,
+                ))
+                .context("starting Mesh connection test")?;
+            let result = (|| {
+                let deadline = std::time::Instant::now()
+                    + std::time::Duration::from_secs(12);
+                loop {
+                    let infos = ctx
+                        .manager
+                        .collect_network_infos_sync()
+                        .context("reading Mesh test status")?;
+                    if let Some(info) = infos.get(&id) {
+                        if probe.role == MeshRole::Node
+                            && !info.peers.is_empty()
+                        {
+                            return Ok("Peer connection verified. Save to join the Mesh network.".to_string());
+                        }
+                        if probe.role == MeshRole::Relay
+                            && info
+                                .my_node_info
+                                .as_ref()
+                                .is_some_and(|node| !node.listeners.is_empty())
+                        {
+                            crate::singbox::tun_route::wait_for_mesh_listeners(
+                                &probe,
+                                std::time::Duration::from_secs(12),
+                            )?;
+                            return Ok("Relay listeners verified. Save to accept peer connections.".to_string());
+                        }
+                    }
+                    anyhow::ensure!(
+                        std::time::Instant::now() < deadline,
+                        "Mesh connection test timed out. Check the peer address, shared secret and listener availability."
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                }
+            })();
+            let cleanup = ctx
+                .runtime
+                .block_on(
+                    ctx.process_management
+                        .retain_owned_network_instances_by_name(Vec::new()),
+                )
+                .context("stopping Mesh connection test");
+            cleanup?;
+            result
+        })
+    }
+
     pub fn stop_all() -> Result<()> {
         outside_tokio(|| {
             CTX.runtime.block_on(
@@ -724,8 +813,8 @@ mod imp {
 }
 
 pub use imp::{
-    spawn_mesh_peer_watch, start, status, stop_all, wait_for_mesh_peers,
-    wait_for_virtual_ip,
+    spawn_mesh_peer_watch, start, status, stop_all, test_connection,
+    wait_for_mesh_peers, wait_for_virtual_ip,
 };
 
 pub fn start_for_singbox(

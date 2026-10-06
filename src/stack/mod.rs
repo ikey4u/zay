@@ -335,8 +335,11 @@ fn dump_config(cli: &StackCli, mesh: Option<MeshConfig>) -> Result<String> {
     toml::to_string_pretty(&Config {
         proxy: zay_settings::PersistentProxyFile {
             enabled: true,
+            paused: false,
+            mesh_paused: false,
             subscriptions: cli.common.subscriptions.clone(),
             active_nodes: Vec::new(),
+            routing_mode: String::new(),
             gateway: cli.gateway,
             mixed_port: Some(cli.common.mixed_port.unwrap_or(7890)),
             update_interval: Some(cli.common.update_interval.unwrap_or(3600)),

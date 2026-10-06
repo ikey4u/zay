@@ -19,9 +19,12 @@ pub struct ProbeRequest {
 }
 
 pub fn is_devpane() -> bool {
-    cfg!(target_os = "linux")
+    (cfg!(target_os = "linux")
         && std::env::var("ZAY_LAB").as_deref() == Ok("devpane")
-        && std::path::Path::new("/.dockerenv").exists()
+        && std::path::Path::new("/.dockerenv").exists())
+        || (cfg!(target_os = "macos")
+            && std::env::var("ZAY_LAB").as_deref() == Ok("devpane-macos")
+            && std::path::Path::new("/etc/zay-devpane-macos").exists())
 }
 
 pub fn profile_json() -> Value {
@@ -29,7 +32,7 @@ pub fn profile_json() -> Value {
         .ok()
         .filter(|value| !value.trim().is_empty());
     let mut presets = Vec::new();
-    if name.as_deref() == Some("devpane") {
+    if is_devpane() {
         presets.push(preset(
             "proxy",
             "TUN path to the lab domain",
@@ -72,6 +75,7 @@ pub fn profile_json() -> Value {
         "active": name.is_some(),
         "interactive": is_devpane(),
         "name": name,
+        "platform": if cfg!(target_os = "macos") { "macOS VM" } else { "Linux container" },
         "hint": "Probes run in the Zay process network, not in the browser that opened this page.",
         "presets": presets,
     })
@@ -338,11 +342,12 @@ pub async fn render_page(request: BrowserRequest) -> Result<Value> {
         bail!("browser rendering is only available inside devpane");
     }
     let url = validate_http_url(&request.url)?;
-    let directory = std::env::temp_dir().join(format!(
-        "zay-browser-{}-{}",
-        std::process::id(),
-        nanos()
-    ));
+    let directory = (if cfg!(target_os = "macos") {
+        std::path::PathBuf::from("/tmp")
+    } else {
+        std::env::temp_dir()
+    })
+    .join(format!("zay-browser-{}-{}", std::process::id(), nanos()));
     std::fs::create_dir(&directory)?;
     struct Cleanup(std::path::PathBuf);
     impl Drop for Cleanup {
@@ -378,10 +383,11 @@ pub async fn render_page(request: BrowserRequest) -> Result<Value> {
         .kill_on_drop(true);
     let target = url.clone();
     let probe = tokio::task::spawn_blocking(move || probe_url(&target));
-    let rendered = command
-        .output()
-        .await
-        .context("starting the container browser");
+    let rendered = if cfg!(target_os = "macos") {
+        render_macos(&directory, &url).await
+    } else {
+        command.output().await.context("starting the lab browser")
+    };
     let connection = probe.await??;
     let diagnostics = rendered.as_ref().ok().map(|output| {
         String::from_utf8_lossy(&output.stderr)
@@ -416,6 +422,62 @@ pub async fn render_page(request: BrowserRequest) -> Result<Value> {
     Ok(
         json!({"url": url, "image": image, "error": render_error, "diagnostics": diagnostics, "connection": connection}),
     )
+}
+
+/// Chrome on macOS may remain alive after writing its screenshot.
+/// Poll the complete PNG, then terminate only this render's process group.
+async fn render_macos(
+    directory: &std::path::Path,
+    url: &str,
+) -> Result<std::process::Output> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        if !Command::new("chown")
+            .arg("admin:staff")
+            .arg(directory)
+            .status()?
+            .success()
+        {
+            bail!("could not prepare browser directory for the guest user");
+        }
+        let mut command = tokio::process::Command::new("/bin/bash");
+        command.args(["-c", r#"
+sudo -n -H -u admin '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' \
+ --headless --disable-gpu --disable-quic --disable-background-networking \
+ --no-first-run --no-proxy-server --window-size=1280,800 --virtual-time-budget=5000 \
+ --user-data-dir="$1/profile" --screenshot="$1/page.png" "$2" > "$1/stdout" 2> "$1/stderr" &
+for attempt in {1..30}; do
+ if test -s "$1/page.png" && tail -c 8 "$1/page.png" | /usr/bin/xxd -p | /usr/bin/grep -q 49454e44ae426082; then
+  exit 0
+ fi
+ sleep 1
+done
+cat "$1/stderr" >&2
+exit 124
+"#, "zay-render"]).arg(directory).arg(url);
+        // The parent owns group cleanup; avoid the shell terminating itself.
+        command.as_std_mut().process_group(0);
+        command.kill_on_drop(true);
+        let mut child = command.spawn()?;
+        struct Group(u32);
+        impl Drop for Group {
+            fn drop(&mut self) {
+                unsafe {
+                    libc::kill(-(self.0 as i32), libc::SIGKILL);
+                }
+            }
+        }
+        let _group = Group(child.id().context("browser process has no PID")?);
+        let status = child.wait().await?;
+        Ok(std::process::Output {
+            status,
+            stdout: Vec::new(),
+            stderr: std::fs::read(directory.join("stderr")).unwrap_or_default(),
+        })
+    }
+    #[cfg(not(unix))]
+    bail!("macOS browser requires Unix")
 }
 
 fn browser_failure(stderr: &str) -> String {
@@ -459,7 +521,10 @@ pub async fn terminal(mut socket: axum::extract::ws::WebSocket) -> Result<()> {
     command.args(["--noprofile", "--norc", "-i"]);
     command.env("TERM", "xterm-256color");
     command.env("PS1", "\\u@devpane:\\w\\$ ");
-    command.cwd("/var/lib/zay");
+    command.cwd(env_or("ZAY_LAB_WORKDIR", "/var/lib/zay"));
+    if cfg!(target_os = "macos") {
+        command.env("PS1", "\\u@devpane-macos:\\w\\$ ");
+    }
     let mut child = pair.slave.spawn_command(command)?;
     drop(pair.slave);
     let mut reader = pair.master.try_clone_reader()?;

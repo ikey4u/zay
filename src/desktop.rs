@@ -4,6 +4,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::Serialize;
 
+mod route_test;
+pub use route_test::RouteTest;
+
 pub use crate::runtime::{ApplyResult, CoreHealth, CoreStatus};
 use crate::{
     runtime::{CoreRuntime, CoreSupervisor},
@@ -19,7 +22,39 @@ pub struct Client {
     elevated: Option<CoreSupervisor>,
 }
 
+/// Public node metadata only; transport credentials never enter the UI snapshot.
+#[derive(Clone, Debug, Serialize)]
+pub struct ProxyNode {
+    pub id: String,
+    pub name: String,
+    pub protocol: String,
+}
+
+fn node_inventory(nodes: Vec<serde_json::Value>) -> Vec<ProxyNode> {
+    nodes
+        .into_iter()
+        .filter_map(|node| {
+            let id = node["tag"].as_str()?;
+            let (provider, name) = id.strip_prefix("sub")?.split_once('-')?;
+            provider.parse::<usize>().ok()?;
+            Some(ProxyNode {
+                id: id.to_owned(),
+                name: name.to_owned(),
+                protocol: node["type"].as_str().unwrap_or("unknown").to_owned(),
+            })
+        })
+        .collect()
+}
+
 impl Client {
+    pub async fn test_route(&self, target: String) -> Result<RouteTest> {
+        let data_dir = self.data_dir.clone();
+        let config_path = self.config_path.clone();
+        tokio::task::spawn_blocking(move || {
+            route_test::evaluate(&data_dir, &config_path, &target)
+        })
+        .await?
+    }
     pub fn new(data_dir: PathBuf) -> Result<Self> {
         let config_path = data_dir.join(settings::ZAY_TOML_FILE);
         if !config_path.exists() {
@@ -27,17 +62,23 @@ impl Client {
             // A desktop starts without changing system routes or asking for sudo.
             write_private(
                 &config_path,
-                "[proxy]\nenabled = true\nmixed_port = 7890\n[proxy.tun]\nenabled = false\n",
+                "[proxy]\nenabled = true\nmixed_port = 7890\n[proxy.tun]\nenabled = true\n",
             )?;
         }
         settings::load_persistent_config(Some(&data_dir), Some(&config_path))?;
         crate::logging::init(&data_dir.join("logs"));
-        Ok(Self {
+        let client = Self {
             local: CoreRuntime::new(data_dir.clone(), config_path.clone()),
             data_dir,
             config_path,
             elevated: None,
-        })
+        };
+        let mut config = client.config()?;
+        if config.routing_mode.is_empty() {
+            config.routing_mode = "global".into();
+            client.save(&config)?;
+        }
+        Ok(client)
     }
 
     pub fn config(&self) -> Result<PersistentProxyFile> {
@@ -52,6 +93,60 @@ impl Client {
         &self.config_path
     }
 
+    /// Inspect downloaded subscriptions without starting a proxy or changing routes.
+    pub async fn proxy_nodes(&self, refresh: bool) -> Result<Vec<ProxyNode>> {
+        let settings = settings::resolve_stack(
+            &crate::ProxyOpts {
+                data_dir: Some(self.data_dir.clone()),
+                config: Some(self.config_path.clone()),
+                ..Default::default()
+            },
+            settings::StackFlags {
+                mesh: None,
+                gateway: false,
+                tun: false,
+                no_rules: true,
+            },
+        )?;
+        tokio::task::spawn_blocking(move || {
+            let nodes = if refresh {
+                crate::singbox::subscription::fetch_and_convert(
+                    &settings,
+                    settings.bootstrap_proxy.as_ref(),
+                )?
+            } else {
+                crate::singbox::subscription::load_cached_nodes(&settings)?
+            };
+            Ok(node_inventory(nodes))
+        })
+        .await?
+    }
+
+    pub async fn refresh_proxy_nodes(&mut self) -> Result<Vec<ProxyNode>> {
+        if self.status().await.running && self.config()?.enabled {
+            let result = if let Some(core) = &self.elevated {
+                core.apply(true).await?
+            } else {
+                self.local.apply(true).await?
+            };
+            if let Some(error) = result.error {
+                anyhow::bail!("{error}");
+            }
+            self.proxy_nodes(false).await
+        } else {
+            self.proxy_nodes(true).await
+        }
+    }
+
+    pub async fn test_mesh_connection(
+        mesh: settings::MeshConfig,
+    ) -> Result<String> {
+        tokio::task::spawn_blocking(move || {
+            crate::stack::easytier::test_connection(&mesh)
+        })
+        .await?
+    }
+
     pub fn save(&self, proxy: &PersistentProxyFile) -> Result<()> {
         #[derive(Serialize)]
         struct Config<'a> {
@@ -64,6 +159,24 @@ impl Client {
         doc["proxy"] = new_proxy["proxy"].clone();
         let text = doc.to_string();
         settings::validate_persistent_toml(&text)?;
+        let previous = self.config()?;
+        // Cache filenames use subscription positions; a changed URL must not
+        // inherit nodes (or credentials) downloaded from its predecessor.
+        for (index, url) in previous.subscriptions.iter().enumerate() {
+            if proxy.subscriptions.get(index) != Some(url) {
+                let cache = self
+                    .data_dir
+                    .join(settings::SINGBOX_DIR)
+                    .join("providers")
+                    .join(format!("sub{index}.yaml"));
+                match std::fs::remove_file(cache) {
+                    Ok(()) => {}
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        }
         write_private(&self.config_path, &text)
     }
 
@@ -84,7 +197,7 @@ impl Client {
                 self.config_path.clone(),
             );
             // Authenticate before interrupting a running unprivileged proxy.
-            supervisor.initialize(password).await?;
+            supervisor.initialize_for_desktop(password).await?;
             self.local.stop().await?;
             self.elevated = Some(supervisor);
         }
@@ -92,9 +205,11 @@ impl Client {
     }
 
     pub async fn start(&mut self, password: Option<String>) -> Result<()> {
+        self.release_unneeded_privileges().await?;
         if let Some(core) = &self.elevated {
             // A host that exited may need fresh authorization on retry.
-            return core.start(password).await;
+            core.initialize_for_desktop(password).await?;
+            return core.start(None).await;
         }
         self.authorize_if_needed(password).await?;
         if let Some(core) = &self.elevated {
@@ -109,6 +224,14 @@ impl Client {
         password: Option<String>,
     ) -> Result<ApplyResult> {
         let running = self.status().await.running;
+        if self.release_unneeded_privileges().await? && running {
+            self.local.start().await?;
+            return Ok(ApplyResult {
+                applied: true,
+                components: vec!["proxy".into(), "mesh".into()],
+                error: None,
+            });
+        }
         let was_elevated = self.elevated.is_some();
         if running {
             self.authorize_if_needed(password).await?;
@@ -129,11 +252,25 @@ impl Client {
     }
 
     pub async fn stop(&mut self) -> Result<()> {
-        if let Some(core) = &self.elevated {
-            core.stop().await
+        if let Some(core) = self.elevated.take() {
+            core.shutdown().await
         } else {
             self.local.stop().await
         }
+    }
+
+    async fn release_unneeded_privileges(&mut self) -> Result<bool> {
+        let config = settings::load_persistent_config(
+            Some(&self.data_dir),
+            Some(&self.config_path),
+        )?;
+        if !config.requires_root() {
+            if let Some(core) = self.elevated.take() {
+                core.shutdown().await?;
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     pub async fn status(&self) -> CoreStatus {
@@ -153,6 +290,142 @@ impl Client {
                 .and_then(|s| serde_json::to_value(s).map_err(Into::into))
         })
         .await?
+    }
+
+    /// Use the running core's existing loopback controller. No new server is opened.
+    pub async fn controller(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value> {
+        anyhow::ensure!(
+            path.starts_with('/') && !path.contains('?'),
+            "invalid controller path"
+        );
+        let port: u16 = std::fs::read_to_string(
+            self.data_dir
+                .join(settings::SINGBOX_DIR)
+                .join("clash-api-port"),
+        )?
+        .trim()
+        .parse()?;
+        let http = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(2))
+            .build()?;
+        let mut request =
+            http.request(method, format!("http://127.0.0.1:{port}{path}"));
+        if let Some(body) = body {
+            request = request
+                .body(serde_json::to_vec(&body)?)
+                .header("Content-Type", "application/json");
+        }
+        let response = request.send().await?;
+        let status = response.status();
+        let bytes = response.bytes().await?;
+        anyhow::ensure!(
+            status.is_success(),
+            "core controller returned {status}: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        if bytes.is_empty() {
+            return Ok(serde_json::json!({}));
+        }
+        Ok(serde_json::from_slice(&bytes)?)
+    }
+
+    pub async fn connections(&self) -> Result<serde_json::Value> {
+        self.controller(reqwest::Method::GET, "/connections", None)
+            .await
+    }
+
+    pub fn recent_logs(&self) -> Result<Vec<String>> {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut file = match std::fs::File::open(
+            self.data_dir.join("logs/events.jsonl"),
+        ) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(vec![]);
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let offset = file.metadata()?.len().saturating_sub(256 * 1024);
+        file.seek(SeekFrom::Start(offset))?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        let text = String::from_utf8_lossy(&bytes);
+        Ok(text
+            .lines()
+            .skip(usize::from(offset > 0))
+            .filter_map(|line| {
+                let e: serde_json::Value = serde_json::from_str(line).ok()?;
+                let field =
+                    |name: &str| e["fields"][name].as_str().unwrap_or("");
+                let message = e["error"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| {
+                        if e["component"] == "proxy"
+                            && !field("destination").is_empty()
+                        {
+                            "Connection"
+                        } else {
+                            e["message"].as_str().unwrap_or("")
+                        }
+                    });
+                Some(format!(
+                    "{}  {} · {}\n{}{}{}{}",
+                    e["timestamp"].as_str().unwrap_or(""),
+                    e["level"].as_str().unwrap_or("info"),
+                    e["component"].as_str().unwrap_or(""),
+                    message,
+                    if field("domain").is_empty() {
+                        String::new()
+                    } else {
+                        format!(" · {}", field("domain"))
+                    },
+                    if field("process_name").is_empty() {
+                        String::new()
+                    } else {
+                        format!(" · {}", field("process_name"))
+                    },
+                    if field("outbound").is_empty() {
+                        String::new()
+                    } else {
+                        format!(" → {}", field("outbound"))
+                    }
+                ))
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .take(300)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect())
+    }
+
+    /// The user's selection takes precedence over cached selector and mode state.
+    pub async fn sync_proxy_selection(&self) -> Result<()> {
+        let config = self.config()?;
+        self.controller(reqwest::Method::PATCH, "/configs", Some(serde_json::json!({"mode": if config.routing_mode == "rules" { "rule" } else { config.routing_mode.as_str() }}))).await?;
+        if !self.proxy_nodes(false).await?.is_empty() {
+            let selected = if config.active_nodes.len() == 1 {
+                config.active_nodes[0].as_str()
+            } else {
+                "Auto"
+            };
+            self.controller(
+                reqwest::Method::PUT,
+                "/proxies/Proxy",
+                Some(serde_json::json!({"name": selected})),
+            )
+            .await?;
+        }
+        Ok(())
     }
 
     pub async fn shutdown(&mut self) -> Result<()> {
@@ -260,6 +533,7 @@ mod tests {
         });
         let mut client = Client::new(directory.clone()).unwrap();
         let mut config = client.config().unwrap();
+        config.tun.enabled = false;
         config.mixed_port = Some(port1);
         client.save(&config).unwrap();
         client.start(None).await.unwrap();
@@ -308,7 +582,7 @@ mod tests {
         let original = std::fs::read_to_string(client.config_path()).unwrap();
         std::fs::write(client.config_path(), format!("{original}\n[[http]]\nenabled = false\nlisten = '127.0.0.1:0'\n")).unwrap();
         let mut config = client.config().unwrap();
-        assert!(!config.tun.enabled);
+        assert!(config.tun.enabled);
         config.mixed_port = Some(17990);
         client.save(&config).unwrap();
         assert!(
@@ -382,4 +656,10 @@ mod tests {
         assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_err());
         std::fs::remove_dir_all(dir).unwrap();
     }
+}
+
+/// Entry point for the signed, launchd-owned XPC helper executable.
+#[cfg(target_os = "macos")]
+pub fn run_native_privileged_helper() -> Result<()> {
+    crate::runtime::run_native_privileged_helper()
 }

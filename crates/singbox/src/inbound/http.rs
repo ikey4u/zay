@@ -872,9 +872,18 @@ async fn route_and_dial(
             io::Error::new(io::ErrorKind::NotFound, "route outbound not found")
         })?
     };
-    let remote = dialer
-        .dial_tcp_with_options(&routed_destination, &connection_options.network)
-        .await?;
+    router.observe_flow(&metadata, &decision);
+    let remote = crate::outbound::with_traffic_attribution(
+        super::traffic_attribution(router, &metadata, &decision),
+        dialer.dial_tcp_with_options(
+            &routed_destination,
+            &connection_options.network,
+        ),
+    )
+    .await
+    .inspect_err(|error| {
+        router.observe_flow_error(&metadata, &decision, "dial", error)
+    })?;
     super::apply_routed_tcp_options(remote, &connection_options)
 }
 
@@ -931,11 +940,24 @@ async fn proxy_connect_tunnel(
             io::Error::new(io::ErrorKind::NotFound, "route outbound not found")
         })?
     };
-    let mut remote = dialer
-        .dial_tcp_with_options(&routed_destination, &connection_options.network)
-        .await?;
+    router.observe_flow(&metadata, &decision);
+    let mut remote = crate::outbound::with_traffic_attribution(
+        super::traffic_attribution(router, &metadata, &decision),
+        dialer.dial_tcp_with_options(
+            &routed_destination,
+            &connection_options.network,
+        ),
+    )
+    .await
+    .inspect_err(|error| {
+        router.observe_flow_error(&metadata, &decision, "dial", error)
+    })?;
     remote = super::apply_routed_tcp_options(remote, &connection_options)?;
-    copy_bidirectional(&mut client, &mut remote).await?;
+    copy_bidirectional(&mut client, &mut remote)
+        .await
+        .inspect_err(|error| {
+            router.observe_flow_error(&metadata, &decision, "relay", error)
+        })?;
     Ok(())
 }
 

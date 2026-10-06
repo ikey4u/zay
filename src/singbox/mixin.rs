@@ -25,6 +25,15 @@ pub fn merge_config(base_json: &str, settings: &Settings) -> Result<String> {
 
 /// Keep EasyTier process bypass + peer bypass + mesh rules ahead of mixin / clash rules.
 fn prioritize_mesh_route_rules(base: &mut Value, settings: &Settings) {
+    let proxy_tag = base
+        .get("outbounds")
+        .and_then(Value::as_array)
+        .filter(|outbounds| outbounds.iter().any(|o| o["tag"] == "Proxy"))
+        .map(|_| "Proxy")
+        .unwrap_or("direct");
+    let health_rules = crate::singbox::builder::mesh_health_check_route_rules(
+        settings, proxy_tag,
+    );
     let process_rules =
         crate::singbox::mesh::easytier_process_bypass_route_rules(settings);
     let peer_rules = crate::singbox::mesh::peer_bypass_route_rules(settings);
@@ -42,11 +51,15 @@ fn prioritize_mesh_route_rules(base: &mut Value, settings: &Settings) {
         return;
     };
     rules.retain(|rule| {
-        !crate::singbox::mesh::is_easytier_process_bypass_route_rule(rule)
+        !health_rules.contains(rule)
+            && !crate::singbox::mesh::is_easytier_process_bypass_route_rule(
+                rule,
+            )
             && !crate::singbox::mesh::is_mesh_route_rule(rule)
             && !crate::singbox::mesh::is_peer_bypass_route_rule(rule, settings)
     });
-    let mut merged = process_rules;
+    let mut merged = health_rules;
+    merged.extend(process_rules);
     merged.extend(peer_rules);
     merged.extend(mesh_rules);
     merged.extend(rules.drain(..));
@@ -129,6 +142,7 @@ mod tests {
         Settings {
             subscriptions: Vec::new(),
             active_nodes: Vec::new(),
+            routing_mode: String::new(),
             data_dir: PathBuf::from("/tmp"),
             mixed_port: 7890,
             allow_lan: false,

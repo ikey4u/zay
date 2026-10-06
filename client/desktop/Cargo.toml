@@ -3,7 +3,12 @@ name = "zay-desktop"
 version = "0.1.0"
 edition = "2024"
 publish = false
+default-run = "zay-desktop"
 license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "zay-desktop-helper"
+path = "src/bin/helper.rs"
 
 # Keep the desktop UI's GPUI graph separate from the networking core.
 [workspace]
@@ -14,12 +19,19 @@ gpui-kit = "=0.7.0"
 gpui = { package = "gpui-pre", version = "=0.3.7" }
 ely-gpui-component = { git = "https://github.com/ZacharyZhang-NY/Ely-GPUI-Components", rev = "cb45f5232f9fdf86453e18ea4991d5ac78a9cc6a" }
 tray-icon = "0.21"
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSImage", "NSResponder"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData"] }
 anyhow = "1"
 async-channel = "2"
-zay = { path = "../..", default-features = false }
+zay = { path = "../..", default-features = false, features = ["desktop-macos-helper"] }
 tokio = { version = "1", features = ["rt-multi-thread", "time", "sync"] }
 serde_json = "1"
 toml = "0.8"
+url = "2"
+# Debug bundles also run away from the build machine (including in the VM).
+# Ely's assets must be embedded instead of read from the host Cargo checkout.
+rust-embed = { version = "8.12", features = ["debug-embed"] }
 
 # Ely names Zed's Git packages. Re-export Kit's pinned snapshots so both
 # libraries share identical App, Window, and Element types.

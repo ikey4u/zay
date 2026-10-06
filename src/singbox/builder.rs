@@ -12,6 +12,20 @@ pub fn build_config(settings: &Settings, has_rules: bool) -> Result<String> {
 }
 
 pub fn build_value(settings: &Settings, has_rules: bool) -> Result<Value> {
+    let nodes = if settings.subscriptions.is_empty() {
+        Vec::new()
+    } else {
+        subscription::load_nodes(settings, settings.bootstrap_proxy.as_ref())?
+    };
+    build_value_with_nodes(settings, has_rules, nodes)
+}
+
+/// Build the same configuration from an explicit inventory, without fetching.
+pub(crate) fn build_value_with_nodes(
+    settings: &Settings,
+    has_rules: bool,
+    nodes: Vec<Value>,
+) -> Result<Value> {
     let tun_enabled = tun_route::singbox_tun_enabled(settings);
     let clash_dns = clash_dns_enabled(settings, tun_enabled, has_rules);
     let outbound_interface = (tun_enabled
@@ -37,10 +51,6 @@ pub fn build_value(settings: &Settings, has_rules: bool) -> Result<Value> {
 
     let mut available_member_tags: Vec<String> = Vec::new();
     if !settings.subscriptions.is_empty() {
-        let nodes = subscription::load_nodes(
-            settings,
-            settings.bootstrap_proxy.as_ref(),
-        )?;
         for node in &nodes {
             if let Some(tag) = node.get("tag").and_then(|t| t.as_str()) {
                 available_member_tags.push(tag.to_string());
@@ -65,9 +75,8 @@ pub fn build_value(settings: &Settings, has_rules: bool) -> Result<Value> {
     };
     if member_tags.is_empty() && !available_member_tags.is_empty() {
         if !settings.active_nodes.is_empty() {
-            eprintln!(
-                "warning: configured active proxy nodes are unavailable; falling back to all {} node(s)",
-                available_member_tags.len()
+            bail!(
+                "Selected proxy nodes are unavailable. Refresh subscriptions and choose another node or Automatic."
             );
         }
         member_tags = available_member_tags;
@@ -90,12 +99,16 @@ pub fn build_value(settings: &Settings, has_rules: bool) -> Result<Value> {
             "type": "selector",
             "tag": "Proxy",
             "outbounds": proxy_members,
-            "default": "Auto"
+            "default": if member_tags.len() == 1 { member_tags[0].as_str() } else { "Auto" },
+            "interrupt_exist_connections": true
         }));
         "Proxy".to_string()
     };
-    let (domain_outbounds, domain_routes) =
-        build_domain_rule_groups(settings, &member_tags, &proxy_final)?;
+    let (domain_outbounds, domain_routes) = build_domain_rule_groups(
+        settings,
+        &available_tags_for_rules(&outbounds),
+        &proxy_final,
+    )?;
     outbounds.extend(domain_outbounds);
 
     let mut endpoints = Vec::new();
@@ -105,10 +118,12 @@ pub fn build_value(settings: &Settings, has_rules: bool) -> Result<Value> {
 
     let include_applications =
         has_rules && rules::applications_present(&settings.singbox_dir());
-    let find_process = include_applications
-        || tun_route::tun_full_capture_mesh_proxy(&settings);
+    // Connection inspection and process routing apply to mixed proxies as well
+    // as TUN. The platform resolver can attribute the current user's sockets.
+    let find_process = true;
 
     let mut route_rules = Vec::new();
+    route_rules.extend(mesh_health_check_route_rules(settings, &proxy_final));
     // EasyTier (in-process) + relay/STUN bypass before mesh/proxy rules.
     route_rules.extend(mesh::easytier_process_bypass_route_rules(settings));
     // Relay/public peer IPs must bypass TUN path (SSH + EasyTier :11010) before mesh 10.x rules.
@@ -123,6 +138,8 @@ pub fn build_value(settings: &Settings, has_rules: bool) -> Result<Value> {
     // Sniff after hijack-dns (TLS SNI / HTTP Host for connections that already have a destination).
     route_rules.extend(sniff_route_rules(settings, tun_enabled));
     route_rules.extend(domain_routes);
+    route_rules.push(json!({"clash_mode": "direct", "action": "route", "outbound": "direct"}));
+    route_rules.push(json!({"clash_mode": "global", "action": "route", "outbound": proxy_final}));
     if let Some(rule) = health_check_route(settings, &proxy_final) {
         route_rules.push(rule);
     }
@@ -192,6 +209,7 @@ pub fn build_value(settings: &Settings, has_rules: bool) -> Result<Value> {
     } else {
         proxy_final.clone()
     };
+    route_rules.push(json!({"clash_mode": "rule", "action": "route", "outbound": route_final}));
 
     let dns_resolver_tag = if clash_dns { "dns-direct" } else { "local-dns" };
 
@@ -245,7 +263,8 @@ pub fn build_value(settings: &Settings, has_rules: bool) -> Result<Value> {
         "experimental": {
             "cache_file": cache_file,
             "clash_api": {
-                "external_controller": "127.0.0.1:0"
+                "external_controller": "127.0.0.1:0",
+                "default_mode": if settings.routing_mode.is_empty() || settings.routing_mode == "rules" { "rule" } else { settings.routing_mode.as_str() }
             }
         }
     });
@@ -257,6 +276,15 @@ pub fn build_value(settings: &Settings, has_rules: bool) -> Result<Value> {
     Ok(root)
 }
 
+fn available_tags_for_rules(outbounds: &[Value]) -> Vec<String> {
+    outbounds
+        .iter()
+        .filter_map(|o| o["tag"].as_str())
+        .filter(|tag| tag.starts_with("sub"))
+        .map(str::to_owned)
+        .collect()
+}
+
 fn health_check_route(settings: &Settings, proxy_tag: &str) -> Option<Value> {
     if proxy_tag == "direct" {
         return None;
@@ -265,11 +293,66 @@ fn health_check_route(settings: &Settings, proxy_tag: &str) -> Option<Value> {
         .ok()?
         .host_str()?
         .to_string();
-    Some(json!({
+    let mut rule = json!({
         "action": "route",
-        "domain": [host],
         "outbound": proxy_tag
-    }))
+    });
+    if let Ok(ip) = host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse::<std::net::IpAddr>()
+    {
+        let bits = if ip.is_ipv4() { 32 } else { 128 };
+        rule["ip_cidr"] = json!([format!("{ip}/{bits}")]);
+    } else {
+        rule["domain"] = json!([host]);
+    }
+    Some(rule)
+}
+
+/// The core hosts EasyTier and health checks in the same process. Only its
+/// health request must enter the selected proxy before the Mesh process bypass.
+pub(crate) fn mesh_health_check_route_rules(
+    settings: &Settings,
+    proxy_tag: &str,
+) -> Vec<Value> {
+    let Some(process_rule) =
+        mesh::easytier_process_bypass_route_rules(settings)
+            .into_iter()
+            .next()
+    else {
+        return Vec::new();
+    };
+    let Some(mut health_rule) = health_check_route(settings, proxy_tag) else {
+        return Vec::new();
+    };
+    let Some(port) = reqwest::Url::parse(&settings.health_check_url)
+        .ok()
+        .and_then(|url| url.port_or_known_default())
+    else {
+        return Vec::new();
+    };
+    for key in ["inbound", "process_name"] {
+        health_rule[key] = process_rule[key].clone();
+    }
+    health_rule["network"] = json!("tcp");
+    health_rule["port"] = json!([port]);
+    let mut rules = Vec::new();
+    if health_rule.get("domain").is_some() {
+        // Recover Host/SNI before the process bypass even when the upstream
+        // resolver supplied an address absent from our reverse DNS cache.
+        rules.push(json!({
+            "action": "sniff",
+            "inbound": process_rule["inbound"],
+            "process_name": process_rule["process_name"],
+            "network": "tcp",
+            "port": [port],
+            "sniffer": ["http", "tls"],
+            "timeout": "2s"
+        }));
+    }
+    rules.push(health_rule);
+    rules
 }
 
 fn build_domain_rule_groups(
@@ -304,6 +387,17 @@ fn build_domain_rule_groups(
         }
         if policy.outbounds.is_empty() {
             bail!("proxy.domain_rule {name:?} requires at least one outbound");
+        }
+        if policy.outbounds.len() == 1
+            && matches!(policy.outbounds[0].as_str(), "direct" | "Proxy")
+        {
+            let outbound = if policy.outbounds[0] == "Proxy" {
+                fallback_outbound
+            } else {
+                "direct"
+            };
+            routes.push(custom_rule_route(policy, outbound)?);
+            continue;
         }
         let resolved: Vec<&str> = policy
             .outbounds
@@ -354,7 +448,7 @@ fn build_domain_rule_groups(
     Ok((outbounds, routes))
 }
 
-fn custom_rule_route(
+pub(crate) fn custom_rule_route(
     policy: &crate::settings::DomainRuleFile,
     outbound: &str,
 ) -> Result<Value> {
@@ -462,6 +556,7 @@ fn mixed_inbounds(settings: &Settings) -> Vec<Value> {
     if settings.allow_lan {
         return vec![json!({
             "type": "mixed",
+            "reuse_addr": true,
             "tag": "mixed-in",
             "listen": "0.0.0.0",
             "listen_port": port
@@ -469,6 +564,7 @@ fn mixed_inbounds(settings: &Settings) -> Vec<Value> {
     }
     let mut inbounds = vec![json!({
         "type": "mixed",
+        "reuse_addr": true,
         "tag": "mixed-in",
         "listen": "127.0.0.1",
         "listen_port": port
@@ -476,6 +572,7 @@ fn mixed_inbounds(settings: &Settings) -> Vec<Value> {
     // Firefox/GNOME often use "localhost" → ::1; listen there too (TUN apps should use No Proxy).
     inbounds.push(json!({
         "type": "mixed",
+        "reuse_addr": true,
         "tag": "mixed-in-v6",
         "listen": "::1",
         "listen_port": port
@@ -601,6 +698,7 @@ mod tests {
         let settings = Settings {
             subscriptions: Vec::new(),
             active_nodes: Vec::new(),
+            routing_mode: String::new(),
             data_dir: PathBuf::from("/tmp/zay-singbox-test"),
             mixed_port: 17890,
             allow_lan: false,
@@ -646,6 +744,7 @@ mod tests {
         let settings = Settings {
             subscriptions: Vec::new(),
             active_nodes: Vec::new(),
+            routing_mode: String::new(),
             data_dir: PathBuf::from("/tmp/zay-singbox-test"),
             mixed_port: 17890,
             allow_lan: false,
@@ -682,6 +781,7 @@ mod tests {
         let settings = Settings {
             subscriptions: Vec::new(),
             active_nodes: Vec::new(),
+            routing_mode: String::new(),
             data_dir: PathBuf::from("/tmp/zay-singbox-test"),
             mixed_port: 17890,
             allow_lan: false,
@@ -748,6 +848,7 @@ mod tests {
         let mut settings = Settings {
             subscriptions: Vec::new(),
             active_nodes: Vec::new(),
+            routing_mode: String::new(),
             data_dir: PathBuf::from("/tmp/zay-singbox-test"),
             mixed_port: 17890,
             allow_lan: false,
@@ -796,6 +897,38 @@ mod tests {
         assert!(json.contains(&tun_route::tun_address(&settings)));
         assert_eq!(tun_route::tun_route_address(&settings), None);
         assert!(!json.contains("\"system\": false"));
+
+        // A health request from the core must beat its EasyTier bypass.
+        let value: Value = serde_json::from_str(&json).unwrap();
+        let routes = value["route"]["rules"].as_array().unwrap();
+        let bypass = routes
+            .iter()
+            .position(mesh::is_easytier_process_bypass_route_rule)
+            .unwrap();
+        assert_eq!(routes[0]["action"], "sniff");
+        assert_eq!(routes[1]["domain"], json!(["www.gstatic.com"]));
+        assert_eq!(routes[1]["outbound"], "Proxy");
+        assert!(1 < bypass);
+        assert_eq!(routes[1]["port"], json!([443]));
+        assert_eq!(routes[1]["process_name"], routes[bypass]["process_name"]);
+
+        settings.health_check_url = "http://192.0.2.11/generate_204".into();
+        let health = mesh_health_check_route_rules(&settings, "Proxy");
+        assert_eq!(health.len(), 1);
+        assert_eq!(health[0]["ip_cidr"], json!(["192.0.2.11/32"]));
+        assert_eq!(health[0]["port"], json!([80]));
+        settings.health_check_url = "http://[2001:db8::11]/".into();
+        let health = mesh_health_check_route_rules(&settings, "Proxy");
+        assert_eq!(health[0]["ip_cidr"], json!(["2001:db8::11/128"]));
+
+        settings.proxy_mixin = Some(
+            r#"{"route":{"rules":[{"action":"route","outbound":"direct"}]}}"#
+                .into(),
+        );
+        let merged =
+            crate::singbox::mixin::merge_config(&json, &settings).unwrap();
+        let merged: Value = serde_json::from_str(&merged).unwrap();
+        assert_eq!(merged["route"]["rules"][0], health[0]);
     }
 
     #[test]
@@ -803,6 +936,7 @@ mod tests {
         let settings = Settings {
             subscriptions: Vec::new(),
             active_nodes: Vec::new(),
+            routing_mode: String::new(),
             data_dir: PathBuf::from("/tmp/zay-singbox-test"),
             mixed_port: 17890,
             allow_lan: false,
@@ -855,6 +989,7 @@ mod tests {
         let mut settings = Settings {
             subscriptions: Vec::new(),
             active_nodes: Vec::new(),
+            routing_mode: String::new(),
             data_dir: PathBuf::from("/tmp/zay-singbox-test"),
             mixed_port: 17890,
             allow_lan: false,
@@ -962,6 +1097,7 @@ mod tests {
         let mut settings = Settings {
             subscriptions: Vec::new(),
             active_nodes: vec!["sub0-backup-node".into()],
+            routing_mode: String::new(),
             data_dir: PathBuf::from("/tmp/zay-singbox-test"),
             mixed_port: 17890,
             allow_lan: false,
@@ -985,12 +1121,87 @@ mod tests {
             .find(|outbound| outbound["tag"] == "Auto")
             .unwrap();
         assert_eq!(auto["outbounds"], json!(["sub0-backup-node"]));
+        let selector = config["outbounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["tag"] == "Proxy")
+            .unwrap();
+        assert_eq!(selector["default"], "sub0-backup-node");
+        settings.routing_mode = "global".into();
+        settings.domain_rule = vec![
+            DomainRuleFile {
+                enabled: true,
+                name: "Independent pool".into(),
+                host: vec!["example.com".into()],
+                outbounds: vec!["sub0-test-node".into()],
+                ..Default::default()
+            },
+            DomainRuleFile {
+                enabled: true,
+                name: "Direct exception".into(),
+                host: vec!["local.example".into()],
+                outbounds: vec!["direct".into()],
+                ..Default::default()
+            },
+        ];
+        let global = build_value(&settings, true).unwrap();
+        assert_eq!(
+            global["experimental"]["clash_api"]["default_mode"],
+            "global"
+        );
+        let routes = global["route"]["rules"].as_array().unwrap();
+        let global_index = routes
+            .iter()
+            .position(|r| r["clash_mode"] == "global")
+            .unwrap();
+        assert_eq!(routes[global_index]["outbound"], "Proxy");
+        assert!(
+            routes
+                .iter()
+                .position(|r| r["domain"] == json!(["local.example"])
+                    && r["outbound"] == "direct")
+                .unwrap()
+                < global_index
+        );
+        let independent = global["outbounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["tag"] == "domain-proxy:Independent pool")
+            .unwrap();
+        assert_eq!(independent["outbounds"], json!(["sub0-test-node"]));
         assert!(
             config["outbounds"]
                 .as_array()
                 .unwrap()
                 .iter()
                 .any(|outbound| outbound["tag"] == "sub0-test-node")
+        );
+        settings.active_nodes = vec!["sub0-unavailable-node".into()];
+        assert!(
+            build_value(&settings, false)
+                .unwrap_err()
+                .to_string()
+                .contains("Selected proxy nodes are unavailable")
+        );
+        settings.subscriptions.clear();
+        settings.active_nodes.clear();
+        settings.domain_rule = vec![DomainRuleFile {
+            enabled: true,
+            name: "Selected pool".into(),
+            host: vec!["example.com".into()],
+            outbounds: vec!["Proxy".into()],
+            ..Default::default()
+        }];
+        let empty_pool = build_value(&settings, false).unwrap();
+        assert!(
+            empty_pool["route"]["rules"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|rule| rule["domain"] == json!(["example.com"])
+                    && rule["outbound"] == "direct")
         );
     }
 }
