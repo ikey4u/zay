@@ -47,6 +47,9 @@ targets:
         embed: true
         codeSign: true
       - sdk: NetworkExtension.framework
+      - sdk: AVFoundation.framework
+      - sdk: PhotosUI.framework
+      - sdk: Vision.framework
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.zay.ios

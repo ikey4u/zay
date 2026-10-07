@@ -9,6 +9,9 @@ use singbox_core::{
     option::User,
 };
 
+#[path = "s5/share.rs"]
+mod share;
+
 #[derive(Parser)]
 #[command(
     version,
@@ -18,6 +21,22 @@ struct Args {
     /// Address to listen on (use [::1]:1080 for IPv6).
     #[arg(short, long, default_value = "127.0.0.1:1080", value_parser = listen_address)]
     listen: SocketAddr,
+
+    /// Hostname or IP address phones should connect to (for example, your public server IP).
+    #[arg(long, value_parser = share::advertise_host)]
+    advertise: Option<String>,
+
+    /// HTTP port for QR configuration imports (zero selects an available port).
+    #[arg(long, default_value_t = 1081)]
+    import_port: u16,
+
+    /// Keep subscription URLs stable across restarts (32–64 URL-safe characters).
+    #[arg(long, env = "S5_IMPORT_TOKEN", hide_env_values = true, value_parser = share::import_token)]
+    import_token: Option<String>,
+
+    /// QR payload format; use all to print every available format.
+    #[arg(long, value_enum, default_value = "clash")]
+    qr: share::QrFormat,
 
     /// Require this username and password for all connections.
     #[arg(long, env = "S5_USERNAME", requires = "password", value_parser = credential)]
@@ -99,11 +118,45 @@ fn shutdown_signal() -> io::Result<impl Future<Output = io::Result<()>>> {
 async fn main() -> Result<()> {
     let args = Args::parse();
     let shutdown = shutdown_signal().context("registering shutdown signals")?;
+    let host = args
+        .advertise
+        .clone()
+        .unwrap_or_else(|| share::local_host(args.listen));
+    let import = share::ImportServer::bind(
+        SocketAddr::new(args.listen.ip(), args.import_port),
+        &host,
+        args.listen.port(),
+        args.username.as_deref(),
+        args.password.as_deref(),
+        args.import_token.as_deref(),
+    )
+    .await
+    .context("starting QR import server")?;
     let mut server =
         SocksServer::new(args.options()?).context("creating SOCKS server")?;
     server.start().await.context("starting SOCKS server")?;
     eprintln!("s5 listening on {} (TCP and UDP)", args.listen);
-    let signal_result = shutdown.await;
+    match import.print(args.qr) {
+        Ok(()) => {
+            if args.listen.ip().is_loopback() {
+                eprintln!(
+                    "This listener is local only. Use --listen 0.0.0.0:1080 and --advertise HOST for mobile access."
+                );
+            }
+        }
+        Err(error) => {
+            eprintln!("Could not print the server QR code: {error:#}")
+        }
+    }
+    let mut import_task = tokio::spawn(import.run());
+    let signal_result = tokio::select! {
+        result = shutdown => result,
+        result = &mut import_task => Err(io::Error::other(format!("QR import server stopped: {result:?}"))),
+    };
+    if !import_task.is_finished() {
+        import_task.abort();
+        let _ = import_task.await;
+    }
     // Close active TCP connections and UDP associations even if signal
     // handling fails, rather than leaving cleanup to process termination.
     let close_result = server.close().await;

@@ -24,7 +24,10 @@ struct Server {
 
 fn command() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_s5"));
-    command.env_remove("S5_USERNAME").env_remove("S5_PASSWORD");
+    command
+        .env_remove("S5_USERNAME")
+        .env_remove("S5_PASSWORD")
+        .env_remove("S5_IMPORT_TOKEN");
     command
 }
 
@@ -34,7 +37,14 @@ impl Server {
         let address = reservation.local_addr().unwrap();
         let mut command = command();
         command
-            .args(["--listen", &address.to_string(), "--udp-timeout", "5"])
+            .args([
+                "--listen",
+                &address.to_string(),
+                "--udp-timeout",
+                "5",
+                "--import-port",
+                "0",
+            ])
             .stdout(Stdio::null());
         if authenticated {
             command
@@ -187,13 +197,22 @@ fn rejects_invalid_arguments_and_an_occupied_listen_port() {
         vec!["--username", "alice", "--password", ""],
         vec!["--listen", "127.0.0.1:0"],
         vec!["--udp-timeout", "0"],
+        vec!["--advertise", "0.0.0.0"],
+        vec!["--advertise", "http://example.com"],
+        vec!["--import-token", "short"],
+        vec!["--qr", "unknown"],
     ] {
         let output = command().args(args).output().unwrap();
         assert_eq!(output.status.code(), Some(2));
     }
     let reservation = StdTcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let output = command()
-        .args(["--listen", &reservation.local_addr().unwrap().to_string()])
+        .args([
+            "--listen",
+            &reservation.local_addr().unwrap().to_string(),
+            "--import-port",
+            "0",
+        ])
         .output()
         .unwrap();
     assert!(!output.status.success());

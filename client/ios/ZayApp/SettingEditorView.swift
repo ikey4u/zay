@@ -1,5 +1,7 @@
 import SwiftUI
 import UIKit
+import AVFoundation
+import PhotosUI
 
 struct SettingEditorView: View {
     let field: SettingField
@@ -7,6 +9,9 @@ struct SettingEditorView: View {
     @EnvironmentObject private var configStore: ConfigStore
     @FocusState private var focused: Bool
     @State private var draft: String = ""
+    @State private var showingScanner = false
+    @State private var scannerError: String?
+    @State private var qrPhoto: PhotosPickerItem?
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -38,6 +43,20 @@ struct SettingEditorView: View {
                 Text(field.subtitle)
                     .font(.custom(ZayTheme.captionFont, size: 13))
                     .foregroundStyle(ZayTheme.inkSecondary)
+            }
+
+            if field == .proxyURL {
+                Section {
+                    Button {
+                        focused = false
+                        Task { await openScanner() }
+                    } label: {
+                        Label("Scan server QR code", systemImage: "qrcode.viewfinder")
+                    }
+                    PhotosPicker(selection: $qrPhoto, matching: .images) {
+                        Label("Import QR code from photo", systemImage: "photo")
+                    }
+                }
             }
 
             if !draft.isEmpty {
@@ -86,6 +105,50 @@ struct SettingEditorView: View {
         .onDisappear {
             commit()
         }
+        .sheet(isPresented: $showingScanner) {
+            ProxyQRScanner { url in
+                draft = url
+                commit()
+                showingScanner = false
+            }
+        }
+        .onChange(of: qrPhoto) { item in
+            guard let item else { return }
+            focused = false
+            Task {
+                defer { qrPhoto = nil }
+                do {
+                    guard let data = try await item.loadTransferable(type: Data.self) else {
+                        scannerError = "Could not read the selected photo. Choose another photo or paste the import URL."
+                        return
+                    }
+                    let url = try await Task.detached(priority: .userInitiated) {
+                        try ProxyQRCode.readPhoto(data)
+                    }.value
+                    draft = url
+                    commit()
+                } catch {
+                    scannerError = error.localizedDescription
+                }
+            }
+        }
+        .alert("Cannot import QR code", isPresented: Binding(
+            get: { scannerError != nil },
+            set: { if !$0 { scannerError = nil } }
+        )) {
+            Button("OK", role: .cancel) { scannerError = nil }
+        } message: {
+            Text(scannerError ?? "")
+        }
+    }
+
+    @MainActor
+    private func openScanner() async {
+        guard await AVCaptureDevice.requestAccess(for: .video) else {
+            scannerError = "Allow camera access for Zay in Settings to scan a server QR code."
+            return
+        }
+        showingScanner = true
     }
 
     private func commit() {

@@ -22,6 +22,10 @@
 	<string>1</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>Scan a server QR code to import its proxy configuration.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Connect to proxy servers and import configurations on your local network.</string>
 	<key>UIBackgroundModes</key>
 	<array/>
 	<key>UILaunchScreen</key>

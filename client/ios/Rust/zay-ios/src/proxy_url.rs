@@ -36,6 +36,11 @@ pub(crate) fn redacted_proxy_url(raw: &str) -> String {
         return format!("<redacted len={}>", trimmed.len());
     };
     let scheme = parsed.scheme();
+    if matches!(scheme, "socks" | "socks5")
+        && legacy_socks_node(trimmed).is_some()
+    {
+        return format!("{scheme}:<redacted>");
+    }
     if !matches!(
         scheme,
         "http"
@@ -79,6 +84,8 @@ pub fn resolve_proxy(
     if raw.is_empty() {
         bail!("proxy_url is empty");
     }
+    let normalized = normalize_share_link(raw)?;
+    let raw = normalized.as_deref().unwrap_or(raw);
 
     let lower = raw.to_ascii_lowercase();
     if lower.starts_with("socks5://") || lower.starts_with("socks://") {
@@ -164,12 +171,147 @@ fn looks_like_subscription_url(raw: &str) -> bool {
     path.len() > 1 && path != "/"
 }
 
+/// Unwrap app import links and Telegram proxy links before network access.
+fn normalize_share_link(raw: &str) -> Result<Option<String>> {
+    let Ok(url) = url::Url::parse(raw) else {
+        return Ok(None);
+    };
+    let scheme = url.scheme();
+    let quantumult = scheme == "quantumult-x"
+        || scheme == "https"
+            && url.host_str() == Some("quantumult.app")
+            && url.path() == "/x/open-app/add-resource";
+    if quantumult {
+        if scheme == "quantumult-x"
+            && (url.host_str().is_some() || url.path() != "/add-resource")
+        {
+            bail!("unsupported Quantumult X import action");
+        }
+        let resource = url
+            .query_pairs()
+            .find(|(key, _)| key == "remote-resource")
+            .map(|(_, value)| value.into_owned())
+            .context("Quantumult X resource missing")?;
+        let resource: Value = serde_json::from_str(&resource)
+            .context("parse Quantumult X resource")?;
+        let servers = resource["server_remote"]
+            .as_array()
+            .context("Quantumult X server subscription missing")?;
+        if servers.len() != 1 {
+            bail!("import one Quantumult X server subscription at a time");
+        }
+        let target = servers[0]
+            .as_str()
+            .context("invalid Quantumult X server resource")?
+            .split(',')
+            .next()
+            .unwrap()
+            .trim();
+        let endpoint = url::Url::parse(target)
+            .context("parse Quantumult X subscription URL")?;
+        if !matches!(endpoint.scheme(), "http" | "https")
+            || endpoint.host_str().is_none()
+        {
+            bail!(
+                "Quantumult X imports require an HTTP or HTTPS subscription URL"
+            );
+        }
+        return Ok(Some(target.to_owned()));
+    }
+    if matches!(scheme, "http" | "https") && url.path().ends_with('/') {
+        let token = url.path().trim_matches('/');
+        if (32..=64).contains(&token.len())
+            && token.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')
+            })
+        {
+            // s5's browser page also serves a Clash profile beside the page.
+            return Ok(Some(url.join("clash.yaml")?.into()));
+        }
+    }
+    if matches!(scheme, "clash" | "clashmeta" | "cmfa" | "sing-box") {
+        let action = if scheme == "sing-box" {
+            "import-remote-profile"
+        } else {
+            "install-config"
+        };
+        if url.host_str() != Some(action) {
+            bail!("unsupported app import action");
+        }
+        let target = url
+            .query_pairs()
+            .find(|(key, _)| key == "url")
+            .map(|(_, value)| value.into_owned())
+            .context("app import URL missing url parameter")?;
+        let target_url = url::Url::parse(&target)
+            .context("parse subscription import URL")?;
+        if !matches!(target_url.scheme(), "http" | "https")
+            || target_url.host_str().is_none()
+        {
+            bail!("app imports require an HTTP or HTTPS subscription URL");
+        }
+        return Ok(Some(target));
+    }
+    let telegram = scheme == "tg" && url.host_str() == Some("socks")
+        || matches!(scheme, "http" | "https")
+            && matches!(
+                url.host_str(),
+                Some("t.me" | "telegram.me" | "telegram.dog")
+            )
+            && url.path().trim_end_matches('/') == "/socks";
+    if !telegram {
+        return Ok(None);
+    }
+    let parameter = |name: &str| {
+        url.query_pairs()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.into_owned())
+    };
+    let host = parameter("server").context("Telegram proxy server missing")?;
+    let port: u16 = parameter("port")
+        .context("Telegram proxy port missing")?
+        .parse()
+        .context("invalid Telegram proxy port")?;
+    if port == 0 {
+        bail!("Telegram proxy port must be between 1 and 65535");
+    }
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    let host = if host.parse::<std::net::Ipv6Addr>().is_ok() {
+        format!("[{host}]")
+    } else {
+        host.to_owned()
+    };
+    let mut proxy = url::Url::parse("socks5://localhost:1080")?;
+    proxy
+        .set_host(Some(&host))
+        .context("invalid Telegram proxy server")?;
+    proxy
+        .set_port(Some(port))
+        .map_err(|_| anyhow!("invalid Telegram proxy port"))?;
+    if let Some(username) = parameter("user") {
+        proxy
+            .set_username(&username)
+            .map_err(|_| anyhow!("invalid Telegram proxy username"))?;
+    }
+    if let Some(password) = parameter("pass") {
+        proxy
+            .set_password(Some(&password))
+            .map_err(|_| anyhow!("invalid Telegram proxy password"))?;
+    }
+    Ok(Some(proxy.into()))
+}
+
 fn parse_socks_or_http(raw: &str, http: bool) -> Result<Value> {
+    if !http && let Some(node) = legacy_socks_node(raw) {
+        return node;
+    }
     let u = url::Url::parse(raw).context("parse proxy URI")?;
     let host = u
         .host_str()
         .filter(|h| !h.is_empty())
         .context("proxy host missing")?
+        .trim_start_matches('[')
+        .trim_end_matches(']')
         .to_string();
     let port = u.port().unwrap_or(if http { 80 } else { 1080 });
     let mut ob = json!({
@@ -183,17 +325,87 @@ fn parse_socks_or_http(raw: &str, http: bool) -> Result<Value> {
             .unwrap()
             .insert("version".into(), json!("5"));
     }
-    if !u.username().is_empty() {
+    let username =
+        urlencoding::decode(u.username()).context("decode proxy username")?;
+    let password = u
+        .password()
+        .map(urlencoding::decode)
+        .transpose()
+        .context("decode proxy password")?;
+    // v2ray clients encode user:password as one base64 userinfo component.
+    if !http
+        && password.is_none()
+        && !username.is_empty()
+        && let Ok(decoded) = decode_b64(&username)
+        && let Some((username, password)) = decoded.split_once(':')
+    {
+        if !username.is_empty() {
+            ob["username"] = json!(username);
+            ob["password"] = json!(password);
+        }
+        return Ok(ob);
+    }
+    if !username.is_empty() {
         ob.as_object_mut()
             .unwrap()
-            .insert("username".into(), json!(u.username()));
+            .insert("username".into(), json!(username));
     }
-    if let Some(pass) = u.password() {
+    if let Some(pass) = password {
         ob.as_object_mut()
             .unwrap()
             .insert("password".into(), json!(pass));
     }
     Ok(ob)
+}
+
+/// Shadowrocket wraps the entire SOCKS authority in base64, unlike v2rayNG's
+/// base64 userinfo. Parse before URL normalization and preserve literal '%'.
+fn legacy_socks_node(raw: &str) -> Option<Result<Value>> {
+    let (_, payload) = raw.split_once("://")?;
+    let payload = payload.split(['?', '#']).next()?;
+    if payload.contains(['@', ':']) {
+        return None;
+    }
+    let decoded = decode_b64(payload).ok()?;
+    let (credentials, endpoint) = decoded
+        .rsplit_once('@')
+        .map_or((None, decoded.as_str()), |(credentials, endpoint)| {
+            (Some(credentials), endpoint)
+        });
+    if !endpoint.contains(':') {
+        return None;
+    }
+    Some((|| {
+        let endpoint = url::Url::parse(&format!("socks5://{endpoint}"))?;
+        let host = endpoint
+            .host_str()
+            .context("SOCKS host missing")?
+            .trim_start_matches('[')
+            .trim_end_matches(']');
+        let port = endpoint
+            .port()
+            .filter(|port| *port != 0)
+            .context("SOCKS port missing or invalid")?;
+        if !endpoint.username().is_empty()
+            || endpoint.password().is_some()
+            || endpoint.query().is_some()
+            || endpoint.fragment().is_some()
+            || !matches!(endpoint.path(), "" | "/")
+        {
+            bail!("invalid encoded SOCKS endpoint");
+        }
+        let mut node = json!({"type":"socks", "tag":"proxy-node", "version":"5", "server":host, "server_port":port});
+        if let Some(credentials) = credentials {
+            let (user, pass) = credentials
+                .split_once(':')
+                .context("invalid encoded SOCKS credentials")?;
+            if !user.is_empty() || !pass.is_empty() {
+                node["username"] = json!(user);
+                node["password"] = json!(pass);
+            }
+        }
+        Ok(node)
+    })())
 }
 
 fn fetch_clash_subscription(
@@ -222,7 +434,7 @@ fn fetch_clash_subscription(
     if looks_like_invalid_subscription_body(&body) {
         bail!("subscription returned HTML or empty body");
     }
-    let nodes = convert_clash_yaml(&body)?;
+    let nodes = convert_subscription(&body)?;
     if let Some(dir) = cache_dir
         && let Err(error) = save_subscription_cache(dir, url, &body)
     {
@@ -269,7 +481,7 @@ fn load_subscription_cache(dir: &Path, url: &str) -> Result<Vec<Value>> {
     if looks_like_invalid_subscription_body(&body) {
         bail!("subscription cache body invalid");
     }
-    let nodes = convert_clash_yaml(&body)?;
+    let nodes = convert_subscription(&body)?;
     tracing::info!(
         "loaded {} outbound(s) from subscription cache {}",
         nodes.len(),
@@ -307,6 +519,192 @@ fn convert_clash_yaml(raw: &str) -> Result<Vec<Value>> {
     }
     tracing::info!("subscription produced {} outbound(s)", out.len());
     Ok(out)
+}
+
+fn convert_subscription(raw: &str) -> Result<Vec<Value>> {
+    let raw = raw.trim();
+    if raw.lines().any(|line| {
+        line.split_once('=')
+            .is_some_and(|(key, _)| key.trim() == "socks5")
+    }) {
+        return convert_quantumult_servers(raw);
+    }
+    if raw.starts_with('{') {
+        let document: Value =
+            serde_json::from_str(raw).context("parse JSON subscription")?;
+        if document.get("proxies").is_some() {
+            return convert_clash_yaml(raw);
+        }
+        let outbounds = document
+            .get("outbounds")
+            .and_then(Value::as_array)
+            .context("JSON profile missing outbounds")?;
+        let mut nodes = Vec::new();
+        for outbound in outbounds {
+            if outbound["type"].as_str().is_some()
+                && outbound["server"].as_str().is_some()
+            {
+                // Import proxy nodes, leaving tunnel, DNS, routing, and groups
+                // to Zay's own configuration builder.
+                let mut node = outbound.clone();
+                if node["tag"].as_str().is_none() {
+                    node["tag"] = json!(format!("proxy-node-{}", nodes.len()));
+                }
+                nodes.push(node);
+            } else if outbound["protocol"] == "socks"
+                && let Some(servers) =
+                    outbound["settings"]["servers"].as_array()
+            {
+                for server in servers {
+                    let host = server["address"]
+                        .as_str()
+                        .context("Xray SOCKS server address missing")?;
+                    let port = server["port"]
+                        .as_u64()
+                        .filter(|port| (1..=65535).contains(port))
+                        .context("invalid Xray SOCKS server port")?;
+                    let mut node = json!({ "type": "socks", "version": "5", "tag": format!("proxy-node-{}", nodes.len()), "server": host, "server_port": port });
+                    if let Some(user) = server["users"]
+                        .as_array()
+                        .and_then(|users| users.first())
+                    {
+                        node["username"] = user["user"].clone();
+                        node["password"] = user["pass"].clone();
+                    }
+                    nodes.push(node);
+                }
+            }
+        }
+        if nodes.is_empty() {
+            bail!("JSON subscription contains no proxy nodes");
+        }
+        // Imported tags must not collide with Zay's Proxy/Auto/direct nodes.
+        // Retain chains between imported proxies, while Zay supplies DNS.
+        let mut tags = std::collections::HashMap::new();
+        for (index, node) in nodes.iter().enumerate() {
+            let tag = node["tag"].as_str().context("proxy tag missing")?;
+            if tags
+                .insert(tag.to_owned(), format!("sub0-json-{index}-{tag}"))
+                .is_some()
+            {
+                bail!("JSON subscription contains duplicate proxy tags");
+            }
+        }
+        for node in &mut nodes {
+            let tag = node["tag"].as_str().unwrap();
+            let tag = tags[tag].clone();
+            node["tag"] = json!(tag);
+            node.as_object_mut().unwrap().remove("domain_resolver");
+            if let Some(detour) = node["detour"].as_str() {
+                if let Some(imported) = tags.get(detour) {
+                    node["detour"] = json!(imported);
+                } else if detour != "direct" {
+                    bail!(
+                        "JSON proxy detour references a node outside the imported proxies"
+                    );
+                }
+            }
+        }
+        return Ok(nodes);
+    }
+    let text = if raw.lines().any(|line| line.trim().contains("://")) {
+        raw.to_owned()
+    } else {
+        decode_b64(raw).unwrap_or_else(|_| raw.to_owned())
+    };
+    let is_node_uri = |line: &str| {
+        [
+            "socks://",
+            "socks5://",
+            "ss://",
+            "vmess://",
+            "vless://",
+            "trojan://",
+        ]
+        .iter()
+        .any(|scheme| line.starts_with(scheme))
+    };
+    if text.lines().any(|line| is_node_uri(line.trim())) {
+        let mut nodes = Vec::new();
+        for line in text
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        {
+            if !is_node_uri(line) {
+                bail!("unsupported URI in proxy subscription");
+            }
+            let OutboundSpec::Single(mut node) =
+                resolve_proxy(line, None, false)?
+            else {
+                bail!("expected a proxy node URI");
+            };
+            node["tag"] = json!(format!("proxy-node-{}", nodes.len()));
+            nodes.push(node);
+        }
+        return Ok(nodes);
+    }
+    convert_clash_yaml(raw)
+}
+
+fn convert_quantumult_servers(raw: &str) -> Result<Vec<Value>> {
+    let mut nodes = Vec::new();
+    for line in raw
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+    {
+        let mut fields = line.split(',').map(str::trim);
+        let first = fields.next().unwrap();
+        let (kind, endpoint) = first
+            .split_once('=')
+            .context("invalid Quantumult X server")?;
+        if kind.trim() != "socks5" {
+            bail!("unsupported Quantumult X server type");
+        }
+        let mut node = parse_socks_or_http(
+            &format!("socks5://{}", endpoint.trim()),
+            false,
+        )?;
+        let endpoint_url =
+            url::Url::parse(&format!("socks5://{}", endpoint.trim()))?;
+        if endpoint_url.port().filter(|port| *port != 0).is_none()
+            || !endpoint_url.username().is_empty()
+            || endpoint_url.password().is_some()
+            || !matches!(endpoint_url.path(), "" | "/")
+            || endpoint_url.query().is_some()
+            || endpoint_url.fragment().is_some()
+        {
+            bail!("invalid Quantumult X SOCKS endpoint");
+        }
+        for field in fields {
+            let (key, value) = field
+                .split_once('=')
+                .context("invalid Quantumult X server field")?;
+            let value = value.trim();
+            match key.trim() {
+                "username" | "password" => {
+                    node[key.trim()] = json!(value);
+                }
+                "over-tls" if value != "false" => {
+                    bail!("SOCKS over TLS is unsupported")
+                }
+                "over-tls" | "udp-relay" | "fast-open" | "tag" => {}
+                _ => bail!("unsupported Quantumult X server field"),
+            }
+        }
+        if node.get("username").is_some() != node.get("password").is_some() {
+            bail!(
+                "Quantumult X SOCKS credentials require username and password"
+            );
+        }
+        node["tag"] = json!(format!("sub0-quantumult-{}", nodes.len()));
+        nodes.push(node);
+    }
+    if nodes.is_empty() {
+        bail!("Quantumult X subscription contains no servers");
+    }
+    Ok(nodes)
 }
 
 fn convert_clash_proxy(proxy: &YamlValue, idx: usize) -> Result<Option<Value>> {
@@ -767,7 +1165,8 @@ fn parse_trojan(raw: &str) -> Result<Value> {
 }
 
 fn decode_b64(s: &str) -> Result<String> {
-    let s = s.trim();
+    let compact = s.split_whitespace().collect::<String>();
+    let s = compact.as_str();
     let engine = base64::engine::general_purpose::STANDARD_NO_PAD;
     let bytes = engine
         .decode(s)
@@ -786,7 +1185,259 @@ fn urlencoding_decode(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::redacted_proxy_url;
+    use base64::Engine;
+
+    use super::{
+        OutboundSpec, convert_clash_yaml, convert_subscription,
+        normalize_share_link, redacted_proxy_url, resolve_proxy,
+    };
+
+    #[test]
+    fn shadowrocket_nodes_preserve_literal_credentials_and_redact_them() {
+        for payload in [
+            "alice:p%20/λ@[2001:db8::5]:2345",
+            ":@host:2345",
+            "host:2345",
+        ] {
+            for scheme in ["socks", "socks5"] {
+                let link = format!(
+                    "{scheme}://{}?remarks=s5",
+                    base64::engine::general_purpose::URL_SAFE_NO_PAD
+                        .encode(payload)
+                );
+                let OutboundSpec::Single(proxy) =
+                    resolve_proxy(&link, None, false).unwrap()
+                else {
+                    panic!("expected one proxy");
+                };
+                assert_eq!(proxy["server_port"], 2345);
+                assert_eq!(
+                    redacted_proxy_url(&link),
+                    format!("{scheme}:<redacted>")
+                );
+                if payload.starts_with("alice") {
+                    assert_eq!(proxy["server"], "2001:db8::5");
+                    assert_eq!(proxy["username"], "alice");
+                    assert_eq!(proxy["password"], "p%20/λ");
+                } else {
+                    assert!(proxy.get("username").is_none());
+                }
+            }
+        }
+        let invalid = format!(
+            "socks://{}?remarks=s5",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode("alice:secret@host:0")
+        );
+        assert!(resolve_proxy(&invalid, None, false).is_err());
+        assert_eq!(redacted_proxy_url(&invalid), "socks:<redacted>");
+    }
+
+    #[test]
+    fn quantumult_import_links_and_server_snippets() {
+        let resource = serde_json::json!({"server_remote":["http://host:1081/token/quantumult-x.txt, tag=s5, enabled=true"]}).to_string();
+        for prefix in [
+            "quantumult-x:///add-resource",
+            "https://quantumult.app/x/open-app/add-resource",
+        ] {
+            let link = format!(
+                "{prefix}?remote-resource={}",
+                urlencoding::encode(&resource)
+            );
+            assert_eq!(
+                normalize_share_link(&link).unwrap().unwrap(),
+                "http://host:1081/token/quantumult-x.txt"
+            );
+        }
+        assert!(
+            normalize_share_link(
+                "quantumult-x:///update-configuration?remote-resource=x"
+            )
+            .is_err()
+        );
+        let link = format!(
+            "quantumult-x:///add-resource?remote-resource={}",
+            urlencoding::encode(r#"{"server_remote":["file:///etc/passwd"]}"#)
+        );
+        assert!(normalize_share_link(&link).is_err());
+        let nodes = convert_subscription("# s5\nsocks5=[2001:db8::5]:2345, username=a:b, password=p:@/%λ, over-tls=false, udp-relay=true, fast-open=false, tag=s5\nsocks5=host:1080, tag=anonymous\n").unwrap();
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[0]["server"], "2001:db8::5");
+        assert_eq!(nodes[0]["username"], "a:b");
+        assert_eq!(nodes[0]["password"], "p:@/%λ");
+        assert!(nodes[1].get("username").is_none());
+        assert_ne!(nodes[0]["tag"], nodes[1]["tag"]);
+        for invalid in [
+            "socks5=host:0",
+            "socks5=host:1080, over-tls=true",
+            "socks5=host:1080, password=only",
+            "socks5=host:1080/path",
+        ] {
+            assert!(convert_subscription(invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn app_import_links_unwrap_only_http_subscriptions() {
+        let endpoint = "http://[2001:db8::5]:1081/token/clash.yaml";
+        for scheme in ["clash", "clashmeta", "cmfa", "sing-box"] {
+            let action = if scheme == "sing-box" {
+                "import-remote-profile"
+            } else {
+                "install-config"
+            };
+            let link = format!(
+                "{scheme}://{action}?url={}#s5",
+                urlencoding::encode(endpoint)
+            );
+            assert_eq!(
+                normalize_share_link(&link).unwrap().as_deref(),
+                Some(endpoint)
+            );
+        }
+        assert!(
+            normalize_share_link(
+                "clash://install-config?url=file%3A%2F%2F%2Fetc%2Fhosts"
+            )
+            .is_err()
+        );
+        assert!(
+            normalize_share_link("sing-box://import-remote-profile").is_err()
+        );
+        assert_eq!(
+            normalize_share_link(
+                "http://host/0123456789abcdef0123456789abcdef/"
+            )
+            .unwrap()
+            .unwrap(),
+            "http://host/0123456789abcdef0123456789abcdef/clash.yaml"
+        );
+        assert!(normalize_share_link("http://host/").unwrap().is_none());
+    }
+
+    #[test]
+    fn telegram_and_v2ray_links_preserve_authentication() {
+        for prefix in [
+            "tg://socks",
+            "https://t.me/socks",
+            "https://telegram.me/socks",
+        ] {
+            let link = format!(
+                "{prefix}?server=2001%3Adb8%3A%3A5&port=2345&user=a%3Ab&pass=p%26%3F%23%2B"
+            );
+            let OutboundSpec::Single(proxy) =
+                resolve_proxy(&link, None, false).unwrap()
+            else {
+                panic!("expected one proxy");
+            };
+            assert_eq!(proxy["server"], "2001:db8::5");
+            assert_eq!(proxy["server_port"], 2345);
+            assert_eq!(proxy["username"], "a:b");
+            assert_eq!(proxy["password"], "p&?#+");
+        }
+        let encoded = base64::engine::general_purpose::STANDARD_NO_PAD
+            .encode("alice:p:@/λ");
+        let link = format!(
+            "socks://{}@[2001:db8::5]:2345#s5",
+            urlencoding::encode(&encoded)
+        );
+        let OutboundSpec::Single(proxy) =
+            resolve_proxy(&link, None, false).unwrap()
+        else {
+            panic!("expected one proxy");
+        };
+        assert_eq!(proxy["username"], "alice");
+        assert_eq!(proxy["password"], "p:@/λ");
+        assert!(
+            resolve_proxy("tg://socks?server=host&port=0", None, false)
+                .is_err()
+        );
+        assert!(resolve_proxy("tg://socks?port=1080", None, false).is_err());
+    }
+
+    #[test]
+    fn json_and_base64_subscriptions_import_proxy_nodes() {
+        let nodes = convert_subscription(r#"{"outbounds":[{"type":"selector","tag":"group","outbounds":["s5"]},{"type":"direct","tag":"direct"},{"type":"socks","tag":"s5","server":"::1","server_port":2345,"username":"a:b","password":"p&?"}]}"#).unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0]["username"], "a:b");
+        let nodes = convert_subscription(r#"{"outbounds":[{"protocol":"socks","settings":{"servers":[{"address":"::1","port":2345,"users":[{"user":"a:b","pass":"p&?"}]}]}}]}"#).unwrap();
+        assert_eq!(nodes[0]["server"], "::1");
+        assert_eq!(nodes[0]["username"], "a:b");
+        assert_eq!(nodes[0]["password"], "p&?");
+        let raw = "socks5://alice:p%3A%26@host:1080#one\nsocks://localhost:2345#two\n";
+        for source in [
+            raw.to_owned(),
+            base64::engine::general_purpose::STANDARD_NO_PAD.encode(raw),
+        ] {
+            let nodes = convert_subscription(&source).unwrap();
+            assert_eq!(nodes.len(), 2);
+            assert_eq!(nodes[0]["username"], "alice");
+            assert_eq!(nodes[0]["password"], "p:&");
+            assert_ne!(nodes[0]["tag"], nodes[1]["tag"]);
+        }
+        assert!(
+            convert_subscription(r#"{"outbounds":[{"type":"direct"}]}"#)
+                .is_err()
+        );
+        let nodes = convert_subscription(r#"{"outbounds":[{"type":"socks","tag":"Proxy","server":"host","server_port":1080,"detour":"Auto","domain_resolver":"profile-dns"},{"type":"socks","tag":"Auto","server":"host","server_port":1081}]}"#).unwrap();
+        assert_ne!(nodes[0]["tag"], "Proxy");
+        assert_ne!(nodes[1]["tag"], "Auto");
+        assert_eq!(nodes[0]["detour"], nodes[1]["tag"]);
+        assert!(nodes[0].get("domain_resolver").is_none());
+    }
+
+    #[test]
+    fn socks_share_link_decodes_credentials_and_ipv6() {
+        let OutboundSpec::Single(proxy) = resolve_proxy(
+            "socks5://a%3A%40%2F:p%25%20%3F%23@[2001:db8::5]:2345#s5",
+            None,
+            false,
+        )
+        .unwrap() else {
+            panic!("expected a single SOCKS proxy");
+        };
+        assert_eq!(proxy["type"], "socks");
+        assert_eq!(proxy["server"], "2001:db8::5");
+        assert_eq!(proxy["server_port"], 2345);
+        assert_eq!(proxy["username"], "a:@/");
+        assert_eq!(proxy["password"], "p% ?#");
+        let OutboundSpec::Single(anonymous) =
+            resolve_proxy("socks5://proxy.example.com:1080#s5", None, false)
+                .unwrap()
+        else {
+            panic!("expected a single SOCKS proxy");
+        };
+        assert!(anonymous.get("username").is_none());
+        assert!(anonymous.get("password").is_none());
+    }
+
+    #[test]
+    fn imports_s5_clash_profile() {
+        let nodes = convert_clash_yaml(
+            r#"proxies:
+  - name: s5
+    type: socks5
+    server: '2001:db8::5'
+    port: 2345
+    udp: true
+    username: 'a:@/'
+    password: 'p% ?#'
+proxy-groups:
+  - name: PROXY
+    type: select
+    proxies: [s5]
+rules:
+  - MATCH,PROXY
+"#,
+        )
+        .unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0]["type"], "socks");
+        assert_eq!(nodes[0]["server"], "2001:db8::5");
+        assert_eq!(nodes[0]["server_port"], 2345);
+        assert_eq!(nodes[0]["username"], "a:@/");
+        assert_eq!(nodes[0]["password"], "p% ?#");
+    }
 
     #[test]
     fn diagnostic_url_redaction_drops_all_credentials_and_resource_data() {
