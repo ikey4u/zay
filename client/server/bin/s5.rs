@@ -1,11 +1,13 @@
 //! Standalone SOCKS server using singbox's existing SOCKS inbound.
 
-use std::{future::Future, io, net::SocketAddr};
+use std::{future::Future, io, net::SocketAddr, time::Duration};
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use serde_json::json;
-use singbox_core::{Options, Runtime};
+use singbox_core::{
+    inbound::socks::{SocksServer, SocksServerOptions},
+    option::User,
+};
 
 #[derive(Parser)]
 #[command(
@@ -50,32 +52,25 @@ fn credential(value: &str) -> Result<String, String> {
 }
 
 impl Args {
-    fn options(&self) -> Result<Options> {
+    fn options(&self) -> Result<SocksServerOptions> {
         let users = match (&self.username, &self.password) {
             (Some(username), Some(password)) => {
-                vec![json!({ "username": username, "password": password })]
+                vec![User {
+                    username: username.clone(),
+                    password: password.clone(),
+                }]
             }
             (None, None) => Vec::new(),
             _ => {
                 anyhow::bail!("username and password must be supplied together")
             }
         };
-        // Runtime creates SocksInbound and owns its router, DNS resolver, and
-        // outbound lifecycle. All destinations use the native direct dialer.
-        serde_json::from_value(json!({
-            "log": { "level": "info" },
-            "inbounds": [{
-                "type": "socks",
-                "tag": "s5-in",
-                "listen": self.listen.ip().to_string(),
-                "listen_port": self.listen.port(),
-                "users": users,
-                "udp_timeout": format!("{}s", self.udp_timeout)
-            }],
-            "outbounds": [{ "type": "direct", "tag": "direct" }],
-            "route": { "final": "direct" }
-        }))
-        .context("building SOCKS server configuration")
+        Ok(SocksServerOptions {
+            listen: self.listen,
+            users,
+            udp_timeout: Duration::from_secs(self.udp_timeout.into()),
+            ..SocksServerOptions::default()
+        })
     }
 }
 
@@ -104,14 +99,14 @@ fn shutdown_signal() -> io::Result<impl Future<Output = io::Result<()>>> {
 async fn main() -> Result<()> {
     let args = Args::parse();
     let shutdown = shutdown_signal().context("registering shutdown signals")?;
-    let mut runtime = Runtime::from_options(args.options()?)
-        .context("creating SOCKS server")?;
-    runtime.start().await.context("starting SOCKS server")?;
+    let mut server =
+        SocksServer::new(args.options()?).context("creating SOCKS server")?;
+    server.start().await.context("starting SOCKS server")?;
     eprintln!("s5 listening on {} (TCP and UDP)", args.listen);
     let signal_result = shutdown.await;
     // Close active TCP connections and UDP associations even if signal
     // handling fails, rather than leaving cleanup to process termination.
-    let close_result = runtime.close().await;
+    let close_result = server.close().await;
     signal_result.context("waiting for shutdown signal")?;
     close_result.context("closing SOCKS server")?;
     Ok(())

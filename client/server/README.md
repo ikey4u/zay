@@ -1,6 +1,10 @@
 # Standalone servers
 
-`s5` reuses `crates/singbox/src/inbound/socks.rs` through the singbox runtime.
+`s5` reuses `crates/singbox/src/inbound/socks.rs` with singbox's `socks` feature
+and default features disabled. It uses the shared SOCKS protocol, listener,
+authentication, and UDP framing without linking the full routing engine.
+See [the library feature guide](../../crates/singbox/README.md) for embedding
+and feature isolation details.
 It forwards SOCKS5 TCP CONNECT and UDP ASSOCIATE traffic directly to the
 requested destination, including hostname resolution and IPv4/IPv6 targets.
 The shared listener also accepts SOCKS4/4a when authentication is disabled.

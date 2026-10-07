@@ -13369,7 +13369,6 @@ version = "0.10.0"
 dependencies = [
  "anyhow",
  "clap",
- "serde_json",
  "singbox",
  "tokio",
 ]

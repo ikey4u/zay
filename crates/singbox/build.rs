@@ -1,5 +1,10 @@
+#[cfg(not(feature = "full"))]
+fn main() {}
+
+#[cfg(feature = "full")]
 use std::{env, error::Error, path::PathBuf};
 
+#[cfg(feature = "full")]
 fn main() -> Result<(), Box<dyn Error>> {
     compile_cloudflared_capnp()?;
     compile_apple_http();
@@ -25,6 +30,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+#[cfg(feature = "full")]
 fn compile_apple_http() {
     println!("cargo:rerun-if-changed=src/common/apple_http.h");
     println!("cargo:rerun-if-changed=src/common/apple_http.m");
@@ -43,6 +49,7 @@ fn compile_apple_http() {
     println!("cargo:rustc-link-lib=framework=Network");
 }
 
+#[cfg(feature = "full")]
 fn compile_cloudflared_capnp() -> Result<(), Box<dyn Error>> {
     for schema in [
         "proto/cloudflared_quic_metadata.capnp",

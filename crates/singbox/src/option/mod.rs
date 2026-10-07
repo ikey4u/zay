@@ -40,6 +40,7 @@ pub use types::{
     MemoryBytes, Network, NetworkBytesCompat, NetworkList, Prefix, Prefixable,
 };
 
+pub use crate::user::User;
 use crate::{
     common::json::{merge_value, strip_comments},
     constant, schema,

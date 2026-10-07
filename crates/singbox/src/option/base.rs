@@ -7,14 +7,6 @@ use super::{Addr, DomainStrategy, Duration, FwMark, Listable, Prefixable};
 use crate::constant;
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct User {
-    #[serde(default, rename = "username", alias = "Username")]
-    pub username: String,
-    #[serde(default, rename = "password", alias = "Password")]
-    pub password: String,
-}
-
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerOptions {
     #[serde(default)]
     pub server: String,

@@ -13,6 +13,5 @@ path = "bin/s5.rs"
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
-serde_json = "1"
-singbox-core = { package = "singbox", path = "../../crates/singbox" }
+singbox-core = { package = "singbox", path = "../../crates/singbox", default-features = false, features = ["socks"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }

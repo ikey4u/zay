@@ -10,168 +10,323 @@ publish = false
 name = "singbox"
 path = "src/lib.rs"
 
+[features]
+default = ["full"]
+# The default engine keeps the existing complete API and protocol registry.
+# Embedders can disable defaults and select socks for standalone forwarding.
+socks = []
+full = [
+    "socks",
+    "tokio/fs", "tokio/process", "tokio/signal",
+    "tokio-util/compat", "tokio-util/io",
+    "dep:aes",
+    "dep:aes-gcm",
+    "dep:am-lzo1x",
+    "dep:argon2",
+    "dep:aria",
+    "dep:arti-client",
+    "dep:async-compression",
+    "dep:async-trait",
+    "dep:aws-lc-rs",
+    "dep:base64",
+    "dep:blake2",
+    "dep:blake3",
+    "dep:blowfish",
+    "dep:boringtun",
+    "dep:bytes",
+    "dep:camellia",
+    "dep:capnp",
+    "dep:capnp-futures",
+    "dep:capnp-rpc",
+    "dep:capnpc",
+    "dep:capnpc-embedded",
+    "dep:cast5",
+    "dep:cbc",
+    "dep:cbc01",
+    "dep:cc",
+    "dep:ccm",
+    "dep:cfb-mode",
+    "dep:cfb08",
+    "dep:chacha20poly1305",
+    "dep:cookie_store",
+    "dep:crab_nat",
+    "dep:crc32fast",
+    "dep:crypto_box",
+    "dep:ctr",
+    "dep:data-encoding",
+    "dep:des",
+    "dep:dtls",
+    "dep:ed25519-dalek",
+    "dep:flate2",
+    "dep:fslock",
+    "dep:futures",
+    "dep:futures-util",
+    "dep:getrandom",
+    "dep:h3",
+    "dep:h3-quinn",
+    "dep:hashlink",
+    "dep:hex",
+    "dep:hickory-proto",
+    "dep:hickory-resolver",
+    "dep:hkdf",
+    "dep:hmac",
+    "dep:hmac13",
+    "dep:http",
+    "dep:http-body-util",
+    "dep:httparse",
+    "dep:hyper",
+    "dep:hyper-util",
+    "dep:igd-next",
+    "dep:instant-acme",
+    "dep:ipnet",
+    "dep:jsonschema",
+    "dep:kisaseed",
+    "dep:libc",
+    "dep:lz4_flex",
+    "dep:md-5",
+    "dep:minicbor",
+    "dep:n0-watcher",
+    "dep:netdev",
+    "dep:netlink-bindings",
+    "dep:netlink-socket2",
+    "dep:netwatch",
+    "dep:network-interface",
+    "dep:nfq",
+    "dep:nix",
+    "dep:ofb",
+    "dep:ofb06",
+    "dep:openssl",
+    "dep:p256",
+    "dep:parking_lot",
+    "dep:pem",
+    "dep:percent-encoding",
+    "dep:portable-pty",
+    "dep:prost",
+    "dep:protoc-bin-vendored",
+    "dep:quick-xml",
+    "dep:quinn",
+    "dep:quinn-proto",
+    "dep:rand",
+    "dep:rcgen",
+    "dep:regex",
+    "dep:reqwest",
+    "dep:resolv-conf",
+    "dep:ripemd",
+    "dep:rtnetlink",
+    "dep:rusqlite",
+    "dep:russh",
+    "dep:rustls",
+    "dep:rustls-acme",
+    "dep:rustls-native-certs",
+    "dep:rustls-pemfile",
+    "dep:schannel",
+    "dep:scraper",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:sha1",
+    "dep:sha1_11",
+    "dep:sha2",
+    "dep:sha3",
+    "dep:shadowsocks",
+    "dep:sm4",
+    "dep:smoltcp",
+    "dep:smux",
+    "dep:snow",
+    "dep:socket2",
+    "dep:sysinfo",
+    "dep:system-configuration",
+    "dep:tempfile",
+    "dep:thiserror",
+    "dep:time",
+    "dep:tokio-openssl",
+    "dep:tokio-rustls",
+    "dep:tokio-stream",
+    "dep:tokio-tungstenite",
+    "dep:tonic",
+    "dep:tonic-health",
+    "dep:tonic-prost",
+    "dep:tonic-prost-build",
+    "dep:tonic-reflection",
+    "dep:tor-rtcompat",
+    "dep:tracing",
+    "dep:tun",
+    "dep:url",
+    "dep:uuid",
+    "dep:webpki-roots",
+    "dep:webrtc-util",
+    "dep:windivert",
+    "dep:windows-sys",
+    "dep:x25519-dalek",
+    "dep:x509-parser",
+    "dep:yamux",
+    "dep:zbus",
+    "dep:zeroize",
+    "dep:zip",
+    "dep:zstd",
+]
+
 [dependencies]
-base64 = "0.22"
-capnp = "0.27.2"
-capnp-futures = "0.27.0"
-capnp-rpc = "0.27.0"
-boringtun = { package = "boringtun-easytier", version = "0.6.1" }
-blake3 = "1"
-blake2 = "0.10"
-aes = "0.9"
-aes-gcm = "0.11.1"
-am-lzo1x = "0.2.0"
-aria = "0.2.0"
-argon2 = "0.5.3"
-arti-client = { version = "0.42.0", default-features = false, features = ["compression", "onion-service-client", "rustls", "tokio"] }
-async-trait = "0.1"
-async-compression = { version = "0.4.44", features = ["gzip", "tokio"] }
-aws-lc-rs = { version = "1.18", default-features = false }
-bytes = "1"
-blowfish = "0.10.0"
-camellia = "0.2.1"
-cast5 = "0.12.0"
-cbc = { version = "0.2.1", features = ["alloc"] }
-cbc01 = { package = "cbc", version = "0.1.2", features = ["alloc"] }
-ccm = "0.6.1"
-cfb-mode = "0.9.1"
-cfb08 = { package = "cfb-mode", version = "0.8.2" }
-crab_nat = "0.8.1"
-chacha20poly1305 = "0.11.0"
-getrandom = "0.3"
-crc32fast = "1"
-ctr = "0.10.1"
-cookie_store = "0.22.1"
-crypto_box = { version = "0.9.1", features = ["salsa20"] }
-data-encoding = "2"
-des = "0.9.0"
-dtls = { version = "0.17.2", features = ["pem"] }
-ed25519-dalek = "2.2.0"
-futures-util = "0.3"
-futures = "0.3"
-flate2 = { version = "1", features = ["zlib-rs"] }
-fslock = "0.2.1"
-hex = "0.4"
-hickory-proto = { version = "0.26.1", features = ["mdns"] }
-hickory-resolver = "0.26.1"
-resolv-conf = "0.7.6"
-hkdf = "0.13"
-hmac = "0.12"
-hmac13 = { package = "hmac", version = "0.13" }
-h3 = "0.0.8"
-h3-quinn = "0.0.10"
-hashlink = "0.11.1"
-http = "1"
-http-body-util = { version = "0.1.5", features = ["channel"] }
-httparse = "1"
-hyper = { version = "1.11.1", features = ["client", "server", "http1", "http2"] }
-hyper-util = { version = "0.1", features = ["tokio"] }
-instant-acme = { version = "0.8.5", default-features = false, features = ["aws-lc-rs", "time", "x509-parser"] }
-ipnet = { version = "2", features = ["serde"] }
-kisaseed = "0.1.3"
-lz4_flex = { version = "0.14.0", default-features = false, features = ["std", "safe-encode", "safe-decode", "checked-decode"] }
-igd-next = { version = "0.17.1", features = ["aio_tokio"] }
-jsonschema = { version = "0.52.1", default-features = false }
-md-5 = "0.11"
-minicbor = { version = "2.3.0", features = ["std"] }
-network-interface = "2"
-netdev = { version = "0.46.2", default-features = false, features = ["gateway"] }
-netwatch = "0.19.3"
-n0-watcher = "1.0.0"
-ofb = "0.7.1"
-ofb06 = { package = "ofb", version = "0.6.1" }
-parking_lot = "0.12"
-p256 = "0.14.0-rc.7"
-pem = "3.0.6"
-percent-encoding = "2"
-portable-pty = "0.9"
-prost = "0.14.4"
-quinn = { version = "0.11.9", features = ["ring"] }
-quinn-proto = "0.11.14"
-quick-xml = "0.41.0"
-rand = "0.8"
-rcgen = { version = "0.13.2", default-features = false, features = ["pem", "aws_lc_rs"] }
-regex = "1"
-ripemd = "0.2.0"
-reqwest = { version = "0.12", default-features = false, features = ["http2", "rustls-tls", "stream"] }
-rustls = { version = "0.23", default-features = false, features = ["brotli", "prefer-post-quantum", "ring", "std", "zlib"] }
-rustls-acme = { version = "0.15.4", default-features = false, features = ["aws-lc-rs", "tokio", "webpki-roots"] }
-rustls-native-certs = "0.8.4"
-rustls-pemfile = "2"
-rusqlite = { version = "0.39", features = ["bundled"] }
-russh = "0.60"
-scraper = "0.18.1"
-serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["preserve_order"] }
-sha2 = "0.11"
-sha3 = "0.11"
-sha1 = "0.10"
-sha1_11 = { package = "sha1", version = "0.11" }
-shadowsocks = { path = "vendor/shadowsocks", version = "1.25.0", default-features = false, features = ["aead-cipher-extra", "aead-cipher-2022", "security-replay-attack-detect"] }
-smux = "0.2.0"
-sm4 = "0.6.0"
-smoltcp = { git = "https://github.com/smoltcp-rs/smoltcp.git", rev = "0a926767a68bc88d5512afefa7529c5ecdade4ea", default-features = false, features = ["std", "medium-ip", "socket-tcp", "socket-udp", "socket-icmp", "proto-ipv4", "proto-ipv6", "async", "proto-ipv4-fragmentation", "fragmentation-buffer-size-8192", "assembler-max-segment-count-16", "reassembly-buffer-size-8192", "reassembly-buffer-count-16"] }
-snow = "0.10.0"
-socket2 = { version = "0.6", features = ["all"] }
-sysinfo = "0.38.4"
-tempfile = "3"
-thiserror = "2"
-time = { version = "0.3.47", features = ["formatting", "local-offset", "macros", "parsing"] }
-tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt", "signal", "sync", "time"] }
-tokio-openssl = "0.6.5"
-tokio-stream = { version = "0.1.18", features = ["net", "sync"] }
-tokio-util = { version = "0.7", features = ["compat", "io", "rt"] }
-tokio-rustls = "0.26.4"
-tokio-tungstenite = "0.28"
-tonic = { version = "0.14.6", features = ["transport", "tls-ring", "tls-native-roots"] }
-tonic-health = "0.14.6"
-tonic-prost = "0.14.6"
-tonic-reflection = "0.14.6"
-tracing = "0.1"
-tor-rtcompat = { version = "0.42.0", default-features = false, features = ["rustls", "tokio"] }
-tun = { package = "tun-easytier", git = "https://github.com/EasyTier/rust-tun", features = ["async", "wintun-dns"] }
-url = "2.5"
-uuid = { version = "1", features = ["v4", "v5"] }
-webpki-roots = "1.0.9"
-webrtc-util = { version = "0.17.2", default-features = false, features = ["conn"] }
-x25519-dalek = "2.0.1"
-x509-parser = "0.18.1"
-yamux = "0.14.0"
-zeroize = { version = "1.8.2", features = ["derive"] }
-zstd = { version = "0.13.3", default-features = false }
-zip = { version = "2", default-features = false, features = ["deflate"] }
+base64 = { version = "0.22", optional = true }
+capnp = { version = "0.27.2", optional = true }
+capnp-futures = { version = "0.27.0", optional = true }
+capnp-rpc = { version = "0.27.0", optional = true }
+boringtun = { package = "boringtun-easytier", version = "0.6.1", optional = true }
+blake3 = { version = "1", optional = true }
+blake2 = { version = "0.10", optional = true }
+aes = { version = "0.9", optional = true }
+aes-gcm = { version = "0.11.1", optional = true }
+am-lzo1x = { version = "0.2.0", optional = true }
+aria = { version = "0.2.0", optional = true }
+argon2 = { version = "0.5.3", optional = true }
+arti-client = { version = "0.42.0", default-features = false, features = ["compression", "onion-service-client", "rustls", "tokio"], optional = true }
+async-trait = { version = "0.1", optional = true }
+async-compression = { version = "0.4.44", features = ["gzip", "tokio"], optional = true }
+aws-lc-rs = { version = "1.18", default-features = false, optional = true }
+bytes = { version = "1", optional = true }
+blowfish = { version = "0.10.0", optional = true }
+camellia = { version = "0.2.1", optional = true }
+cast5 = { version = "0.12.0", optional = true }
+cbc = { version = "0.2.1", features = ["alloc"], optional = true }
+cbc01 = { package = "cbc", version = "0.1.2", features = ["alloc"], optional = true }
+ccm = { version = "0.6.1", optional = true }
+cfb-mode = { version = "0.9.1", optional = true }
+cfb08 = { package = "cfb-mode", version = "0.8.2", optional = true }
+crab_nat = { version = "0.8.1", optional = true }
+chacha20poly1305 = { version = "0.11.0", optional = true }
+getrandom = { version = "0.3", optional = true }
+crc32fast = { version = "1", optional = true }
+ctr = { version = "0.10.1", optional = true }
+cookie_store = { version = "0.22.1", optional = true }
+crypto_box = { version = "0.9.1", features = ["salsa20"], optional = true }
+data-encoding = { version = "2", optional = true }
+des = { version = "0.9.0", optional = true }
+dtls = { version = "0.17.2", features = ["pem"], optional = true }
+ed25519-dalek = { version = "2.2.0", optional = true }
+futures-util = { version = "0.3", optional = true }
+futures = { version = "0.3", optional = true }
+flate2 = { version = "1", features = ["zlib-rs"], optional = true }
+fslock = { version = "0.2.1", optional = true }
+hex = { version = "0.4", optional = true }
+hickory-proto = { version = "0.26.1", features = ["mdns"], optional = true }
+hickory-resolver = { version = "0.26.1", optional = true }
+resolv-conf = { version = "0.7.6", optional = true }
+hkdf = { version = "0.13", optional = true }
+hmac = { version = "0.12", optional = true }
+hmac13 = { package = "hmac", version = "0.13", optional = true }
+h3 = { version = "0.0.8", optional = true }
+h3-quinn = { version = "0.0.10", optional = true }
+hashlink = { version = "0.11.1", optional = true }
+http = { version = "1", optional = true }
+http-body-util = { version = "0.1.5", features = ["channel"], optional = true }
+httparse = { version = "1", optional = true }
+hyper = { version = "1.11.1", features = ["client", "server", "http1", "http2"], optional = true }
+hyper-util = { version = "0.1", features = ["tokio"], optional = true }
+instant-acme = { version = "0.8.5", default-features = false, features = ["aws-lc-rs", "time", "x509-parser"], optional = true }
+ipnet = { version = "2", features = ["serde"], optional = true }
+kisaseed = { version = "0.1.3", optional = true }
+lz4_flex = { version = "0.14.0", default-features = false, features = ["std", "safe-encode", "safe-decode", "checked-decode"], optional = true }
+igd-next = { version = "0.17.1", features = ["aio_tokio"], optional = true }
+jsonschema = { version = "0.52.1", default-features = false, optional = true }
+md-5 = { version = "0.11", optional = true }
+minicbor = { version = "2.3.0", features = ["std"], optional = true }
+network-interface = { version = "2", optional = true }
+netdev = { version = "0.46.2", default-features = false, features = ["gateway"], optional = true }
+netwatch = { version = "0.19.3", optional = true }
+n0-watcher = { version = "1.0.0", optional = true }
+ofb = { version = "0.7.1", optional = true }
+ofb06 = { package = "ofb", version = "0.6.1", optional = true }
+parking_lot = { version = "0.12", optional = true }
+p256 = { version = "0.14.0-rc.7", optional = true }
+pem = { version = "3.0.6", optional = true }
+percent-encoding = { version = "2", optional = true }
+portable-pty = { version = "0.9", optional = true }
+prost = { version = "0.14.4", optional = true }
+quinn = { version = "0.11.9", features = ["ring"], optional = true }
+quinn-proto = { version = "0.11.14", optional = true }
+quick-xml = { version = "0.41.0", optional = true }
+rand = { version = "0.8", optional = true }
+rcgen = { version = "0.13.2", default-features = false, features = ["pem", "aws_lc_rs"], optional = true }
+regex = { version = "1", optional = true }
+ripemd = { version = "0.2.0", optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["http2", "rustls-tls", "stream"], optional = true }
+rustls = { version = "0.23", default-features = false, features = ["brotli", "prefer-post-quantum", "ring", "std", "zlib"], optional = true }
+rustls-acme = { version = "0.15.4", default-features = false, features = ["aws-lc-rs", "tokio", "webpki-roots"], optional = true }
+rustls-native-certs = { version = "0.8.4", optional = true }
+rustls-pemfile = { version = "2", optional = true }
+rusqlite = { version = "0.39", features = ["bundled"], optional = true }
+russh = { version = "0.60", optional = true }
+scraper = { version = "0.18.1", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", features = ["preserve_order"], optional = true }
+sha2 = { version = "0.11", optional = true }
+sha3 = { version = "0.11", optional = true }
+sha1 = { version = "0.10", optional = true }
+sha1_11 = { package = "sha1", version = "0.11", optional = true }
+shadowsocks = { path = "vendor/shadowsocks", version = "1.25.0", default-features = false, features = ["aead-cipher-extra", "aead-cipher-2022", "security-replay-attack-detect"], optional = true }
+smux = { version = "0.2.0", optional = true }
+sm4 = { version = "0.6.0", optional = true }
+smoltcp = { git = "https://github.com/smoltcp-rs/smoltcp.git", rev = "0a926767a68bc88d5512afefa7529c5ecdade4ea", default-features = false, features = ["std", "medium-ip", "socket-tcp", "socket-udp", "socket-icmp", "proto-ipv4", "proto-ipv6", "async", "proto-ipv4-fragmentation", "fragmentation-buffer-size-8192", "assembler-max-segment-count-16", "reassembly-buffer-size-8192", "reassembly-buffer-count-16"], optional = true }
+snow = { version = "0.10.0", optional = true }
+socket2 = { version = "0.6", features = ["all"], optional = true }
+sysinfo = { version = "0.38.4", optional = true }
+tempfile = { version = "3", optional = true }
+thiserror = { version = "2", optional = true }
+time = { version = "0.3.47", features = ["formatting", "local-offset", "macros", "parsing"], optional = true }
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+tokio-openssl = { version = "0.6.5", optional = true }
+tokio-stream = { version = "0.1.18", features = ["net", "sync"], optional = true }
+tokio-util = { version = "0.7", features = ["rt"] }
+tokio-rustls = { version = "0.26.4", optional = true }
+tokio-tungstenite = { version = "0.28", optional = true }
+tonic = { version = "0.14.6", features = ["transport", "tls-ring", "tls-native-roots"], optional = true }
+tonic-health = { version = "0.14.6", optional = true }
+tonic-prost = { version = "0.14.6", optional = true }
+tonic-reflection = { version = "0.14.6", optional = true }
+tracing = { version = "0.1", optional = true }
+tor-rtcompat = { version = "0.42.0", default-features = false, features = ["rustls", "tokio"], optional = true }
+tun = { package = "tun-easytier", git = "https://github.com/EasyTier/rust-tun", features = ["async", "wintun-dns"], optional = true }
+url = { version = "2.5", optional = true }
+uuid = { version = "1", features = ["v4", "v5"], optional = true }
+webpki-roots = { version = "1.0.9", optional = true }
+webrtc-util = { version = "0.17.2", default-features = false, features = ["conn"], optional = true }
+x25519-dalek = { version = "2.0.1", optional = true }
+x509-parser = { version = "0.18.1", optional = true }
+yamux = { version = "0.14.0", optional = true }
+zeroize = { version = "1.8.2", features = ["derive"], optional = true }
+zstd = { version = "0.13.3", default-features = false, optional = true }
+zip = { version = "2", default-features = false, features = ["deflate"], optional = true }
 
 [target.'cfg(unix)'.dependencies]
-libc = "0.2"
+libc = { version = "0.2", optional = true }
 
 [target.'cfg(target_vendor = "apple")'.dependencies]
-system-configuration = "0.7.0"
+system-configuration = { version = "0.7.0", optional = true }
 
 [target.'cfg(not(windows))'.dependencies]
-openssl = { version = "0.10.81", features = ["vendored"] }
+openssl = { version = "0.10.81", features = ["vendored"], optional = true }
 
 [target.'cfg(any(target_os = "android", target_os = "ios", target_os = "tvos", target_os = "visionos", target_os = "watchos"))'.dependencies]
-openssl = { version = "0.10.81", features = ["vendored"] }
+openssl = { version = "0.10.81", features = ["vendored"], optional = true }
 
 [target.'cfg(windows)'.dependencies]
-openssl = { version = "0.10.81", features = ["vendored"] }
-schannel = "0.1.29"
-windows-sys = { version = "0.61.2", features = ["Wdk_System_SystemServices", "Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_NetworkManagement_WindowsFilteringPlatform", "Win32_Networking_WinInet", "Win32_Networking_WinSock", "Win32_Security", "Win32_System_IO", "Win32_System_Rpc", "Win32_System_SystemInformation", "Win32_System_Threading"] }
+openssl = { version = "0.10.81", features = ["vendored"], optional = true }
+schannel = { version = "0.1.29", optional = true }
+windows-sys = { version = "0.61.2", features = ["Wdk_System_SystemServices", "Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_NetworkManagement_WindowsFilteringPlatform", "Win32_Networking_WinInet", "Win32_Networking_WinSock", "Win32_Security", "Win32_System_IO", "Win32_System_Rpc", "Win32_System_SystemInformation", "Win32_System_Threading"], optional = true }
 
 [target.'cfg(all(windows, any(target_arch = "x86_64", target_arch = "x86")))'.dependencies]
-windivert = { git = "https://github.com/EasyTier/windivert-rust.git", rev = "adcc56d1550f7b5377ec2b3429f413ee24a77375", features = ["static"] }
+windivert = { git = "https://github.com/EasyTier/windivert-rust.git", rev = "adcc56d1550f7b5377ec2b3429f413ee24a77375", features = ["static"], optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-netlink-bindings = { version = "0.3.3", default-features = false, features = ["nftables"] }
-netlink-socket2 = { version = "0.3.3", default-features = false }
-nfq = "0.2.5"
-nix = { version = "0.28", features = ["socket"] }
-rtnetlink = "0.23"
-zbus = { version = "5.19.0", default-features = false, features = ["async-io", "blocking-api"] }
+netlink-bindings = { version = "0.3.3", default-features = false, features = ["nftables"], optional = true }
+netlink-socket2 = { version = "0.3.3", default-features = false, optional = true }
+nfq = { version = "0.2.5", optional = true }
+nix = { version = "0.28", features = ["socket"], optional = true }
+rtnetlink = { version = "0.23", optional = true }
+zbus = { version = "5.19.0", default-features = false, features = ["async-io", "blocking-api"], optional = true }
 
 [build-dependencies]
-capnpc = "0.27.0"
-capnpc-embedded = "0.2.0"
-cc = "1"
-protoc-bin-vendored = "3"
-tonic-prost-build = "0.14.6"
+capnpc = { version = "0.27.0", optional = true }
+capnpc-embedded = { version = "0.2.0", optional = true }
+cc = { version = "1", optional = true }
+protoc-bin-vendored = { version = "3", optional = true }
+tonic-prost-build = { version = "0.14.6", optional = true }

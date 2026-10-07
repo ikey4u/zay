@@ -27,6 +27,7 @@ impl Network {
 /// `ip_is_private` rule is deliberately broader than the Rust standard
 /// library's RFC-private helpers: loopback, link-local, multicast, and
 /// unspecified addresses are private for routing purposes too.
+#[cfg(any(feature = "full", test))]
 pub(crate) fn is_private_address(address: &IpAddr) -> bool {
     match address {
         IpAddr::V4(address) => {

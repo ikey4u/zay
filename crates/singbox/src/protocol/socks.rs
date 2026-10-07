@@ -5,21 +5,20 @@ use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
 };
 
-use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    net::UdpSocket,
-    sync::Mutex,
-};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+#[cfg(feature = "full")]
+use tokio::{net::UdpSocket, sync::Mutex};
 
+#[cfg(feature = "full")]
 use crate::{
     adapter::{
         DialFuture, Dialer, PacketConnection, PacketFuture, PacketStream,
         Stream,
     },
-    common::network::SocksAddr,
     dns::Resolver,
-    option::{DomainStrategy, User},
+    option::DomainStrategy,
 };
+use crate::{common::network::SocksAddr, option::User};
 
 const VERSION_4: u8 = 4;
 const VERSION_5: u8 = 5;
@@ -55,6 +54,7 @@ impl SocksVersion {
     }
 }
 
+#[cfg(feature = "full")]
 pub struct Socks4Outbound {
     upstream: std::sync::Arc<dyn Dialer>,
     resolver: std::sync::Arc<dyn Resolver>,
@@ -64,6 +64,7 @@ pub struct Socks4Outbound {
     resolve_locally: bool,
 }
 
+#[cfg(feature = "full")]
 impl Socks4Outbound {
     pub fn new(
         upstream: std::sync::Arc<dyn Dialer>,
@@ -96,6 +97,7 @@ impl Socks4Outbound {
     }
 }
 
+#[cfg(feature = "full")]
 impl Dialer for Socks4Outbound {
     fn dial_tcp<'a>(&'a self, destination: &'a SocksAddr) -> DialFuture<'a> {
         Box::pin(async move {
@@ -127,6 +129,7 @@ impl Dialer for Socks4Outbound {
     }
 }
 
+#[cfg(feature = "full")]
 pub struct Socks5Outbound<D> {
     upstream: D,
     server: SocksAddr,
@@ -134,6 +137,7 @@ pub struct Socks5Outbound<D> {
     password: String,
 }
 
+#[cfg(feature = "full")]
 impl<D> Socks5Outbound<D> {
     pub fn new(
         upstream: D,
@@ -150,6 +154,7 @@ impl<D> Socks5Outbound<D> {
     }
 }
 
+#[cfg(feature = "full")]
 impl<D: Dialer> Dialer for Socks5Outbound<D> {
     fn dial_tcp<'a>(&'a self, destination: &'a SocksAddr) -> DialFuture<'a> {
         Box::pin(async move {
@@ -629,11 +634,13 @@ where
         .map_err(|_| invalid_data(format!("{field} is not UTF-8")))
 }
 
+#[cfg(feature = "full")]
 struct Socks5PacketConnection {
     socket: UdpSocket,
     _control: Mutex<Stream>,
 }
 
+#[cfg(feature = "full")]
 impl PacketConnection for Socks5PacketConnection {
     fn send_to<'a>(
         &'a self,
