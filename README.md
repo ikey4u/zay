@@ -2,6 +2,13 @@
 
 See `zay --help` for usage.
 
+## Standalone SOCKS5 server
+
+`cargo run -p zay-server --bin s5 -- --listen 127.0.0.1:1080` starts the
+standalone SOCKS5 server in `client/server/bin/s5.rs`, using the existing
+singbox listener for TCP and UDP forwarding. See
+[the server README](client/server/README.md) for authentication and build options.
+
 ## Native desktop (macOS)
 
 `client/desktop` is a GPUI Kit + Ely desktop app linked directly to the Zay Rust

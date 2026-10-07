@@ -1,0 +1,18 @@
+[package]
+name = "zay-server"
+version = "0.10.0"
+edition = "2024"
+description = "Standalone network servers powered by zay's singbox engine"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[[bin]]
+name = "s5"
+path = "bin/s5.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+serde_json = "1"
+singbox-core = { package = "singbox", path = "../../crates/singbox" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }

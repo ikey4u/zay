@@ -79,6 +79,7 @@ libc = "0.2"
 members = [
     "crates/singbox",
     "client/ios/Rust/zay-ios",
+    "client/server",
 ]
 exclude = [
     "client/desktop",

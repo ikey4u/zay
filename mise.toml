@@ -115,7 +115,7 @@ cargo build --release
 """
 
 [tasks."macos:build:linux-x64"]
-description = "Cross-build Linux x64 via cargo-zigbuild (glibc 2.17)"
+description = "Cross-build zay and s5 for Linux x64 via cargo-zigbuild (glibc 2.17)"
 depends = ["setup"]
 tools = { zig = "latest", "cargo:cargo-zigbuild" = "latest", protoc = "latest" }
 run = """
@@ -125,12 +125,14 @@ ROOT="${MISE_PROJECT_ROOT:-$PWD}"
 REMAP="--remap-path-prefix=${CARGO_HOME_DIR}=~ --remap-path-prefix=${ROOT}="
 export CARGO_HOME="$CARGO_HOME_DIR"
 export RUSTFLAGS="$REMAP"
-cargo zigbuild --release --target "$ZIG_LINUX_TARGET"
-BIN="target/${TARGET_LINUX_X64}/release/zay"
-test -f "$BIN" || {
-  echo "missing $BIN (zig target $ZIG_LINUX_TARGET)" >&2
-  exit 1
-}
+cargo zigbuild --release --target "$ZIG_LINUX_TARGET" --package zay --package zay-server --bins
+for bin in zay s5; do
+  artifact_path="target/${TARGET_LINUX_X64}/release/${bin}"
+  test -f "$artifact_path" || {
+    echo "missing $artifact_path (zig target $ZIG_LINUX_TARGET)" >&2
+    exit 1
+  }
+done
 """
 
 [tasks."macos:build:windows-x64"]

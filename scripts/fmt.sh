@@ -11,6 +11,7 @@ zay_packages=(
     --package zay
     --package singbox
     --package zay-ios
+    --package zay-server
 )
 
 case "${1:-}" in
