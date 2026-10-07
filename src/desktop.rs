@@ -340,6 +340,32 @@ impl Client {
             .await
     }
 
+    pub async fn process_traffic(&self) -> Result<serde_json::Value> {
+        match self
+            .controller(reqwest::Method::GET, "/zay/process-traffic", None)
+            .await
+        {
+            Ok(value) => Ok(value),
+            Err(_) => crate::application_traffic::saved(&self.data_dir),
+        }
+    }
+
+    pub async fn set_process_traffic(
+        &self,
+        action: &str,
+    ) -> Result<serde_json::Value> {
+        anyhow::ensure!(
+            matches!(action, "enable" | "disable" | "reset"),
+            "invalid application usage action"
+        );
+        self.controller(
+            reqwest::Method::POST,
+            &format!("/zay/process-traffic/{action}"),
+            None,
+        )
+        .await
+    }
+
     pub fn recent_logs(&self) -> Result<Vec<String>> {
         use std::io::{Read, Seek, SeekFrom};
         let mut file = match std::fs::File::open(

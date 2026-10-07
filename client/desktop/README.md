@@ -28,6 +28,10 @@ used by the desktop interface.
   without opening connections or starting services. DNS and process/source
   metadata may change the result for a real connection.
 - Live proxy readiness and Mesh peer status from the networking library.
+- Overview application usage, split into direct and proxied upload/download.
+  Totals persist across restarts until reset; pausing recording keeps history.
+  App helpers are grouped under their parent application, and unrecognized
+  processes appear under Unattributed. Only traffic handled by Zay is counted.
 - Persistent **Zay** menu-bar item and native application menus.
 - Closing the window keeps the networking services running. Reopen from the
   menu bar or Dock. **Quit Zay stops the services owned by this app.**

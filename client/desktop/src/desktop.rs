@@ -67,6 +67,7 @@ struct Fields {
     address: Entity<InputState>,
     search: Entity<InputState>,
     connection_search: Entity<InputState>,
+    application_search: Entity<InputState>,
     log_search: Entity<InputState>,
     listeners: Entity<InputState>,
     rule_name: Entity<InputState>,
@@ -84,6 +85,8 @@ struct Desktop {
     editing_rule: Option<String>,
     connection_activity: usize,
     connection_protocol: usize,
+    application_sort: usize,
+    confirm_usage_reset: bool,
     log_level: usize,
     selected_subscription: Option<usize>,
     adding_subscription: bool,
@@ -180,6 +183,10 @@ fn open_page(page: Page, cx: &mut App) {
             search: cx.new(|cx| {
                 InputState::new(window, cx).placeholder("Search proxies…")
             }),
+            application_search: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("Search applications...")
+            }),
             connection_search: cx.new(|cx| {
                 InputState::new(window, cx)
                     .placeholder("Search host, IP, process or route…")
@@ -241,6 +248,11 @@ fn open_page(page: Page, cx: &mut App) {
                 |_: &mut Desktop, _, _: &InputEvent, _, cx| cx.notify(),
             ));
             subscriptions.push(cx.subscribe_in(
+                &fields.application_search,
+                window,
+                |_: &mut Desktop, _, _: &InputEvent, _, cx| cx.notify(),
+            ));
+            subscriptions.push(cx.subscribe_in(
                 &fields.connection_search,
                 window,
                 |_: &mut Desktop, _, _: &InputEvent, _, cx| cx.notify(),
@@ -274,6 +286,8 @@ fn open_page(page: Page, cx: &mut App) {
                 editing_rule: None,
                 connection_activity: 0,
                 connection_protocol: 0,
+                application_sort: 0,
+                confirm_usage_reset: false,
                 log_level: 0,
                 selected_subscription: None,
                 adding_subscription: false,
@@ -1290,6 +1304,243 @@ impl Desktop {
             .child(chooser)))
     }
 
+    fn application_traffic_view(&self, cx: &Context<Self>) -> Div {
+        let state = cx.global::<Session>();
+        let snapshot = state.snapshot.as_ref();
+        let value = snapshot
+            .map(|s| s.process_traffic.clone())
+            .unwrap_or_default();
+        let enabled = value["enabled"].as_bool().unwrap_or(false);
+        let available = value["available"].as_bool().unwrap_or(false);
+        let unavailable = state.busy || !available;
+        let mut rows = value["records"].as_array().cloned().unwrap_or_default();
+        let count = |record: &serde_json::Value, key: &str| {
+            record[key].as_u64().unwrap_or(0)
+        };
+        let mut totals = [0u64; 4];
+        for row in &rows {
+            for (index, amount) in [
+                count(row, "upload"),
+                count(row, "download"),
+                count(row, "direct_upload")
+                    .saturating_add(count(row, "direct_download")),
+                count(row, "proxy_upload")
+                    .saturating_add(count(row, "proxy_download")),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                totals[index] = totals[index].saturating_add(amount);
+            }
+        }
+        let mut list = Self::section(
+            "Application usage",
+            "Includes direct and proxied traffic handled by Zay. Saved across restarts until reset.",
+            cx,
+        );
+        let mut summary = div().flex().flex_wrap().gap_3();
+        for (label, amount) in ["Uploaded", "Downloaded", "Direct", "Proxied"]
+            .into_iter()
+            .zip(totals)
+        {
+            summary = summary.child(
+                div()
+                    .flex_1()
+                    .min_w(px(110.))
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(Self::hint(label, cx))
+                    .child(
+                        div()
+                            .text_lg()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(bytes(amount)),
+                    ),
+            );
+        }
+        list = list.child(summary).child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_3()
+                .child(Self::hint(
+                    if !available {
+                        "Saved usage · start the proxy to record or reset"
+                    } else if enabled {
+                        "Recording · updates every second"
+                    } else {
+                        "Recording paused · saved usage retained"
+                    },
+                    cx,
+                ))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .child(
+                            Button::new("reset-application-usage")
+                                .label("Reset usage")
+                                .ghost()
+                                .disabled(unavailable || rows.is_empty())
+                                .on_click(cx.listener(|v, _, _, cx| {
+                                    v.confirm_usage_reset = true;
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            Switch::new("record-application-usage")
+                                .checked(enabled)
+                                .disabled(unavailable)
+                                .on_click(cx.listener(|_, on, _, cx| {
+                                    send(
+                                        Command::ProcessTraffic(if *on {
+                                            "enable"
+                                        } else {
+                                            "disable"
+                                        }),
+                                        cx,
+                                    )
+                                })),
+                        ),
+                ),
+        );
+        if self.confirm_usage_reset {
+            list = list.child(div().p_3().rounded_md().bg(cx.theme().muted).flex().flex_col().gap_2()
+                .child(Self::hint("Clear all saved application usage? Active connections will continue counting from zero.", cx))
+                .child(div().flex().gap_2()
+                    .child(Button::new("cancel-usage-reset").label("Cancel").ghost().on_click(cx.listener(|v, _, _, cx| { v.confirm_usage_reset = false; cx.notify(); })))
+                    .child(Button::new("confirm-usage-reset").label("Reset all usage").disabled(unavailable).on_click(cx.listener(|v, _, _, cx| { v.confirm_usage_reset = false; send(Command::ProcessTraffic("reset"), cx); })))));
+        }
+        let tun = snapshot.is_some_and(|s| s.tun_active);
+        list = list.child(Self::hint(if tun { "TUN traffic is included; excluded routes are outside these totals. App helpers are grouped under their macOS application." } else { "Only traffic sent to Zay's proxy is included. Enable TUN to capture more applications." }, cx));
+        let mut sorting = div().flex().gap_1();
+        for (index, label) in
+            ["Total", "Direct", "Proxied"].into_iter().enumerate()
+        {
+            sorting = sorting.child(
+                Button::new(SharedString::from(format!("usage-sort-{index}")))
+                    .label(label)
+                    .ghost()
+                    .selected(self.application_sort == index)
+                    .on_click(cx.listener(move |v, _, _, cx| {
+                        v.application_sort = index;
+                        cx.notify();
+                    })),
+            );
+        }
+        list = list
+            .child(
+                Input::new(&self.fields.application_search)
+                    .aria_label("Search application usage"),
+            )
+            .child(sorting);
+        let query = self
+            .fields
+            .application_search
+            .read(cx)
+            .value()
+            .to_lowercase();
+        rows.retain(|row| {
+            format!(
+                "{} {}",
+                row["process_name"].as_str().unwrap_or(""),
+                row["process_path"].as_str().unwrap_or("")
+            )
+            .to_lowercase()
+            .contains(query.as_str())
+        });
+        let amount = |row: &serde_json::Value| match self.application_sort {
+            1 => count(row, "direct_upload")
+                .saturating_add(count(row, "direct_download")),
+            2 => count(row, "proxy_upload")
+                .saturating_add(count(row, "proxy_download")),
+            _ => count(row, "upload").saturating_add(count(row, "download")),
+        };
+        rows.sort_by_key(|row| std::cmp::Reverse(amount(row)));
+        if rows.is_empty() {
+            list = list.child(Self::hint("No matching application usage. Send traffic through Zay to start recording.", cx));
+        }
+        for row in rows {
+            let mut details = div().flex().flex_wrap().gap_4();
+            for (label, amount) in [
+                (
+                    "Direct",
+                    count(&row, "direct_upload")
+                        .saturating_add(count(&row, "direct_download")),
+                ),
+                (
+                    "Proxied",
+                    count(&row, "proxy_upload")
+                        .saturating_add(count(&row, "proxy_download")),
+                ),
+                ("Uploaded", count(&row, "upload")),
+                ("Downloaded", count(&row, "download")),
+            ] {
+                details = details.child(div().flex_1().min_w(px(100.)).child(
+                    Self::hint(format!("{label} · {}", bytes(amount)), cx),
+                ));
+            }
+            list = list.child(
+                div()
+                    .p_3()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex()
+                            .justify_between()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .child(
+                                                row["process_name"]
+                                                    .as_str()
+                                                    .unwrap_or("Unattributed")
+                                                    .to_owned(),
+                                            ),
+                                    )
+                                    .child(
+                                        div().truncate().child(Self::hint(
+                                            row["process_path"]
+                                                .as_str()
+                                                .unwrap_or("")
+                                                .to_owned(),
+                                            cx,
+                                        )),
+                                    ),
+                            )
+                            .child(div().text_sm().child(format!(
+                                "{} · {} connections",
+                                bytes(
+                                    count(&row, "upload").saturating_add(
+                                        count(&row, "download")
+                                    )
+                                ),
+                                count(&row, "connections")
+                            ))),
+                    )
+                    .child(details),
+            );
+        }
+        list
+    }
+
     fn connections_view(&self, cx: &Context<Self>) -> Div {
         let state = cx.global::<Session>();
         let snapshot = state.snapshot.as_ref();
@@ -1703,7 +1954,11 @@ impl Desktop {
     }
 }
 fn bytes(value: u64) -> String {
-    if value >= 1_048_576 {
+    if value >= 1_099_511_627_776 {
+        format!("{:.1} TB", value as f64 / 1_099_511_627_776.)
+    } else if value >= 1_073_741_824 {
+        format!("{:.1} GB", value as f64 / 1_073_741_824.)
+    } else if value >= 1_048_576 {
         format!("{:.1} MB", value as f64 / 1_048_576.)
     } else if value >= 1024 {
         format!("{:.1} KB", value as f64 / 1024.)
@@ -1812,6 +2067,7 @@ impl Render for Desktop {
                 &snapshot.error,
                 &snapshot.proxy_error,
                 &snapshot.telemetry_error,
+                &snapshot.process_traffic_error,
             ]
             .into_iter()
             .flatten()
@@ -1889,6 +2145,7 @@ impl Render for Desktop {
                         .child(Self::hint(label, cx)).child(div().text_xl().font_weight(FontWeight::SEMIBOLD).child(value)).child(Self::hint(detail, cx)));
                 }
                 div().flex().flex_col().gap_4().child(stats)
+                    .child(self.application_traffic_view(cx))
                     .child(self.connections_view(cx))
             }
             Page::Rules => self.rules_view(cx),

@@ -343,13 +343,31 @@ async fn dispatch(
             (&Method::GET, "/zay/process-traffic") => {
                 json_response(StatusCode::OK, process_traffic_value(&outbounds))
             }
-            (&Method::POST, "/zay/process-traffic/enable") => {
-                outbounds.set_process_traffic_enabled(true);
-                json_response(StatusCode::OK, process_traffic_value(&outbounds))
-            }
-            (&Method::POST, "/zay/process-traffic/disable") => {
-                outbounds.set_process_traffic_enabled(false);
-                json_response(StatusCode::OK, process_traffic_value(&outbounds))
+            (
+                &Method::POST,
+                path @ ("/zay/process-traffic/enable"
+                | "/zay/process-traffic/disable"
+                | "/zay/process-traffic/reset"),
+            ) => {
+                let result = match path {
+                    "/zay/process-traffic/enable" => {
+                        outbounds.set_process_traffic_enabled(true)
+                    }
+                    "/zay/process-traffic/disable" => {
+                        outbounds.set_process_traffic_enabled(false)
+                    }
+                    _ => outbounds.reset_process_traffic(),
+                };
+                match result {
+                    Ok(()) => json_response(
+                        StatusCode::OK,
+                        process_traffic_value(&outbounds),
+                    ),
+                    Err(error) => json_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        json!({"message": format!("saving application usage: {error}")}),
+                    ),
+                }
             }
             (&Method::GET, "/memory") => memory(&mut request, cancellation),
             (&Method::POST, "/upgrade/ui" | "/upgrade/ui/") => {
@@ -1188,35 +1206,7 @@ fn connections_value(outbounds: &OutboundManager) -> Value {
 }
 
 fn process_traffic_value(outbounds: &OutboundManager) -> Value {
-    let state = outbounds.process_traffic();
-    let started_at = state.started_at.and_then(format_system_time);
-    let records = state
-        .records
-        .into_iter()
-        .map(|record| {
-            json!({
-                "process_name": record.process_name,
-                "process_path": record.process_path,
-                "process_lookup": record.process_lookup,
-                "upload": record.upload,
-                "download": record.download,
-                "connections": record.connections,
-                "first_seen": format_system_time(record.first_seen).unwrap_or_default(),
-                "last_seen": format_system_time(record.last_seen).unwrap_or_default(),
-            })
-        })
-        .collect::<Vec<_>>();
-    json!({
-        "enabled": state.enabled,
-        "started_at": started_at,
-        "records": records,
-    })
-}
-
-fn format_system_time(value: std::time::SystemTime) -> Option<String> {
-    time::OffsetDateTime::from(value)
-        .format(&time::format_description::well_known::Rfc3339)
-        .ok()
+    outbounds.process_traffic().api_value()
 }
 
 fn groups(outbounds: &OutboundManager) -> Response<ApiBody> {

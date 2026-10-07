@@ -696,9 +696,13 @@ async fn get_process_traffic(
     headers: HeaderMap,
 ) -> ApiResult<Json<JsonValue>> {
     authorize(&state, &headers)?;
-    Ok(Json(
-        process_traffic_request(&state, reqwest::Method::GET, "").await?,
-    ))
+    let value =
+        match process_traffic_request(&state, reqwest::Method::GET, "").await {
+            Ok(value) => value,
+            Err(_) => crate::application_traffic::saved(&state.data_dir)
+                .map_err(ApiError::internal)?,
+        };
+    Ok(Json(value))
 }
 
 async fn set_process_traffic(
@@ -707,9 +711,9 @@ async fn set_process_traffic(
     AxumPath(action): AxumPath<String>,
 ) -> ApiResult<Json<JsonValue>> {
     authorize(&state, &headers)?;
-    if action != "enable" && action != "disable" {
+    if action != "enable" && action != "disable" && action != "reset" {
         return Err(ApiError::bad_request(anyhow::anyhow!(
-            "process traffic action must be enable or disable"
+            "process traffic action must be enable, disable, or reset"
         )));
     }
     Ok(Json(

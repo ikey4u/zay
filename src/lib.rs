@@ -2,6 +2,7 @@
 #![allow(dead_code)]
 
 mod api;
+mod application_traffic;
 mod bootstrap;
 mod config;
 mod daemon;

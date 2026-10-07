@@ -53,6 +53,25 @@ routes, or enablement also update the proxy's dependent routes. Unchanged
 configuration does not restart components. The UI reports application failures
 and offers a retry; the explicit full restart action still restarts all components.
 
+## Application traffic usage
+
+The macOS desktop and WebUI **Overview** show per-application upload, download,
+direct, and proxied usage. Recording starts with the proxy by default. Pause
+keeps existing totals; **Reset usage** clears them and starts counting active
+connections from zero. macOS app helpers are grouped under their parent `.app`;
+unresolved processes appear under **Unattributed**.
+
+Only traffic handled by Zay is counted. TUN includes direct and proxy routes,
+except excluded routes; without TUN, only traffic sent to Zay's proxy listeners
+is included. Counts measure forwarded payload, rather than physical interface
+bytes or proxy protocol overhead.
+
+Usage is stored in `singbox/application-traffic.json` in the selected data
+directory, separately from the DNS cache. It survives proxy restarts and
+configuration changes and remains visible while stopped. Desktop and CLI use
+their respective data directories. Totals are checkpointed every five seconds
+and on graceful shutdown; a crash can lose the latest uncheckpointed usage.
+
 The former command-line interfaces are retained under the unstable `zay x`
 namespace: `zay x run`, `zay x config`, and `zay x service`. They are internal
 and may change without compatibility guarantees.

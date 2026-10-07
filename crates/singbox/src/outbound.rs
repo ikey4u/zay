@@ -4,7 +4,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     future::Future,
     io,
-    path::Path,
+    path::{Path, PathBuf},
     pin::Pin,
     sync::{
         Arc, Mutex, RwLock,
@@ -24,8 +24,6 @@ use tokio_util::sync::CancellationToken;
 tokio::task_local! {
     static TRAFFIC_ATTRIBUTION: TrafficAttribution;
 }
-
-const MAX_PROCESS_TRAFFIC_RECORDS: usize = 2048;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct TrafficAttribution {
@@ -413,10 +411,7 @@ struct TrafficCounters {
     download: AtomicU64,
     connections: Mutex<HashMap<String, ActiveConnection>>,
     recent: Mutex<VecDeque<ConnectionSnapshot>>,
-    process_traffic_enabled: AtomicBool,
-    process_traffic_generation: AtomicU64,
-    process_traffic: Mutex<HashMap<String, ProcessTrafficEntry>>,
-    process_traffic_started_at: Mutex<Option<SystemTime>>,
+    process_traffic: Mutex<ProcessTrafficRecorder>,
     events: broadcast::Sender<TrafficConnectionEvent>,
 }
 
@@ -428,10 +423,7 @@ impl Default for TrafficCounters {
             download: AtomicU64::new(0),
             connections: Mutex::new(HashMap::new()),
             recent: Mutex::new(VecDeque::new()),
-            process_traffic_enabled: AtomicBool::new(false),
-            process_traffic_generation: AtomicU64::new(0),
-            process_traffic: Mutex::new(HashMap::new()),
-            process_traffic_started_at: Mutex::new(None),
+            process_traffic: Mutex::new(ProcessTrafficRecorder::default()),
             events,
         }
     }
@@ -450,6 +442,7 @@ impl TrafficCounters {
         outbound: &str,
         destination: &SocksAddr,
         network: &'static str,
+        direct: bool,
     ) -> ActiveHandle {
         let id = uuid::Uuid::new_v4().to_string();
         let upload = Arc::new(AtomicU64::new(0));
@@ -483,6 +476,7 @@ impl TrafficCounters {
             download,
             cancellation,
             attribution,
+            direct,
             process_traffic_generation: AtomicU64::new(0),
         }
     }
@@ -505,94 +499,93 @@ impl TrafficCounters {
         upload: u64,
         download: u64,
     ) {
-        if !self.process_traffic_enabled.load(Ordering::Relaxed) {
-            return;
-        }
-        let attribution = &active.attribution;
-        let key = if !attribution.process_path.is_empty() {
-            &attribution.process_path
-        } else if !attribution.process_name.is_empty() {
-            &attribution.process_name
-        } else {
-            return;
-        };
-        let now = SystemTime::now();
-        let generation =
-            self.process_traffic_generation.load(Ordering::Acquire);
-        let new_connection = active
-            .process_traffic_generation
-            .swap(generation, Ordering::AcqRel)
-            != generation;
-        let mut records = self
+        let mut state = self
             .process_traffic
             .lock()
             .expect("process traffic lock poisoned");
-        if records.len() >= MAX_PROCESS_TRAFFIC_RECORDS
-            && !records.contains_key(key)
-            && let Some(oldest) = records
-                .iter()
-                .min_by_key(|(_, record)| record.last_seen)
-                .map(|(key, _)| key.clone())
-        {
-            records.remove(&oldest);
+        if !state.enabled || upload == 0 && download == 0 {
+            return;
         }
-        let record = records.entry(key.to_owned()).or_insert_with(|| {
-            ProcessTrafficEntry {
-                process_name: attribution.process_name.clone(),
-                process_path: attribution.process_path.clone(),
-                process_lookup: attribution.process_lookup.clone(),
-                upload: 0,
-                download: 0,
-                connections: 0,
-                first_seen: now,
-                last_seen: now,
-            }
-        });
+        let attribution = &active.attribution;
+        let (key, name) = application_identity(
+            &attribution.process_path,
+            &attribution.process_name,
+        );
+        let now = SystemTime::now();
+        let new_connection = active
+            .process_traffic_generation
+            .swap(state.generation, Ordering::AcqRel)
+            != state.generation;
+        state.dirty = true;
+        let records = &mut state.records;
+        let record =
+            records
+                .entry(key.clone())
+                .or_insert_with(|| ProcessTrafficEntry {
+                    process_name: name,
+                    process_path: if attribution.process_path.is_empty() {
+                        String::new()
+                    } else {
+                        key
+                    },
+                    process_lookup: attribution.process_lookup.clone(),
+                    upload: 0,
+                    download: 0,
+                    direct_upload: 0,
+                    direct_download: 0,
+                    proxy_upload: 0,
+                    proxy_download: 0,
+                    connections: 0,
+                    first_seen: now,
+                    last_seen: now,
+                });
         record.upload = record.upload.saturating_add(upload);
         record.download = record.download.saturating_add(download);
+        if active.direct {
+            record.direct_upload = record.direct_upload.saturating_add(upload);
+            record.direct_download =
+                record.direct_download.saturating_add(download);
+        } else {
+            record.proxy_upload = record.proxy_upload.saturating_add(upload);
+            record.proxy_download =
+                record.proxy_download.saturating_add(download);
+        }
         if new_connection {
             record.connections = record.connections.saturating_add(1);
         }
         record.last_seen = now;
     }
 
-    fn set_process_traffic_enabled(&self, enabled: bool) {
-        self.process_traffic_enabled
-            .store(enabled, Ordering::Release);
-        self.process_traffic_generation
-            .fetch_add(1, Ordering::AcqRel);
-        self.process_traffic
+    fn set_process_traffic_enabled(&self, enabled: bool) -> io::Result<()> {
+        let mut state = self
+            .process_traffic
             .lock()
-            .expect("process traffic lock poisoned")
-            .clear();
-        *self
-            .process_traffic_started_at
+            .expect("process traffic lock poisoned");
+        state.enabled = enabled;
+        if enabled && state.started_at.is_none() {
+            state.started_at = Some(SystemTime::now());
+        }
+        state.dirty = true;
+        state.flush()
+    }
+
+    fn reset_process_traffic(&self) -> io::Result<()> {
+        let mut state = self
+            .process_traffic
             .lock()
-            .expect("process traffic start lock poisoned") =
-            enabled.then(SystemTime::now);
+            .expect("process traffic lock poisoned");
+        state.records.clear();
+        state.generation = state.generation.wrapping_add(1).max(1);
+        state.started_at = state.enabled.then(SystemTime::now);
+        state.dirty = true;
+        state.flush()
     }
 
     fn process_traffic_snapshot(&self) -> ProcessTrafficState {
-        let enabled = self.process_traffic_enabled.load(Ordering::Acquire);
-        let started_at = *self
-            .process_traffic_started_at
-            .lock()
-            .expect("process traffic start lock poisoned");
-        let mut records = self
-            .process_traffic
+        self.process_traffic
             .lock()
             .expect("process traffic lock poisoned")
-            .values()
-            .map(ProcessTrafficEntry::snapshot)
-            .collect::<Vec<_>>();
-        records.sort_by_key(|record| {
-            std::cmp::Reverse(record.upload.saturating_add(record.download))
-        });
-        ProcessTrafficState {
-            enabled,
-            started_at,
-            records,
-        }
+            .snapshot()
     }
 
     fn remove(&self, id: &str) {
@@ -675,6 +668,7 @@ struct ActiveHandle {
     download: Arc<AtomicU64>,
     cancellation: CancellationToken,
     attribution: TrafficAttribution,
+    direct: bool,
     process_traffic_generation: AtomicU64,
 }
 
@@ -684,9 +678,143 @@ struct ProcessTrafficEntry {
     process_lookup: String,
     upload: u64,
     download: u64,
+    direct_upload: u64,
+    direct_download: u64,
+    proxy_upload: u64,
+    proxy_download: u64,
     connections: usize,
     first_seen: SystemTime,
     last_seen: SystemTime,
+}
+
+fn application_identity(path: &str, name: &str) -> (String, String) {
+    if let Some((bundle, _)) = path.split_once(".app/") {
+        let path = format!("{bundle}.app");
+        let name = Path::new(&path)
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        (path, name)
+    } else if !path.is_empty() {
+        let name = if name.is_empty() {
+            Path::new(path)
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned()
+        } else {
+            name.to_owned()
+        };
+        (path.to_owned(), name)
+    } else if !name.is_empty() {
+        (name.to_owned(), name.to_owned())
+    } else {
+        ("Unattributed".into(), "Unattributed".into())
+    }
+}
+
+struct ProcessTrafficRecorder {
+    enabled: bool,
+    generation: u64,
+    records: HashMap<String, ProcessTrafficEntry>,
+    started_at: Option<SystemTime>,
+    storage: Option<PathBuf>,
+    dirty: bool,
+}
+
+impl Default for ProcessTrafficRecorder {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            generation: 1,
+            records: HashMap::new(),
+            started_at: None,
+            storage: None,
+            dirty: false,
+        }
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SavedProcessTraffic {
+    version: u8,
+    state: ProcessTrafficState,
+}
+
+impl ProcessTrafficRecorder {
+    fn snapshot(&self) -> ProcessTrafficState {
+        let mut records = self
+            .records
+            .values()
+            .map(ProcessTrafficEntry::snapshot)
+            .collect::<Vec<_>>();
+        records.sort_by(|a, b| {
+            b.upload
+                .saturating_add(b.download)
+                .cmp(&a.upload.saturating_add(a.download))
+                .then_with(|| a.process_path.cmp(&b.process_path))
+                .then_with(|| a.process_name.cmp(&b.process_name))
+        });
+        ProcessTrafficState {
+            enabled: self.enabled,
+            started_at: self.started_at,
+            records,
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        use std::io::Write;
+        let Some(path) = self.storage.as_ref().filter(|_| self.dirty) else {
+            return Ok(());
+        };
+        let data = serde_json::to_vec(&SavedProcessTraffic {
+            version: 1,
+            state: self.snapshot(),
+        })
+        .map_err(io::Error::other)?;
+        let temporary =
+            path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let result = (|| {
+            let mut file = options.open(&temporary)?;
+            file.write_all(&data)?;
+            file.sync_all()?;
+            drop(file);
+            std::fs::rename(&temporary, path)
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temporary);
+        }
+        result?;
+        self.dirty = false;
+        Ok(())
+    }
+}
+
+impl From<ProcessTrafficSnapshot> for ProcessTrafficEntry {
+    fn from(record: ProcessTrafficSnapshot) -> Self {
+        Self {
+            process_name: record.process_name,
+            process_path: record.process_path,
+            process_lookup: record.process_lookup,
+            upload: record.upload,
+            download: record.download,
+            direct_upload: record.direct_upload,
+            direct_download: record.direct_download,
+            proxy_upload: record.proxy_upload,
+            proxy_download: record.proxy_download,
+            connections: record.connections,
+            first_seen: record.first_seen,
+            last_seen: record.last_seen,
+        }
+    }
 }
 
 impl ProcessTrafficEntry {
@@ -697,6 +825,10 @@ impl ProcessTrafficEntry {
             process_lookup: self.process_lookup.clone(),
             upload: self.upload,
             download: self.download,
+            direct_upload: self.direct_upload,
+            direct_download: self.direct_download,
+            proxy_upload: self.proxy_upload,
+            proxy_download: self.proxy_download,
             connections: self.connections,
             first_seen: self.first_seen,
             last_seen: self.last_seen,
@@ -768,23 +900,76 @@ pub struct ConnectionSnapshot {
     pub process_lookup: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ProcessTrafficSnapshot {
     pub process_name: String,
     pub process_path: String,
     pub process_lookup: String,
     pub upload: u64,
     pub download: u64,
+    pub direct_upload: u64,
+    pub direct_download: u64,
+    pub proxy_upload: u64,
+    pub proxy_download: u64,
     pub connections: usize,
     pub first_seen: SystemTime,
     pub last_seen: SystemTime,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ProcessTrafficState {
     pub enabled: bool,
     pub started_at: Option<SystemTime>,
     pub records: Vec<ProcessTrafficSnapshot>,
+}
+
+impl ProcessTrafficState {
+    pub fn read_storage(path: &Path) -> io::Result<Option<Self>> {
+        let saved: SavedProcessTraffic = match std::fs::read(path) {
+            Ok(bytes) => {
+                serde_json::from_slice(&bytes).map_err(io::Error::other)?
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+        if saved.version != 1 {
+            return Err(io::Error::other(
+                "unsupported application usage file version",
+            ));
+        }
+        Ok(Some(saved.state))
+    }
+
+    pub fn api_value(&self) -> serde_json::Value {
+        fn date(value: SystemTime) -> Option<String> {
+            time::OffsetDateTime::from(value)
+                .format(&time::format_description::well_known::Rfc3339)
+                .ok()
+        }
+        let records = self
+            .records
+            .iter()
+            .map(|record| {
+                serde_json::json!({
+                    "process_name": record.process_name,
+                    "process_path": record.process_path,
+                    "process_lookup": record.process_lookup,
+                    "upload": record.upload,
+                    "download": record.download,
+                    "direct_upload": record.direct_upload,
+                    "direct_download": record.direct_download,
+                    "proxy_upload": record.proxy_upload,
+                    "proxy_download": record.proxy_download,
+                    "connections": record.connections,
+                    "first_seen": date(record.first_seen),
+                    "last_seen": date(record.last_seen),
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::json!({"enabled": self.enabled, "started_at": self.started_at.and_then(date), "records": records, "available": true})
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1224,6 +1409,8 @@ impl OutboundManager {
                 Arc::new(MeteredDialer {
                     inner: dialer,
                     traffic: self.traffic.clone(),
+                    route_is_direct: self
+                        .traffic_route_classifier(tag, route_direct.is_some()),
                     outbound: if route_direct.is_some() {
                         "direct".into()
                     } else {
@@ -1447,11 +1634,35 @@ impl OutboundManager {
         &self.dns
     }
 
+    fn traffic_route_classifier(
+        &self,
+        tag: &str,
+        route_direct: bool,
+    ) -> Arc<dyn Fn() -> bool + Send + Sync> {
+        let groups = self.groups.clone();
+        let tag = tag.to_owned();
+        let direct_tags = self
+            .kinds
+            .iter()
+            .filter(|(_, kind)| kind.as_str() == "direct")
+            .map(|(tag, _)| tag.clone())
+            .collect::<HashSet<_>>();
+        Arc::new(move || {
+            route_direct || direct_tags.contains(&groups.real_tag(&tag))
+        })
+    }
+
+    fn is_direct_route(&self, tag: &str) -> bool {
+        self.route_direct_entries.contains_key(tag)
+            || self.kind_owned(&self.real_tag(tag)).as_deref() == Some("direct")
+    }
+
     pub fn direct(&self) -> SharedDialer {
         Arc::new(MeteredDialer {
             inner: self.action_direct.clone(),
             traffic: self.traffic.clone(),
             outbound: "direct".into(),
+            route_is_direct: Arc::new(|| true),
         })
     }
 
@@ -1850,8 +2061,53 @@ impl OutboundManager {
         self.traffic.process_traffic_snapshot()
     }
 
-    pub fn set_process_traffic_enabled(&self, enabled: bool) {
-        self.traffic.set_process_traffic_enabled(enabled);
+    pub fn set_process_traffic_enabled(&self, enabled: bool) -> io::Result<()> {
+        self.traffic.set_process_traffic_enabled(enabled)
+    }
+
+    pub fn reset_process_traffic(&self) -> io::Result<()> {
+        self.traffic.reset_process_traffic()
+    }
+
+    /// Persist application usage separately from the disposable DNS cache.
+    pub fn configure_process_traffic_storage(
+        &self,
+        path: &Path,
+    ) -> io::Result<()> {
+        let mut recorder = self
+            .traffic
+            .process_traffic
+            .lock()
+            .expect("process traffic lock poisoned");
+        if let Some(saved) = ProcessTrafficState::read_storage(path)? {
+            recorder.enabled = saved.enabled;
+            recorder.started_at = saved.started_at;
+            recorder.records = saved
+                .records
+                .into_iter()
+                .map(|record| {
+                    let (key, _) = application_identity(
+                        &record.process_path,
+                        &record.process_name,
+                    );
+                    (key, ProcessTrafficEntry::from(record))
+                })
+                .collect();
+        } else {
+            recorder.enabled = true;
+            recorder.started_at = Some(SystemTime::now());
+        }
+        recorder.storage = Some(path.to_owned());
+        recorder.dirty = true;
+        recorder.flush()
+    }
+
+    pub fn flush_process_traffic(&self) -> io::Result<()> {
+        self.traffic
+            .process_traffic
+            .lock()
+            .expect("process traffic lock poisoned")
+            .flush()
     }
 
     pub(crate) fn register_packet_flow(
@@ -1862,7 +2118,12 @@ impl OutboundManager {
     ) -> PacketFlowTracker {
         PacketFlowTracker {
             traffic: self.traffic.clone(),
-            active: self.traffic.register(outbound, destination, network),
+            active: self.traffic.register(
+                outbound,
+                destination,
+                network,
+                self.is_direct_route(outbound),
+            ),
             closed: AtomicBool::new(false),
         }
     }
@@ -1930,6 +2191,7 @@ struct MeteredDialer {
     inner: SharedDialer,
     traffic: Arc<TrafficCounters>,
     outbound: String,
+    route_is_direct: Arc<dyn Fn() -> bool + Send + Sync>,
 }
 
 impl Dialer for MeteredDialer {
@@ -1948,8 +2210,12 @@ impl Dialer for MeteredDialer {
         destination: &'a crate::common::network::SocksAddr,
     ) -> DialFuture<'a> {
         Box::pin(async move {
-            let active =
-                self.traffic.register(&self.outbound, destination, "tcp");
+            let active = self.traffic.register(
+                &self.outbound,
+                destination,
+                "tcp",
+                (self.route_is_direct)(),
+            );
             let mut cleanup = ActiveConnectionCleanup {
                 traffic: self.traffic.clone(),
                 id: active.id.clone(),
@@ -1979,8 +2245,12 @@ impl Dialer for MeteredDialer {
         options: &'a NetworkDialOptions,
     ) -> DialFuture<'a> {
         Box::pin(async move {
-            let active =
-                self.traffic.register(&self.outbound, destination, "tcp");
+            let active = self.traffic.register(
+                &self.outbound,
+                destination,
+                "tcp",
+                (self.route_is_direct)(),
+            );
             let mut cleanup = ActiveConnectionCleanup {
                 traffic: self.traffic.clone(),
                 id: active.id.clone(),
@@ -2010,9 +2280,12 @@ impl Dialer for MeteredDialer {
     ) -> DialFuture<'a> {
         Box::pin(async move {
             let inner = self.inner.bind_tcp(destination).await?;
-            let active =
-                self.traffic
-                    .register(&self.outbound, destination, "tcp-bind");
+            let active = self.traffic.register(
+                &self.outbound,
+                destination,
+                "tcp-bind",
+                (self.route_is_direct)(),
+            );
             let inner =
                 interruptible_stream(inner, active.cancellation.clone());
             let socket = crate::adapter::stream_socket(&inner);
@@ -2033,8 +2306,12 @@ impl Dialer for MeteredDialer {
     ) -> PacketFuture<'a, PacketStream> {
         Box::pin(async move {
             let inner = self.inner.listen_udp(destination).await?;
-            let active =
-                self.traffic.register(&self.outbound, destination, "udp");
+            let active = self.traffic.register(
+                &self.outbound,
+                destination,
+                "udp",
+                (self.route_is_direct)(),
+            );
             Ok(Box::new(MeteredPacketConnection {
                 inner,
                 traffic: self.traffic.clone(),
@@ -2053,8 +2330,12 @@ impl Dialer for MeteredDialer {
                 .inner
                 .listen_udp_with_options(destination, options)
                 .await?;
-            let active =
-                self.traffic.register(&self.outbound, destination, "udp");
+            let active = self.traffic.register(
+                &self.outbound,
+                destination,
+                "udp",
+                (self.route_is_direct)(),
+            );
             Ok(Box::new(MeteredPacketConnection {
                 inner,
                 traffic: self.traffic.clone(),
@@ -2071,8 +2352,12 @@ impl Dialer for MeteredDialer {
         destination: &'a crate::common::network::SocksAddr,
     ) -> PacketFuture<'a, IcmpResponse> {
         Box::pin(async move {
-            let active =
-                self.traffic.register(&self.outbound, destination, "icmp");
+            let active = self.traffic.register(
+                &self.outbound,
+                destination,
+                "icmp",
+                (self.route_is_direct)(),
+            );
             let _cleanup = ActiveConnectionCleanup {
                 traffic: self.traffic.clone(),
                 id: active.id.clone(),
@@ -2104,8 +2389,12 @@ impl Dialer for MeteredDialer {
         options: &'a NetworkDialOptions,
     ) -> PacketFuture<'a, IcmpResponse> {
         Box::pin(async move {
-            let active =
-                self.traffic.register(&self.outbound, destination, "icmp");
+            let active = self.traffic.register(
+                &self.outbound,
+                destination,
+                "icmp",
+                (self.route_is_direct)(),
+            );
             let _cleanup = ActiveConnectionCleanup {
                 traffic: self.traffic.clone(),
                 id: active.id.clone(),
@@ -4459,6 +4748,7 @@ mod tests {
             inner: Arc::new(PendingDialer),
             traffic: traffic.clone(),
             outbound: "test".into(),
+            route_is_direct: Arc::new(|| false),
         };
         let task = tokio::spawn(async move {
             dialer
@@ -4499,6 +4789,7 @@ mod tests {
             inner: Arc::new(PendingDialer),
             traffic: traffic.clone(),
             outbound: "test".into(),
+            route_is_direct: Arc::new(|| false),
         };
         let task = tokio::spawn(async move {
             dialer
@@ -4521,6 +4812,7 @@ mod tests {
                     port: 80,
                 },
                 "tcp",
+                false,
             );
             traffic.remove(&active.id);
         }
@@ -4528,7 +4820,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn process_traffic_is_opt_in_and_cleared_when_disabled() {
+    async fn application_usage_pauses_without_losing_history() {
         let traffic = TrafficCounters::default();
         let destination: SocksAddr = "example.com:443".parse().unwrap();
         let attribution = TrafficAttribution {
@@ -4539,7 +4831,7 @@ mod tests {
         };
 
         with_traffic_attribution(attribution.clone(), async {
-            let active = traffic.register("Proxy", &destination, "tcp");
+            let active = traffic.register("Proxy", &destination, "tcp", false);
             traffic.count_upload(&active, 64);
             traffic.count_download(&active, 128);
         })
@@ -4547,9 +4839,9 @@ mod tests {
         assert!(!traffic.process_traffic_snapshot().enabled);
         assert!(traffic.process_traffic_snapshot().records.is_empty());
 
-        traffic.set_process_traffic_enabled(true);
+        traffic.set_process_traffic_enabled(true).unwrap();
         with_traffic_attribution(attribution, async {
-            let active = traffic.register("Proxy", &destination, "tcp");
+            let active = traffic.register("Proxy", &destination, "tcp", false);
             traffic.count_upload(&active, 256);
             traffic.count_download(&active, 512);
         })
@@ -4562,10 +4854,174 @@ mod tests {
         assert_eq!(state.records[0].upload, 256);
         assert_eq!(state.records[0].download, 512);
 
-        traffic.set_process_traffic_enabled(false);
+        traffic.set_process_traffic_enabled(false).unwrap();
         let state = traffic.process_traffic_snapshot();
         assert!(!state.enabled);
-        assert!(state.records.is_empty());
+        assert_eq!(state.records[0].upload, 256);
+        traffic.reset_process_traffic().unwrap();
+        assert!(traffic.process_traffic_snapshot().records.is_empty());
+    }
+
+    #[tokio::test]
+    async fn application_usage_combines_helpers_and_separates_routes() {
+        let traffic = TrafficCounters::default();
+        traffic.set_process_traffic_enabled(true).unwrap();
+        let destination: SocksAddr = "example.com:443".parse().unwrap();
+        for (path, direct, network, upload, download) in [
+            (
+                "/Applications/Browser.app/Contents/MacOS/Browser",
+                true,
+                "tcp",
+                100,
+                200,
+            ),
+            (
+                "/Applications/Browser.app/Contents/Frameworks/Helper.app/Contents/MacOS/Helper",
+                false,
+                "udp",
+                300,
+                400,
+            ),
+        ] {
+            with_traffic_attribution(
+                TrafficAttribution {
+                    process_name: "helper".into(),
+                    process_path: path.into(),
+                    ..Default::default()
+                },
+                async {
+                    let active = traffic.register(
+                        "route",
+                        &destination,
+                        network,
+                        direct,
+                    );
+                    traffic.count_upload(&active, upload);
+                    traffic.count_download(&active, download);
+                    traffic.remove(&active.id);
+                },
+            )
+            .await;
+        }
+        let state = traffic.process_traffic_snapshot();
+        assert_eq!(state.records.len(), 1);
+        let record = &state.records[0];
+        assert_eq!(record.process_name, "Browser");
+        assert_eq!(record.process_path, "/Applications/Browser.app");
+        assert_eq!((record.upload, record.download), (400, 600));
+        assert_eq!((record.direct_upload, record.direct_download), (100, 200));
+        assert_eq!((record.proxy_upload, record.proxy_download), (300, 400));
+        assert_eq!(record.connections, 2);
+        assert_eq!(state.api_value()["records"][0]["proxy_download"], 400);
+    }
+
+    #[test]
+    fn application_usage_preserves_unattributed_traffic_and_resets_live_flows()
+    {
+        let traffic = TrafficCounters::default();
+        traffic.set_process_traffic_enabled(true).unwrap();
+        let destination: SocksAddr = "192.0.2.1:443".parse().unwrap();
+        let active = traffic.register("plain", &destination, "tcp", true);
+        traffic.count_upload(&active, 20);
+        traffic.set_process_traffic_enabled(false).unwrap();
+        traffic.count_upload(&active, 100);
+        traffic.set_process_traffic_enabled(true).unwrap();
+        traffic.count_download(&active, 30);
+        let state = traffic.process_traffic_snapshot();
+        assert_eq!(state.records[0].process_name, "Unattributed");
+        assert_eq!(
+            (state.records[0].upload, state.records[0].download),
+            (20, 30)
+        );
+        assert_eq!(state.records[0].connections, 1);
+        traffic.reset_process_traffic().unwrap();
+        traffic.count_download(&active, 40);
+        let state = traffic.process_traffic_snapshot();
+        assert_eq!(
+            (state.records[0].upload, state.records[0].download),
+            (0, 40)
+        );
+        assert_eq!(state.records[0].connections, 1);
+        assert_eq!(state.records[0].direct_download, 40);
+    }
+
+    #[test]
+    fn application_usage_classifier_follows_selected_direct_aliases() {
+        let options: Options = serde_json::from_value(serde_json::json!({"outbounds": [
+            {"type": "direct", "tag": "plain"},
+            {"type": "socks", "tag": "tunnel", "server": "127.0.0.1", "server_port": 12345},
+            {"type": "selector", "tag": "inner", "outbounds": ["plain", "tunnel"]},
+            {"type": "selector", "tag": "pick", "outbounds": ["inner"]}
+        ]})).unwrap();
+        let manager = OutboundManager::from_options(&options, "pick").unwrap();
+        let classify = manager.traffic_route_classifier("pick", false);
+        assert!(classify());
+        manager.select_group("inner", "tunnel").unwrap();
+        assert!(!classify());
+        manager.select_group("inner", "plain").unwrap();
+        assert!(classify());
+        assert!(manager.traffic_route_classifier("synthetic-direct", true)());
+    }
+
+    #[test]
+    fn application_usage_survives_restart_pause_and_explicit_reset() {
+        let dir = std::env::temp_dir()
+            .join(format!("zay-application-usage-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("usage.json");
+        let options = Options::default();
+        let manager = OutboundManager::from_options(&options, "").unwrap();
+        manager.configure_process_traffic_storage(&path).unwrap();
+        assert!(manager.process_traffic().enabled);
+        let destination: SocksAddr = "192.0.2.1:53".parse().unwrap();
+        let flow = manager.register_packet_flow("direct", &destination, "udp");
+        flow.count_forward(64);
+        flow.count_reverse(128);
+        flow.close();
+        manager.flush_process_traffic().unwrap();
+        manager.set_process_traffic_enabled(false).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        drop(manager);
+        let restarted = OutboundManager::from_options(&options, "").unwrap();
+        restarted.configure_process_traffic_storage(&path).unwrap();
+        let state = restarted.process_traffic();
+        assert!(!state.enabled);
+        assert_eq!(
+            (state.records[0].upload, state.records[0].download),
+            (64, 128)
+        );
+        assert_eq!(state.records[0].connections, 1);
+        restarted.reset_process_traffic().unwrap();
+        assert!(
+            super::ProcessTrafficState::read_storage(&path)
+                .unwrap()
+                .unwrap()
+                .records
+                .is_empty()
+        );
+        drop(restarted);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn application_usage_does_not_overwrite_corrupt_history() {
+        let dir = std::env::temp_dir()
+            .join(format!("zay-application-usage-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("usage.json");
+        std::fs::write(&path, b"broken history").unwrap();
+        let manager =
+            OutboundManager::from_options(&Options::default(), "").unwrap();
+        assert!(manager.configure_process_traffic_storage(&path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"broken history");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]

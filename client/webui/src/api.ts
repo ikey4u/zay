@@ -187,12 +187,17 @@ export type ProcessTrafficRecord = {
   process_lookup: string
   upload: number
   download: number
+  direct_upload: number
+  direct_download: number
+  proxy_upload: number
+  proxy_download: number
   connections: number
   first_seen: string
   last_seen: string
 }
 
 export type ProcessTrafficResponse = {
+  available: boolean
   enabled: boolean
   started_at?: string | null
   records: ProcessTrafficRecord[]

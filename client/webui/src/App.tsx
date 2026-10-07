@@ -6,6 +6,7 @@ import {
   Search, Server, Settings2, ShieldCheck, TerminalSquare, Trash2,
   TriangleAlert, Upload, Users,
 } from "lucide-react"
+import { ApplicationTrafficOverview } from "@/application-traffic"
 import { LabPage } from "@/lab"
 import {
   ApiError, api, setToken, type ConfigPayload, type EventRecord, type EventsResponse,
@@ -21,7 +22,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Switch } from "@/components/ui/switch"
 import { cn } from "@/lib/utils"
 
-type Page = "proxy" | "mesh" | "connections" | "logs" | "lab"
+type Page = "overview" | "proxy" | "mesh" | "connections" | "logs" | "lab"
 type Notice = { kind: "ok" | "error" | "warning"; text: string } | null
 
 function applyMessage(result: ApplyResponse): string {
@@ -46,6 +47,7 @@ const emptyForm: ConfigPayload = {
 }
 
 const navItems = [
+  { id: "overview" as const, label: "Overview", icon: Activity },
   { id: "proxy" as const, label: "代理", icon: ShieldCheck },
   { id: "mesh" as const, label: "Mesh 组网", icon: Network },
   { id: "connections" as const, label: "网络连接", icon: Globe2 },
@@ -97,14 +99,15 @@ function configToForm(state: StateResponse): ConfigPayload {
 const splitLines = (value: string) => value.split(/[\n,]/).map((item) => item.trim()).filter(Boolean)
 
 export default function App() {
-  const [page, setPage] = useState<Page>("proxy")
+  const [page, setPage] = useState<Page>("overview")
   const [state, setState] = useState<StateResponse | null>(null)
   const [form, setForm] = useState<ConfigPayload>(emptyForm)
   const [savedForm, setSavedForm] = useState<ConfigPayload | null>(null)
   const [events, setEvents] = useState<EventRecord[]>([])
   const [eventsPath, setEventsPath] = useState("")
-  const [processTraffic, setProcessTraffic] = useState<ProcessTrafficResponse>({ enabled: false, records: [] })
+  const [processTraffic, setProcessTraffic] = useState<ProcessTrafficResponse>({ available: false, enabled: true, records: [] })
   const [processTrafficBusy, setProcessTrafficBusy] = useState(false)
+  const [processTrafficError, setProcessTrafficError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [applyRequired, setApplyRequired] = useState(false)
@@ -144,15 +147,28 @@ export default function App() {
         const result = await api<EventsResponse>("/api/v1/events")
         setEvents(result.events); setEventsPath(result.path)
       } catch { /* state polling reports authorization and availability */ }
-      if (page === "connections") {
-        try { setProcessTraffic(await api<ProcessTrafficResponse>("/api/v1/process-traffic")) }
-        catch { /* process traffic requires a running proxy core */ }
-      }
+
     }
     void load()
     const timer = window.setInterval(() => void load(), 2500)
     return () => window.clearInterval(timer)
   }, [page])
+
+  useEffect(() => {
+    if (page !== "overview" || processTrafficBusy) return
+    let active = true
+    const load = async () => {
+      try {
+        const value = await api<ProcessTrafficResponse>("/api/v1/process-traffic")
+        if (active) { setProcessTraffic(value); setProcessTrafficError(null) }
+      } catch (error) {
+        if (active) setProcessTrafficError(error instanceof Error ? error.message : String(error))
+      }
+    }
+    void load()
+    const timer = window.setInterval(() => void load(), 2500)
+    return () => { active = false; window.clearInterval(timer) }
+  }, [page, processTrafficBusy])
 
   useEffect(() => { contentRef.current?.scrollTo({ top: 0 }) }, [page])
 
@@ -206,12 +222,11 @@ export default function App() {
     const next = { ...form, proxy: { ...form.proxy, domain_rules: [...form.proxy.domain_rules, rule] } }
     return persistConfig(next)
   }
-  const toggleProcessTraffic = async (enabled: boolean) => {
+  const changeProcessTraffic = async (action: "enable" | "disable" | "reset") => {
     setProcessTrafficBusy(true); setNotice(null)
     try {
-      const next = await api<ProcessTrafficResponse>(`/api/v1/process-traffic/${enabled ? "enable" : "disable"}`, { method: "POST" })
-      setProcessTraffic(next)
-      setNotice({ kind: "ok", text: enabled ? "已开始记录按进程流量；关闭或重启后会清空。" : "已停止记录并清空按进程流量。" })
+      const next = await api<ProcessTrafficResponse>(`/api/v1/process-traffic/${action}`, { method: "POST" })
+      setProcessTraffic(next); setProcessTrafficError(null)
     } catch (error) {
       setNotice({ kind: "error", text: error instanceof Error ? error.message : String(error) })
     } finally { setProcessTrafficBusy(false) }
@@ -277,9 +292,9 @@ export default function App() {
           {applyRequired && <ApplyBar busy={busy} onApply={() => void applyPending()} />}
           {coreFailed && coreError && <CoreAlert kind="error" error={coreError} busy={busy} onRestart={() => void (!running ? coreAction("start") : applyPending(!applyRequired))} onLogs={() => setPage("logs")} />}
           {coreDegraded && coreError && <CoreAlert kind="warning" error={coreError} busy={busy} onRestart={() => void (!running ? coreAction("start") : applyPending(!applyRequired))} onLogs={() => setPage("logs")} />}
-          {loading && !state ? <Loading /> : page === "proxy" ? <ProxyWorkspace form={form} update={updateProxy} nodes={state?.proxy_nodes ?? []} ruleSets={state?.rule_sets ?? { builtin: [], external: [] }} busy={busy} onTestNodes={(nodes) => void testNodes(nodes)} onApplyProvider={() => void persistConfig(form, true)} onSectionChange={() => contentRef.current?.scrollTo({ top: 0 })} onRulesChanged={() => { void refresh(true) }} onApply={() => void persistConfig(form)} />
+          {loading && !state ? <Loading /> : page === "overview" ? <ApplicationTrafficOverview value={processTraffic} busy={processTrafficBusy} error={processTrafficError} tun={state?.config.proxy?.tun?.enabled ?? false} onAction={(action) => void changeProcessTraffic(action)} /> : page === "proxy" ? <ProxyWorkspace form={form} update={updateProxy} nodes={state?.proxy_nodes ?? []} ruleSets={state?.rule_sets ?? { builtin: [], external: [] }} busy={busy} onTestNodes={(nodes) => void testNodes(nodes)} onApplyProvider={() => void persistConfig(form, true)} onSectionChange={() => contentRef.current?.scrollTo({ top: 0 })} onRulesChanged={() => { void refresh(true) }} onApply={() => void persistConfig(form)} />
             : page === "mesh" ? <MeshWorkspace form={form} update={updateMesh} instances={meshInstances} onSectionChange={() => contentRef.current?.scrollTo({ top: 0 })} />
-            : page === "connections" ? <Connections events={events} nodes={state?.proxy_nodes ?? []} subscriptions={form.proxy.subscriptions} busy={busy} processTraffic={processTraffic} processTrafficBusy={processTrafficBusy} onToggleProcessTraffic={(enabled) => void toggleProcessTraffic(enabled)} onCreateRule={createConnectionRule} />
+            : page === "connections" ? <Connections events={events} nodes={state?.proxy_nodes ?? []} subscriptions={form.proxy.subscriptions} busy={busy} onCreateRule={createConnectionRule} />
             : page === "lab" ? <LabPage />
             : <RuntimeLogs events={events} path={eventsPath} />}
         </div>
@@ -393,7 +408,7 @@ function MeshNodes({ instances }: { instances: MeshInstance[] }) { const peers =
 function MeshSettings({ form, update }: { form: ConfigPayload; update: <K extends keyof ConfigPayload["mesh"]>(key: K, value: ConfigPayload["mesh"][K]) => void }) { const m = form.mesh; return <div className="space-y-5"><PageTitle title="Mesh 设置" description="配置节点角色、网络身份、监听器和路由。" /><Card><CardHeader><CardTitle>节点角色</CardTitle></CardHeader><CardContent className="space-y-5"><ToggleRow title="启用 Mesh" description="开启后随当前启动一起运行" checked={m.enabled} onChecked={(value) => update("enabled", value)} /><div className="grid gap-3 sm:grid-cols-2">{(["node", "relay"] as const).map((role) => <button key={role} onClick={() => update("role", role)} className={cn("role-card", m.role === role && "role-card-active")}><div className="flex items-center gap-3"><div className="icon-tile">{role === "node" ? <Cable className="h-4 w-4" /> : <Server className="h-4 w-4" />}</div><div className="text-left"><div className="font-medium">{role === "node" ? "Node" : "Relay"}</div><div className="text-xs text-muted-foreground">{role === "node" ? "完整网络成员" : "公网中继节点"}</div></div></div></button>)}</div></CardContent></Card><Card><CardHeader><CardTitle>网络身份</CardTitle></CardHeader><CardContent className="form-grid"><Field label="节点名称"><Input value={m.name} onChange={(event) => update("name", event.target.value)} placeholder="macbook-pro" /></Field><Field label="虚拟 IPv4"><Input value={m.ipv4} onChange={(event) => update("ipv4", event.target.value)} placeholder="10.126.126.2/24" /></Field><Field label="网络名"><Input value={m.network_name} onChange={(event) => update("network_name", event.target.value)} /></Field><Field label="网络密钥"><Input type="password" value={m.network_secret} onChange={(event) => update("network_secret", event.target.value)} /></Field></CardContent></Card><Card><CardHeader><CardTitle>连接与路由</CardTitle></CardHeader><CardContent className="grid gap-4 md:grid-cols-2"><TextArea label="Peers" value={m.peers.join("\n")} onChange={(value) => update("peers", splitLines(value))} placeholder="tcp://relay.example.com:11010" /><TextArea label="Listeners" value={m.listeners.join("\n")} onChange={(value) => update("listeners", splitLines(value))} placeholder="tcp://0.0.0.0:11010" /><TextArea label="Mesh 路由" value={m.mesh_routes.join("\n")} onChange={(value) => update("mesh_routes", splitLines(value))} /><TextArea label="代理网段" value={m.proxy_networks.join("\n")} onChange={(value) => update("proxy_networks", splitLines(value))} /></CardContent></Card></div> }
 
 type ConnectionMatcher = "host" | "process" | "source" | "destination"
-function Connections({ events, nodes, subscriptions, busy, processTraffic, processTrafficBusy, onToggleProcessTraffic, onCreateRule }: { events: EventRecord[]; nodes: ProxyNode[]; subscriptions: string[]; busy: boolean; processTraffic: ProcessTrafficResponse; processTrafficBusy: boolean; onToggleProcessTraffic: (enabled: boolean) => void; onCreateRule: (rule: DomainRule) => Promise<boolean> }) {
+function Connections({ events, nodes, subscriptions, busy, onCreateRule }: { events: EventRecord[]; nodes: ProxyNode[]; subscriptions: string[]; busy: boolean; onCreateRule: (rule: DomainRule) => Promise<boolean> }) {
   const [query, setQuery] = useState("")
   const [evidence, setEvidence] = useState("all")
   const [selected, setSelected] = useState<EventRecord | null>(null)
@@ -402,11 +417,7 @@ function Connections({ events, nodes, subscriptions, busy, processTraffic, proce
     const haystack = `${fields.domain ?? ""} ${fields.source ?? ""} ${fields.destination ?? ""} ${fields.process_name ?? ""} ${fields.process_path ?? ""} ${fields.app ?? ""} ${fields.process_lookup ?? ""} ${fields.node ?? ""}`.toLowerCase()
     return haystack.includes(query.toLowerCase()) && (evidence === "all" || fields.domain_confidence === evidence)
   }), [events, evidence, query])
-  return <div className="space-y-5"><PageTitle title="网络连接" description="选择任意连接，可按 Host、Process、Source 或 Destination 为它创建定向代理规则。" /><ProcessTrafficPanel value={processTraffic} busy={processTrafficBusy} onToggle={onToggleProcessTraffic} /><FilterBar query={query} setQuery={setQuery} placeholder="筛选域名、IP、应用或节点"><Select value={evidence} onValueChange={setEvidence}><SelectTrigger className="w-40"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">全部域名证据</SelectItem><SelectItem value="exact">精确证据</SelectItem><SelectItem value="correlated">DNS 关联</SelectItem><SelectItem value="none">未识别</SelectItem></SelectContent></Select></FilterBar><div className="rounded-xl border border-border bg-card/65 p-3 text-xs text-muted-foreground"><span className="text-emerald-300">精确</span>来自 FakeIP、SNI、HTTP Host 或 QUIC；<span className="ml-2 text-amber-300">关联</span>来自有 TTL 的 DNS IP 映射；没有证据的连接保持“未识别”。</div><DataTable headers={["时间", "进程", "域名", "目标地址", "网络 / 协议", "规则", "节点", "证据", ""]}>{rows.slice(0, 300).map((event, index) => { const f = event.fields ?? {}; return <tr key={`${event.timestamp}-${index}`} className="table-row cursor-pointer" onClick={() => setSelected(event)}><td className="whitespace-nowrap font-mono text-xs text-muted-foreground">{formatTime(event.timestamp)}</td><td className="max-w-72"><ProcessIdentity name={f.process_name} path={f.process_path ?? f.app} lookup={f.process_lookup} /></td><td className="max-w-64 truncate font-medium" title={f.domain}>{f.domain || <span className="text-muted-foreground">未识别</span>}</td><td className="font-mono text-xs">{f.destination ?? "—"}</td><td>{[f.network, f.protocol].filter(Boolean).join(" / ") || "—"}</td><td className="font-mono text-xs">{f.rule ?? "—"}</td><td>{f.node ?? f.outbound ?? "—"}</td><td><Evidence source={f.domain_source} confidence={f.domain_confidence} /></td><td><Button size="sm" variant="ghost" onClick={(click) => { click.stopPropagation(); setSelected(event) }}>定向代理</Button></td></tr> })}</DataTable>{rows.length === 0 && <Empty icon={Globe2} title="没有匹配的连接" text="产生网络流量后，连接记录会在这里出现。" />}{selected && <ConnectionRuleDialog event={selected} nodes={nodes} subscriptions={subscriptions} busy={busy} onClose={() => setSelected(null)} onSubmit={async (rule) => { if (await onCreateRule(rule)) setSelected(null) }} />}</div>
-}
-
-function ProcessTrafficPanel({ value, busy, onToggle }: { value: ProcessTrafficResponse; busy: boolean; onToggle: (enabled: boolean) => void }) {
-  return <Card><CardHeader><div className="flex items-start justify-between gap-5"><div><CardTitle>按进程流量记录</CardTitle><CardDescription className="mt-1">默认关闭。开启后只在内存中累计，不写入磁盘；关闭或重启即清空。</CardDescription></div><Switch checked={value.enabled} disabled={busy} onCheckedChange={onToggle} aria-label="按进程流量记录" /></div></CardHeader>{value.enabled && <CardContent><div className="mb-3 flex items-center gap-2 text-xs text-muted-foreground"><Database className="h-3.5 w-3.5" />{value.started_at ? `自 ${formatTime(value.started_at)} 开始` : "正在记录"} · {value.records.length} 个进程</div><DataTable headers={["进程", "连接数", "上传", "下载", "总计", "最近活动"]}>{value.records.slice(0, 200).map((record) => <tr key={record.process_path || record.process_name} className="table-row"><td className="max-w-md"><ProcessIdentity name={record.process_name} path={record.process_path} lookup={record.process_lookup} /></td><td>{record.connections}</td><td className="font-mono text-xs">{formatBytes(record.upload)}</td><td className="font-mono text-xs">{formatBytes(record.download)}</td><td className="font-mono text-xs font-medium">{formatBytes(record.upload + record.download)}</td><td className="whitespace-nowrap font-mono text-xs text-muted-foreground">{formatTime(record.last_seen)}</td></tr>)}</DataTable>{value.records.length === 0 && <div className="rounded-b-xl border border-t-0 border-border p-5 text-center text-sm text-muted-foreground">正在等待可归属到进程的流量。</div>}</CardContent>}</Card>
+  return <div className="space-y-5"><PageTitle title="网络连接" description="选择任意连接，可按 Host、Process、Source 或 Destination 为它创建定向代理规则。" /><FilterBar query={query} setQuery={setQuery} placeholder="筛选域名、IP、应用或节点"><Select value={evidence} onValueChange={setEvidence}><SelectTrigger className="w-40"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">全部域名证据</SelectItem><SelectItem value="exact">精确证据</SelectItem><SelectItem value="correlated">DNS 关联</SelectItem><SelectItem value="none">未识别</SelectItem></SelectContent></Select></FilterBar><div className="rounded-xl border border-border bg-card/65 p-3 text-xs text-muted-foreground"><span className="text-emerald-300">精确</span>来自 FakeIP、SNI、HTTP Host 或 QUIC；<span className="ml-2 text-amber-300">关联</span>来自有 TTL 的 DNS IP 映射；没有证据的连接保持“未识别”。</div><DataTable headers={["时间", "进程", "域名", "目标地址", "网络 / 协议", "规则", "节点", "证据", ""]}>{rows.slice(0, 300).map((event, index) => { const f = event.fields ?? {}; return <tr key={`${event.timestamp}-${index}`} className="table-row cursor-pointer" onClick={() => setSelected(event)}><td className="whitespace-nowrap font-mono text-xs text-muted-foreground">{formatTime(event.timestamp)}</td><td className="max-w-72"><ProcessIdentity name={f.process_name} path={f.process_path ?? f.app} lookup={f.process_lookup} /></td><td className="max-w-64 truncate font-medium" title={f.domain}>{f.domain || <span className="text-muted-foreground">未识别</span>}</td><td className="font-mono text-xs">{f.destination ?? "—"}</td><td>{[f.network, f.protocol].filter(Boolean).join(" / ") || "—"}</td><td className="font-mono text-xs">{f.rule ?? "—"}</td><td>{f.node ?? f.outbound ?? "—"}</td><td><Evidence source={f.domain_source} confidence={f.domain_confidence} /></td><td><Button size="sm" variant="ghost" onClick={(click) => { click.stopPropagation(); setSelected(event) }}>定向代理</Button></td></tr> })}</DataTable>{rows.length === 0 && <Empty icon={Globe2} title="没有匹配的连接" text="产生网络流量后，连接记录会在这里出现。" />}{selected && <ConnectionRuleDialog event={selected} nodes={nodes} subscriptions={subscriptions} busy={busy} onClose={() => setSelected(null)} onSubmit={async (rule) => { if (await onCreateRule(rule)) setSelected(null) }} />}</div>
 }
 
 function ConnectionRuleDialog({ event, nodes, subscriptions, busy, onClose, onSubmit }: { event: EventRecord; nodes: ProxyNode[]; subscriptions: string[]; busy: boolean; onClose: () => void; onSubmit: (rule: DomainRule) => Promise<void> }) {

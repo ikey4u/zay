@@ -53,6 +53,7 @@ pub enum Command {
     UpsertRule(DomainRuleFile),
     DeleteRule(String),
     RouteConnection(serde_json::Value, Option<String>),
+    ProcessTraffic(&'static str),
     Shutdown,
 }
 
@@ -66,6 +67,8 @@ pub struct Update {
     pub mesh: serde_json::Value,
     pub proxies: Vec<ProxyNode>,
     pub connections: serde_json::Value,
+    pub process_traffic: serde_json::Value,
+    pub process_traffic_error: Option<String>,
     pub logs: Vec<String>,
     pub telemetry_error: Option<String>,
     pub proxy_error: Option<String>,
@@ -95,7 +98,7 @@ pub fn launch(
             let mut client = match Client::new(data_dir) {
                 Ok(client) => client,
                 Err(error) => {
-                    let _ = events.send(Update {connections: serde_json::json!({}), logs: vec![], telemetry_error: None, proxies: vec![], proxy_error: None, config: None, retry_config: None, status: "Unavailable".into(), running:false, proxy_ready:false, tun_active:false, mesh: serde_json::json!([]), error:Some(format!("{error:#}")), action_error:None, finished:true, quit:false, mesh_test:None, route_test:None}).await;
+                    let _ = events.send(Update {process_traffic: serde_json::json!({}), process_traffic_error: None, connections: serde_json::json!({}), logs: vec![], telemetry_error: None, proxies: vec![], proxy_error: None, config: None, retry_config: None, status: "Unavailable".into(), running:false, proxy_ready:false, tun_active:false, mesh: serde_json::json!([]), error:Some(format!("{error:#}")), action_error:None, finished:true, quit:false, mesh_test:None, route_test:None}).await;
                     return;
                 }
             };
@@ -180,6 +183,7 @@ pub fn launch(
                             (apply_change(&mut client, &config, false).await, true, false)
                         }
                         Ok(Command::RouteConnection(connection, target)) => (route_connection(&mut client, connection, target).await, true, false),
+                        Ok(Command::ProcessTraffic(action)) => (client.set_process_traffic(action).await.map(|_| ()), true, false),
                         Ok(Command::Shutdown) | Err(_) => (client.shutdown().await, true, true),
                     },
                     _ = timer.tick() => (Ok(()), false, false),
@@ -207,8 +211,12 @@ pub fn launch(
                 let (connections, telemetry_error) = if status.running && client.config().is_ok_and(|c| c.enabled) {
                     match client.connections().await { Ok(value) => (value, None), Err(error) => (serde_json::json!({}), Some(format!("{error:#}"))) }
                 } else { (serde_json::json!({}), None) };
+                let (process_traffic, process_traffic_error) = match client.process_traffic().await {
+                    Ok(value) => (value, None),
+                    Err(error) => (serde_json::json!({}), Some(format!("{error:#}"))),
+                };
                 let update = Update {
-                    connections, telemetry_error, logs: client.recent_logs().unwrap_or_default(),
+                    process_traffic, process_traffic_error, connections, telemetry_error, logs: client.recent_logs().unwrap_or_default(),
                     proxies, proxy_error: proxy_error.clone(),
                     tun_active: status.tun_active(),
                     config: client.config().ok(), retry_config: retry_config.clone(), status: format!("{:?}", status.health),

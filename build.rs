@@ -175,9 +175,7 @@ fn embed_webui(out_dir: &Path) {
         return;
     }
 
-    if !webui_dir.join("node_modules").is_dir() {
-        run_npm(&webui_dir, &["ci"]);
-    }
+    ensure_webui_dependencies(&webui_dir);
     run_npm(&webui_dir, &["run", "build"]);
 
     let dist = webui_dir.join("dist");
@@ -186,6 +184,30 @@ fn embed_webui(out_dir: &Path) {
     copy_file(&dist.join("assets/app.css"), &staged.join("app.css"));
     copy_file(&dist.join("logo.svg"), &staged.join("logo.svg"));
     fs::write(&stamp_path, stamp).expect("writing webui stamp");
+}
+
+fn ensure_webui_dependencies(webui_dir: &Path) {
+    // An existing node_modules may belong to an older checkout. Keep the
+    // successful install's stamp inside it so deleting it also invalidates
+    // the stamp, and hash contents so branch switches are detected reliably.
+    let stamp_path = webui_dir.join("node_modules/.zay-dependencies-stamp");
+    let mut hasher = Sha256::new();
+    for name in ["package.json", "package-lock.json"] {
+        let path = webui_dir.join(name);
+        let contents = fs::read(&path).unwrap_or_else(|error| {
+            panic!("reading {}: {error}", path.display())
+        });
+        hasher.update(name.as_bytes());
+        hasher.update((contents.len() as u64).to_le_bytes());
+        hasher.update(contents);
+    }
+    let stamp = format!("{:x}", hasher.finalize());
+    if fs::read_to_string(&stamp_path).ok().as_deref() == Some(stamp.as_str()) {
+        return;
+    }
+
+    run_npm(webui_dir, &["ci", "--include=dev"]);
+    fs::write(&stamp_path, stamp).expect("writing webui dependencies stamp");
 }
 
 fn run_npm(webui_dir: &Path, args: &[&str]) {

@@ -92,6 +92,12 @@ impl NativeRuntime {
         if let Some(cache_path) = cache_path.as_deref() {
             restore_cache_ownership(cache_path);
         }
+        let traffic_path = base_path.join("application-traffic.json");
+        runtime
+            .outbounds()
+            .configure_process_traffic_storage(&traffic_path)
+            .context("loading saved application traffic usage")?;
+        crate::privilege::restore_invoker_ownership(&traffic_path);
         let handle = runtime.handle();
         let engine_logs = if capture_logs {
             runtime.subscribe_logs().ok()
@@ -160,16 +166,30 @@ impl NativeRuntime {
                         );
                     }
                     let _ = ready_tx.send(Ok(()));
-                    runtime_handle.cancelled().await;
+                    let mut traffic_checkpoint = tokio::time::interval(std::time::Duration::from_secs(5));
+                    loop {
+                        tokio::select! {
+                            _ = runtime_handle.cancelled() => break,
+                            _ = traffic_checkpoint.tick() => {
+                                if let Err(error) = runtime.outbounds().flush_process_traffic() {
+                                    tracing::error!(%error, "saving application traffic usage");
+                                }
+                                crate::privilege::restore_invoker_ownership(&traffic_path);
+                            }
+                        }
+                    }
                     let result = runtime
                         .close()
                         .await
                         .context("closing native sing-box runtime");
+                    let usage_result = runtime.outbounds().flush_process_traffic()
+                        .context("saving application traffic usage on shutdown");
+                    crate::privilege::restore_invoker_ownership(&traffic_path);
                     if let Some(task) = log_task {
                         task.abort();
                     }
                     let _ = fs::remove_file(&clash_api_path);
-                    result
+                    result.and(usage_result)
                 })
             })
             .context("spawning native sing-box runtime thread")?;
@@ -332,6 +352,131 @@ mod tests {
         assert!(!host.is_running());
         assert!(TcpListener::bind(("127.0.0.1", port)).is_ok());
 
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn application_usage_is_saved_on_shutdown_and_served_after_restart() {
+        use std::{
+            io::{Read, Write},
+            net::TcpStream,
+        };
+
+        let directory = temporary_directory("application-usage");
+        let reservation = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = reservation.local_addr().unwrap().port();
+        drop(reservation);
+        let target = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let target_port = target.local_addr().unwrap().port();
+        let echo = thread::spawn(move || {
+            let (mut socket, _) = target.accept().unwrap();
+            socket
+                .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+                .unwrap();
+            let mut data = [0u8; 64];
+            socket.read_exact(&mut data).unwrap();
+            assert_eq!(data, [7; 64]);
+            socket.write_all(&[8; 128]).unwrap();
+        });
+        let config_path = directory.join("config.json");
+        fs::write(&config_path, serde_json::to_vec(&serde_json::json!({
+            "inbounds": [{"type": "mixed", "tag": "mixed-in", "listen": "127.0.0.1", "listen_port": port}],
+            "outbounds": [{"type": "direct", "tag": "plain"}],
+            "route": {"final": "plain"},
+            "experimental": {"clash_api": {"external_controller": "127.0.0.1:0"}}
+        })).unwrap()).unwrap();
+        let mut host = NativeRuntime::start(&config_path, &directory).unwrap();
+        let mut socket = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        socket
+            .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .unwrap();
+        socket.write_all(&[5, 1, 0]).unwrap();
+        let mut method = [0u8; 2];
+        socket.read_exact(&mut method).unwrap();
+        assert_eq!(method, [5, 0]);
+        let mut request = vec![5, 1, 0, 1, 127, 0, 0, 1];
+        request.extend_from_slice(&target_port.to_be_bytes());
+        socket.write_all(&request).unwrap();
+        let mut reply = [0u8; 10];
+        socket.read_exact(&mut reply).unwrap();
+        assert_eq!(&reply[..2], &[5, 0]);
+        socket.write_all(&[7; 64]).unwrap();
+        let mut received = [0u8; 128];
+        socket.read_exact(&mut received).unwrap();
+        assert_eq!(received, [8; 128]);
+        drop(socket);
+        echo.join().unwrap();
+        host.stop().unwrap();
+        let path = directory.join("application-traffic.json");
+        let saved =
+            singbox_core::outbound::ProcessTrafficState::read_storage(&path)
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            saved.records.iter().map(|r| r.direct_upload).sum::<u64>(),
+            64
+        );
+        assert_eq!(
+            saved.records.iter().map(|r| r.direct_download).sum::<u64>(),
+            128
+        );
+        assert_eq!(
+            saved
+                .records
+                .iter()
+                .map(|r| r.proxy_upload + r.proxy_download)
+                .sum::<u64>(),
+            0
+        );
+
+        // Use a new listener so this persistence test does not depend on the
+        // kernel's TIME_WAIT policy for the completed proxy connection.
+        let mut next: serde_json::Value =
+            serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
+        next["inbounds"][0]["listen_port"] = 0.into();
+        fs::write(&config_path, serde_json::to_vec(&next).unwrap()).unwrap();
+        let mut restarted =
+            NativeRuntime::start(&config_path, &directory).unwrap();
+        let api_port =
+            fs::read_to_string(directory.join("clash-api-port")).unwrap();
+        let url =
+            format!("http://127.0.0.1:{}/zay/process-traffic", api_port.trim());
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let usage = client
+            .get(&url)
+            .send()
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .bytes()
+            .unwrap();
+        let usage: serde_json::Value = serde_json::from_slice(&usage).unwrap();
+        assert_eq!(
+            usage["records"].as_array().unwrap().len(),
+            saved.records.len()
+        );
+        let reset = client
+            .post(format!("{url}/reset"))
+            .send()
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .bytes()
+            .unwrap();
+        let reset: serde_json::Value = serde_json::from_slice(&reset).unwrap();
+        assert!(reset["records"].as_array().unwrap().is_empty());
+        restarted.stop().unwrap();
+        assert!(
+            singbox_core::outbound::ProcessTrafficState::read_storage(&path)
+                .unwrap()
+                .unwrap()
+                .records
+                .is_empty()
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 
