@@ -463,7 +463,7 @@ function ProcessIdentity({ name, path, lookup }: { name?: string; path?: string;
     const lookupHint = lookup === "udp_cache" ? "UDP 缓存归属" : lookup === "platform_monitor" ? "系统网络扩展归属" : ""
     return <div className="min-w-0" title={[name, path, lookupHint].filter(Boolean).join(" · ")}><div className="truncate font-medium"><span>{displayName}</span>{lookup === "udp_cache" && <span className="ml-1 text-[10px] text-sky-300">缓存</span>}{lookup === "platform_monitor" && <span className="ml-1 text-[10px] text-emerald-300">系统</span>}</div>{path && <div className="truncate font-mono text-[10px] text-muted-foreground">{path}</div>}</div>
   }
-  const labels: Record<string, string> = { socket_snapshot_miss: "快照未命中", kernel_socket: "系统 / 内核", process_exited: "进程已退出", permission_denied: "权限不足", resolver_error: "查询失败" }
+  const labels: Record<string, string> = { socket_snapshot_miss: "快照未命中", kernel_socket: "系统 / 内核", process_exited: "进程已退出", permission_denied: "权限不足", resolver_error: "查询失败", non_local_source: "非本机来源" }
   return <span className="status-pill" title={lookup || "没有进程归属信息"}>{labels[lookup ?? ""] ?? "未识别"}</span>
 }
 function Evidence({ source, confidence }: { source?: string; confidence?: string }) { if (confidence === "exact") return <span className="status-pill status-pill-active">{source ?? "精确"}</span>; if (confidence === "correlated") return <span className="status-pill border-amber-500/20 bg-amber-500/10 text-amber-300">DNS 关联</span>; return <span className="status-pill">未识别</span> }

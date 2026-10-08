@@ -2,12 +2,46 @@ import Darwin
 import Foundation
 import Security
 
+/// Identities already resolved for a running process image.
+///
+/// Reading a signature touches the disk, and `handleNewFlow` holds the flow
+/// until it returns, so one process must not pay for it on every connection.
+/// The PID version changes on exec and PID reuse, which keeps an entry from
+/// outliving the image it describes.
+private final class ProcessIdentityCache: @unchecked Sendable {
+    struct Key: Hashable {
+        let pid: Int32
+        let pidVersion: UInt32
+    }
+
+    private let lock = NSLock()
+    private var entries: [Key: ProcessIdentity] = [:]
+    private let limit = 512
+
+    func identity(for key: Key) -> ProcessIdentity? {
+        lock.lock()
+        defer { lock.unlock() }
+        return entries[key]
+    }
+
+    func store(_ identity: ProcessIdentity, for key: Key) {
+        lock.lock()
+        defer { lock.unlock() }
+        if entries.count >= limit {
+            entries.removeAll(keepingCapacity: true)
+        }
+        entries[key] = identity
+    }
+}
+
 struct ProcessIdentity {
     let pid: Int32?
     let uid: Int32?
     let name: String
     let path: String
     let signingIdentifier: String
+
+    private static let cache = ProcessIdentityCache()
 
     static func resolve(
         auditToken: Data?,
@@ -29,10 +63,14 @@ struct ProcessIdentity {
         }
         let pid = Int32(bitPattern: values[5])
         let uid = Int32(bitPattern: values[1])
+        let key = ProcessIdentityCache.Key(pid: pid, pidVersion: values[7])
+        if let cached = cache.identity(for: key) {
+            return cached
+        }
         let signing = signingDetails(auditToken: auditToken)
         let livePath = processPath(pid: pid)
         let path = livePath.isEmpty ? signing.path : livePath
-        return ProcessIdentity(
+        let identity = ProcessIdentity(
             pid: pid,
             uid: uid,
             name: path.isEmpty
@@ -43,6 +81,8 @@ struct ProcessIdentity {
             path: path,
             signingIdentifier: signing.identifier
         )
+        cache.store(identity, for: key)
+        return identity
     }
 
     private static func signingDetails(
@@ -59,6 +99,10 @@ struct ProcessIdentity {
         ) == errSecSuccess, let guest else {
             return ("", "")
         }
+        // Until the running code is checked against its signature, the
+        // identifier is only what the binary claims about itself.
+        let valid = SecCodeCheckValidity(guest, SecCSFlags(), nil)
+            == errSecSuccess
         var staticCode: SecStaticCode?
         guard SecCodeCopyStaticCode(
             guest,
@@ -77,8 +121,18 @@ struct ProcessIdentity {
         else {
             return ("", "")
         }
-        let identifier = values[kSecCodeInfoIdentifier] as? String ?? ""
         let path = (values[kSecCodeInfoMainExecutable] as? URL)?.path ?? ""
+        // An ad-hoc signature lets anyone pick the identifier, so it only
+        // counts when a team or Apple itself vouches for it.
+        let flags = (values[kSecCodeInfoFlags] as? NSNumber)?.uint32Value ?? 0
+        let adHoc = flags & SecCodeSignatureFlags.adhoc.rawValue != 0
+        let team = values[kSecCodeInfoTeamIdentifier] as? String ?? ""
+        let platform =
+            (values[kSecCodeInfoPlatformIdentifier] as? NSNumber)?.intValue ?? 0
+        guard valid, !adHoc, !team.isEmpty || platform != 0 else {
+            return ("", path)
+        }
+        let identifier = values[kSecCodeInfoIdentifier] as? String ?? ""
         return (identifier, path)
     }
 

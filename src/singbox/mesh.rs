@@ -7,13 +7,19 @@ use crate::{settings::Settings, singbox::tun_route};
 /// Historical tag for the removed WireGuard portal endpoint (kept for rule detection).
 pub const MESH_ENDPOINT_TAG: &str = "easytier-wg";
 
+/// Rule items that pin the bypass to this executable. A health-check rule
+/// derived from the bypass must carry all of them.
+pub(crate) const PROCESS_MATCH_KEYS: [&str; 3] =
+    ["process_name", "process_path", "process_path_regex"];
+
 /// Full-capture TUN + subscription: EasyTier runs inside the `zay` process — keep all its sockets direct.
 pub fn easytier_process_bypass_route_rules(settings: &Settings) -> Vec<Value> {
     if !tun_route::tun_full_capture_mesh_proxy(settings) {
         return Vec::new();
     }
+    let exe = std::env::current_exe().ok();
     let mut names = Vec::new();
-    if let Ok(exe) = std::env::current_exe() {
+    if let Some(exe) = &exe {
         if let Some(stem) = exe.file_stem().and_then(|s| s.to_str()) {
             names.push(stem.to_string());
         }
@@ -26,12 +32,51 @@ pub fn easytier_process_bypass_route_rules(settings: &Settings) -> Vec<Value> {
     if names.is_empty() {
         names.push("zay".into());
     }
-    vec![json!({
+    let mut rule = json!({
         "action": "route",
         "inbound": ["tun-in"],
         "process_name": names,
         "outbound": "direct"
-    })]
+    });
+    // Any binary can be named like this one; only this file may skip the
+    // proxy.
+    let paths = exe.as_deref().map(executable_paths).unwrap_or_default();
+    if !paths.is_empty() {
+        if cfg!(windows) {
+            // Windows reports the image path in whatever case it was
+            // launched with.
+            let patterns: Vec<String> = paths
+                .iter()
+                .map(|path| format!("(?i)^{}$", regex::escape(path)))
+                .collect();
+            rule["process_path_regex"] = json!(patterns);
+        } else {
+            rule["process_path"] = json!(paths);
+        }
+    }
+    vec![rule]
+}
+
+/// Spellings under which the process resolver can report `exe`.
+fn executable_paths(exe: &std::path::Path) -> Vec<String> {
+    let mut paths = Vec::new();
+    let mut push = |path: &std::path::Path| {
+        let Some(path) = path.to_str() else {
+            return;
+        };
+        // Linux marks a binary replaced on disk, Windows canonical paths
+        // carry a verbatim prefix; the resolver reports neither.
+        let path = path.strip_suffix(" (deleted)").unwrap_or(path);
+        let path = path.strip_prefix(r"\\?\").unwrap_or(path).to_string();
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    };
+    push(exe);
+    if let Ok(resolved) = exe.canonicalize() {
+        push(&resolved);
+    }
+    paths
 }
 
 pub fn is_easytier_process_bypass_route_rule(rule: &Value) -> bool {

@@ -27,10 +27,22 @@ mod macos {
     };
 
     const APP_GROUP_ID: &str = "group.dev.zay.macos";
+    // The system extension runs as root, so its App Group container is
+    // root's even when zay itself runs as the logged-in user.
+    const ROOT_HOME: &str = "/private/var/root";
     const EVENT_TTL: Duration = Duration::from_secs(60);
+    // An event that names only one end of the flow cannot tell two sockets
+    // apart for long, so it is only believed right after it was observed.
+    const WEAK_EVENT_TTL: Duration = Duration::from_secs(3);
+    const DESTINATION_SCORE: u8 = 8;
+    const SOURCE_SCORE: u8 = 5;
+    const SOURCE_PORT_SCORE: u8 = 3;
+    const STRONG_SCORE: u8 = DESTINATION_SCORE + SOURCE_PORT_SCORE;
     const EVENT_LIMIT: usize = 8192;
     const RETRY_COUNT: usize = 3;
     const RETRY_DELAY: Duration = Duration::from_millis(2);
+    // Waiting for an event only pays off while the extension is publishing.
+    const EXTENSION_LIVE_WINDOW: Duration = Duration::from_secs(300);
 
     #[derive(Debug, Deserialize)]
     struct FlowEvent {
@@ -61,12 +73,12 @@ mod macos {
     #[derive(Default)]
     struct TailState {
         offset: u64,
-        inode: Option<u64>,
+        file: Option<(u64, u64)>,
         pending: Vec<u8>,
     }
 
     pub(super) struct MacOsProcessAttributionResolver {
-        path: PathBuf,
+        paths: Vec<PathBuf>,
         tail: Mutex<TailState>,
         events: Mutex<VecDeque<CachedFlow>>,
         fallback: Option<Arc<dyn ProcessResolver>>,
@@ -74,29 +86,49 @@ mod macos {
 
     impl MacOsProcessAttributionResolver {
         fn new(
-            path: PathBuf,
+            paths: Vec<PathBuf>,
             fallback: Option<Arc<dyn ProcessResolver>>,
         ) -> Self {
             Self {
-                path,
+                paths,
                 tail: Mutex::new(TailState::default()),
                 events: Mutex::new(VecDeque::new()),
                 fallback,
             }
         }
 
+        /// The first event file whose contents can be believed.
+        fn event_file(&self) -> Option<(&Path, fs::Metadata)> {
+            self.paths.iter().find_map(|path| {
+                let metadata = fs::metadata(path).ok()?;
+                trusted_event_file(&metadata)
+                    .then_some((path.as_path(), metadata))
+            })
+        }
+
+        fn extension_is_publishing(&self) -> bool {
+            self.event_file().is_some_and(|(_, metadata)| {
+                metadata
+                    .modified()
+                    .ok()
+                    .and_then(|modified| modified.elapsed().ok())
+                    // A timestamp in the future still means a live writer.
+                    .is_none_or(|age| age < EXTENSION_LIVE_WINDOW)
+            })
+        }
+
         fn refresh(&self) {
-            let Ok(metadata) = fs::metadata(&self.path) else {
+            let Some((path, metadata)) = self.event_file() else {
                 return;
             };
             let mut tail = self.tail.lock().expect("flow event tail lock");
-            let inode = metadata.ino();
-            if tail.inode != Some(inode) || metadata.len() < tail.offset {
+            let file = (metadata.dev(), metadata.ino());
+            if tail.file != Some(file) || metadata.len() < tail.offset {
                 tail.offset = 0;
                 tail.pending.clear();
-                tail.inode = Some(inode);
+                tail.file = Some(file);
             }
-            let Ok(mut file) = File::open(&self.path) else {
+            let Ok(mut file) = File::open(path) else {
                 return;
             };
             if file.seek(SeekFrom::Start(tail.offset)).is_err() {
@@ -141,16 +173,7 @@ mod macos {
             self.refresh();
             let mut events = self.events.lock().expect("flow event cache lock");
             prune(&mut events);
-            events
-                .iter()
-                .rev()
-                .filter(|event| event.network == network)
-                .filter_map(|event| {
-                    let score = match_score(event, source, destination)?;
-                    Some((score, event.observed_at, event.process.clone()))
-                })
-                .max_by_key(|(score, observed_at, _)| (*score, *observed_at))
-                .map(|(_, _, process)| process)
+            select_process(events.iter(), network, source, destination)
         }
     }
 
@@ -185,7 +208,7 @@ mod macos {
                     process: None,
                     status: ProcessLookupStatus::SocketSnapshotMiss,
                 });
-            if fallback.process.is_some() || !self.path.is_file() {
+            if fallback.process.is_some() || !self.extension_is_publishing() {
                 return fallback;
             }
             // The content filter and packet tunnel callbacks can arrive on
@@ -227,8 +250,12 @@ mod macos {
         Some(CachedFlow {
             observed_at,
             network,
-            source: parse_socket(event.source.as_deref()),
-            destination: parse_socket(event.destination.as_deref()),
+            // The filter sees most outbound flows before they are bound and
+            // reports port 0, which identifies no socket.
+            source: parse_socket(event.source.as_deref())
+                .filter(|source| source.port() != 0),
+            destination: parse_socket(event.destination.as_deref())
+                .filter(|destination| destination.port() != 0),
             process: ProcessInfo {
                 process_name: event.process_name,
                 process_path: event.process_path,
@@ -243,6 +270,51 @@ mod macos {
         SocketAddr::from_str(value?).ok()
     }
 
+    /// An event file is evidence only if no other user could have written
+    /// it: it must belong to root or to this process and grant nobody else
+    /// write access.
+    fn trusted_event_file(metadata: &fs::Metadata) -> bool {
+        let owner = metadata.uid();
+        metadata.is_file()
+            && (owner == 0 || owner == unsafe { libc::geteuid() })
+            && metadata.mode() & 0o022 == 0
+    }
+
+    fn select_process<'a>(
+        events: impl Iterator<Item = &'a CachedFlow>,
+        network: Network,
+        source: SocketAddr,
+        destination: Option<SocketAddr>,
+    ) -> Option<ProcessInfo> {
+        let mut strong: Option<(u8, &CachedFlow)> = None;
+        let mut weak: Vec<&CachedFlow> = Vec::new();
+        for event in events.filter(|event| event.network == network) {
+            let Some(score) = match_score(event, source, destination) else {
+                continue;
+            };
+            if score >= STRONG_SCORE {
+                if strong.is_none_or(|(best, current)| {
+                    (score, event.observed_at) >= (best, current.observed_at)
+                }) {
+                    strong = Some((score, event));
+                }
+            } else if event.observed_at.elapsed().unwrap_or_default()
+                < WEAK_EVENT_TTL
+            {
+                weak.push(event);
+            }
+        }
+        if let Some((_, event)) = strong {
+            return Some(event.process.clone());
+        }
+        // Several processes sharing one destination or one port leave no
+        // way to choose; the socket table is the better witness then.
+        let newest = weak.iter().max_by_key(|event| event.observed_at)?;
+        weak.iter()
+            .all(|event| event.process == newest.process)
+            .then(|| newest.process.clone())
+    }
+
     fn match_score(
         event: &CachedFlow,
         source: SocketAddr,
@@ -250,22 +322,21 @@ mod macos {
     ) -> Option<u8> {
         let mut score = 0;
         if let Some(candidate) = event.destination {
-            let destination = destination?;
-            if candidate != destination {
+            if destination != Some(candidate) {
                 return None;
             }
-            score += 8;
+            score += DESTINATION_SCORE;
         }
         if let Some(candidate) = event.source {
             if candidate == source {
-                score += 5;
+                score += SOURCE_SCORE;
             } else if candidate.port() == source.port() {
-                score += 3;
+                score += SOURCE_PORT_SCORE;
             } else {
                 return None;
             }
         }
-        (score >= 8 || event.source.is_some()).then_some(score)
+        (score > 0).then_some(score)
     }
 
     fn prune(events: &mut VecDeque<CachedFlow>) {
@@ -277,25 +348,34 @@ mod macos {
         }
     }
 
-    fn event_path() -> PathBuf {
+    fn event_paths() -> Vec<PathBuf> {
         if let Some(path) = env::var_os("ZAY_PROCESS_ATTRIBUTION_FILE") {
-            return PathBuf::from(path);
+            return vec![PathBuf::from(path)];
         }
-        dirs_next::home_dir()
-            .unwrap_or_else(|| Path::new("/").to_path_buf())
-            .join("Library")
-            .join("Group Containers")
-            .join(APP_GROUP_ID)
-            .join("Library")
-            .join("Application Support")
-            .join("Zay")
-            .join("attribution")
-            .join("flows.jsonl")
+        let mut homes = vec![PathBuf::from(ROOT_HOME)];
+        if let Some(home) = dirs_next::home_dir()
+            && !homes.contains(&home)
+        {
+            homes.insert(0, home);
+        }
+        homes
+            .into_iter()
+            .map(|home| {
+                home.join("Library")
+                    .join("Group Containers")
+                    .join(APP_GROUP_ID)
+                    .join("Library")
+                    .join("Application Support")
+                    .join("Zay")
+                    .join("attribution")
+                    .join("flows.jsonl")
+            })
+            .collect()
     }
 
     pub(super) fn resolver() -> Arc<dyn ProcessResolver> {
         Arc::new(MacOsProcessAttributionResolver::new(
-            event_path(),
+            event_paths(),
             singbox_core::native_process_resolver(),
         ))
     }
@@ -340,6 +420,79 @@ mod macos {
                 ),
                 None
             );
+        }
+
+        fn flow(
+            age: Duration,
+            source: Option<&str>,
+            destination: Option<&str>,
+            name: &str,
+        ) -> CachedFlow {
+            CachedFlow {
+                observed_at: SystemTime::now() - age,
+                network: Network::Tcp,
+                source: source.map(|source| source.parse().unwrap()),
+                destination: destination
+                    .map(|destination| destination.parse().unwrap()),
+                process: ProcessInfo {
+                    process_name: name.into(),
+                    ..ProcessInfo::default()
+                },
+            }
+        }
+
+        fn select(events: &[CachedFlow]) -> Option<String> {
+            select_process(
+                events.iter(),
+                Network::Tcp,
+                "10.14.14.9:53000".parse().unwrap(),
+                Some("1.1.1.1:443".parse().unwrap()),
+            )
+            .map(|process| process.process_name)
+        }
+
+        #[test]
+        fn unbound_source_is_not_a_mismatch() {
+            let event = convert_event(FlowEvent {
+                version: 1,
+                observed_at_ms: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64,
+                network: "tcp".into(),
+                source: Some("0.0.0.0:0".into()),
+                destination: Some("1.1.1.1:443".into()),
+                process_name: "curl".into(),
+                process_path: String::new(),
+                signing_identifier: String::new(),
+                uid: None,
+            })
+            .unwrap();
+            assert_eq!(event.source, None);
+            assert_eq!(select(&[event]).as_deref(), Some("curl"));
+        }
+
+        #[test]
+        fn destination_only_event_must_be_fresh_and_unambiguous() {
+            let second = Duration::from_secs(1);
+            let target = Some("1.1.1.1:443");
+            let fresh = flow(second, None, target, "curl");
+            assert_eq!(select(&[fresh.clone()]).as_deref(), Some("curl"));
+
+            let stale = flow(WEAK_EVENT_TTL + second, None, target, "curl");
+            assert_eq!(select(&[stale]), None);
+
+            let rival = flow(second, None, target, "wget");
+            assert_eq!(select(&[fresh.clone(), rival.clone()]), None);
+
+            // An event naming both ends settles it, even when it is older.
+            let strong = flow(
+                WEAK_EVENT_TTL + second,
+                Some("192.168.1.8:53000"),
+                target,
+                "git",
+            );
+            assert_eq!(select(&[fresh, rival, strong]).as_deref(), Some("git"));
         }
     }
 }

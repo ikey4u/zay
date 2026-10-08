@@ -24,14 +24,14 @@ final class AttributionEventWriter: @unchecked Sendable {
 
     func append(_ event: AttributionEvent) {
         queue.async {
-            guard let data = try? self.encoder.encode(event) else { return }
-            self.rotateIfNeeded(adding: UInt64(data.count + 1))
+            guard var data = try? self.encoder.encode(event) else { return }
+            data.append(0x0A)
+            self.rotateIfNeeded(adding: UInt64(data.count))
             self.openIfNeeded()
             guard let handle = self.handle else { return }
             do {
                 try handle.seekToEnd()
                 try handle.write(contentsOf: data)
-                try handle.write(contentsOf: Data([0x0A]))
             } catch {
                 try? handle.close()
                 self.handle = nil
@@ -43,8 +43,19 @@ final class AttributionEventWriter: @unchecked Sendable {
         guard handle == nil, let url = ZayMacAppGroup.flowEventsURL else {
             return
         }
-        if !FileManager.default.fileExists(atPath: url.path) {
-            FileManager.default.createFile(atPath: url.path, contents: nil)
+        // The reader ignores an event file that anyone else could write.
+        let attributes: [FileAttributeKey: Any] = [.posixPermissions: 0o644]
+        if FileManager.default.fileExists(atPath: url.path) {
+            try? FileManager.default.setAttributes(
+                attributes,
+                ofItemAtPath: url.path
+            )
+        } else {
+            FileManager.default.createFile(
+                atPath: url.path,
+                contents: nil,
+                attributes: attributes
+            )
         }
         handle = try? FileHandle(forWritingTo: url)
     }

@@ -11,10 +11,20 @@ Linux and Windows code.
    process identity, and always returns `allow`. It does not implement proxying,
    routing, DNS or TUN.
 2. Events are appended as versioned NDJSON to the shared App Group file:
-   `Library/Application Support/Zay/attribution/flows.jsonl`.
+   `Library/Application Support/Zay/attribution/flows.jsonl`. The extension
+   runs as root, so the file lives in root's App Group container; the adapter
+   looks in the current user's container first and root's second.
 3. The Rust macOS adapter tails that file, correlates each event with a TUN
    flow, and falls back to the existing native socket-table resolver whenever
    the extension is absent or has no match.
+   - The file is only read when it is owned by root or by the user running
+     zay and is not writable by group or others.
+   - An event that names both the destination and the source port of a flow
+     is used for 60 seconds. An event that names only one of them is used for
+     3 seconds, and only while every such event points at the same process.
+   - `signing_identifier` is empty unless the running code passes signature
+     validation and is signed by a team or by Apple. Ad-hoc signed binaries
+     choose their own identifier, so `package_name` rules never match them.
 4. On Linux and Windows the adapter is not compiled. Those platforms can add
    their own producer behind the same `ProcessResolver` interface.
 

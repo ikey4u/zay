@@ -332,24 +332,30 @@ pub(crate) fn mesh_health_check_route_rules(
     else {
         return Vec::new();
     };
-    for key in ["inbound", "process_name"] {
-        health_rule[key] = process_rule[key].clone();
-    }
+    let process_match = |rule: &mut Value| {
+        rule["inbound"] = process_rule["inbound"].clone();
+        for key in mesh::PROCESS_MATCH_KEYS {
+            if let Some(value) = process_rule.get(key) {
+                rule[key] = value.clone();
+            }
+        }
+    };
+    process_match(&mut health_rule);
     health_rule["network"] = json!("tcp");
     health_rule["port"] = json!([port]);
     let mut rules = Vec::new();
     if health_rule.get("domain").is_some() {
         // Recover Host/SNI before the process bypass even when the upstream
         // resolver supplied an address absent from our reverse DNS cache.
-        rules.push(json!({
+        let mut sniff_rule = json!({
             "action": "sniff",
-            "inbound": process_rule["inbound"],
-            "process_name": process_rule["process_name"],
             "network": "tcp",
             "port": [port],
             "sniffer": ["http", "tls"],
             "timeout": "2s"
-        }));
+        });
+        process_match(&mut sniff_rule);
+        rules.push(sniff_rule);
     }
     rules.push(health_rule);
     rules
@@ -911,6 +917,11 @@ mod tests {
         assert!(1 < bypass);
         assert_eq!(routes[1]["port"], json!([443]));
         assert_eq!(routes[1]["process_name"], routes[bypass]["process_name"]);
+        assert_eq!(routes[1]["process_path"], routes[bypass]["process_path"]);
+        assert_eq!(
+            routes[1]["process_path_regex"],
+            routes[bypass]["process_path_regex"]
+        );
 
         settings.health_check_url = "http://192.0.2.11/generate_204".into();
         let health = mesh_health_check_route_rules(&settings, "Proxy");

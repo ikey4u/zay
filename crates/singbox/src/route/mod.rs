@@ -2485,10 +2485,12 @@ impl Router {
                     SocksAddr::Ip(address) => Some(*address),
                     SocksAddr::Domain { .. } => None,
                 })
+            // `user` is not checked: an authenticating inbound stores its
+            // own account there, which says nothing about the local process.
+            && metadata.process_lookup.is_empty()
             && metadata.process_name.is_empty()
             && metadata.process_path.is_empty()
             && metadata.package_name.is_empty()
-            && metadata.user.is_empty()
             && metadata.user_id.is_none()
         {
             let destination = metadata
@@ -2520,7 +2522,9 @@ impl Router {
                 metadata.process_name = process.process_name;
                 metadata.process_path = process.process_path;
                 metadata.package_name = process.package_name;
-                metadata.user = process.user;
+                if metadata.user.is_empty() {
+                    metadata.user = process.user;
+                }
                 metadata.user_id = process.user_id;
             }
         }

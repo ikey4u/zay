@@ -90,6 +90,8 @@ pub enum ProcessLookupStatus {
     ProcessExited,
     PermissionDenied,
     ResolverError,
+    /// The flow was forwarded from another host, so no local socket owns it.
+    NonLocalSource,
 }
 
 impl ProcessLookupStatus {
@@ -103,6 +105,7 @@ impl ProcessLookupStatus {
             Self::ProcessExited => "process_exited",
             Self::PermissionDenied => "permission_denied",
             Self::ResolverError => "resolver_error",
+            Self::NonLocalSource => "non_local_source",
         }
     }
 }
