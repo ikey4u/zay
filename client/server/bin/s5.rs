@@ -3,7 +3,7 @@
 use std::{future::Future, io, net::SocketAddr, time::Duration};
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use singbox_core::{
     inbound::socks::{SocksServer, SocksServerOptions},
     option::User,
@@ -12,10 +12,16 @@ use singbox_core::{
 #[path = "s5/share.rs"]
 mod share;
 
+const SYSTEMD_HELP: &str = "\
+Run as a systemd service:
+  s5 --help-systemd prints a unit file for this binary, with install steps";
+
 #[derive(Parser)]
 #[command(
+    name = "s5",
     version,
-    about = "A standalone SOCKS5 server with TCP and UDP forwarding"
+    about = "A standalone SOCKS5 server with TCP and UDP forwarding",
+    after_help = SYSTEMD_HELP
 )]
 struct Args {
     /// Address to listen on (use [::1]:1080 for IPv6).
@@ -49,6 +55,14 @@ struct Args {
     /// UDP association idle timeout in seconds.
     #[arg(long, default_value_t = 300, value_parser = clap::value_parser!(u32).range(1..))]
     udp_timeout: u32,
+
+    /// Concurrent SOCKS connections; each uses up to four file descriptors.
+    #[arg(long, default_value_t = 1024, value_parser = clap::value_parser!(u32).range(1..))]
+    max_connections: u32,
+
+    /// Print a ready-to-use systemd unit for this binary and exit.
+    #[arg(long)]
+    help_systemd: bool,
 }
 
 fn listen_address(value: &str) -> Result<SocketAddr, String> {
@@ -88,9 +102,72 @@ impl Args {
             listen: self.listen,
             users,
             udp_timeout: Duration::from_secs(self.udp_timeout.into()),
+            max_connections: self.max_connections as usize,
             ..SocksServerOptions::default()
         })
     }
+}
+
+// Quote the ExecStart= program path; systemd expands `%` and `$` there.
+fn systemd_word(value: &str) -> String {
+    let word = value.replace('%', "%%").replace('$', "$$");
+    let plain = !word.is_empty()
+        && word.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || b"_-.,:/@+=%".contains(&byte)
+        });
+    if plain {
+        return word;
+    }
+    format!("\"{}\"", word.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+// The unit starts the running binary from its resolved path with default
+// options; the comments are valid unit syntax, so the output installs as is.
+fn systemd_unit() -> Result<String> {
+    let binary = std::env::current_exe()
+        .and_then(std::fs::canonicalize)
+        .context("locating the s5 binary")?;
+    let binary = binary
+        .to_str()
+        .context("the s5 binary path is not valid UTF-8")?;
+    let binary = systemd_word(binary);
+    // A connection holds up to four descriptors (--max-connections is 1024).
+    Ok(format!(
+        "\
+# Install and start:
+#   s5 --help-systemd | sudo tee /etc/systemd/system/s5.service >/dev/null
+#   sudo chmod 600 /etc/systemd/system/s5.service   # if it holds credentials
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now s5
+# Inspect:
+#   systemctl status s5
+#   journalctl -u s5 -f        # logs, including the import links
+# After editing this file or replacing the binary:
+#   sudo systemctl daemon-reload && sudo systemctl restart s5
+
+[Unit]
+Description=s5 SOCKS5 server
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+# Append options to ExecStart= (see s5 --help), for example:
+#   --listen 0.0.0.0:1080 --advertise HOST
+ExecStart={binary}
+# Uncomment to require authentication and keep import URLs stable:
+#Environment=S5_USERNAME=alice
+#Environment=S5_PASSWORD=secret
+#Environment=S5_IMPORT_TOKEN=<output of: openssl rand -hex 32>
+Restart=on-failure
+RestartSec=2
+# Keep at least four descriptors per --max-connections.
+LimitNOFILE=4352
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target
+"
+    ))
 }
 
 // Register SIGTERM before starting the listener so service managers can stop
@@ -117,6 +194,20 @@ fn shutdown_signal() -> io::Result<impl Future<Output = io::Result<()>>> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    if args.help_systemd {
+        // Checked on the raw arguments: clap's `exclusive` also rejects
+        // options that come from the S5_* environment variables.
+        if std::env::args_os().len() != 2 {
+            Args::command()
+                .error(
+                    clap::error::ErrorKind::ArgumentConflict,
+                    "--help-systemd cannot be combined with other options",
+                )
+                .exit();
+        }
+        print!("{}", systemd_unit()?);
+        return Ok(());
+    }
     let shutdown = shutdown_signal().context("registering shutdown signals")?;
     let host = args
         .advertise
@@ -149,9 +240,15 @@ async fn main() -> Result<()> {
         }
     }
     let mut import_task = tokio::spawn(import.run());
-    let signal_result = tokio::select! {
-        result = shutdown => result,
-        result = &mut import_task => Err(io::Error::other(format!("QR import server stopped: {result:?}"))),
+    // Either listener stopping is fatal: exit with an error so a service
+    // manager restarts the process instead of leaving it half alive.
+    let stop_result = tokio::select! {
+        result = shutdown => result.context("waiting for shutdown signal"),
+        result = &mut import_task => Err(anyhow::anyhow!("QR import server stopped: {result:?}")),
+        result = server.wait() => Err(match result {
+            Ok(()) => anyhow::anyhow!("SOCKS server stopped unexpectedly"),
+            Err(error) => anyhow::Error::new(error).context("SOCKS server stopped"),
+        }),
     };
     if !import_task.is_finished() {
         import_task.abort();
@@ -160,7 +257,7 @@ async fn main() -> Result<()> {
     // Close active TCP connections and UDP associations even if signal
     // handling fails, rather than leaving cleanup to process termination.
     let close_result = server.close().await;
-    signal_result.context("waiting for shutdown signal")?;
+    stop_result?;
     close_result.context("closing SOCKS server")?;
     Ok(())
 }

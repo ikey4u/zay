@@ -221,3 +221,34 @@ fn rejects_invalid_arguments_and_an_occupied_listen_port() {
             .contains("starting SOCKS server")
     );
 }
+
+#[test]
+fn help_systemd_prints_a_unit_for_this_binary_and_stands_alone() {
+    // Environment-provided options do not count as mixing.
+    let output = command()
+        .arg("--help-systemd")
+        .env("S5_IMPORT_TOKEN", "0123456789abcdef0123456789abcdef")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let unit = String::from_utf8(output.stdout).unwrap();
+    let binary = std::fs::canonicalize(env!("CARGO_BIN_EXE_s5")).unwrap();
+    assert!(unit.contains(&format!("\nExecStart={}\n", binary.display())));
+    assert!(unit.contains("\nRestart=on-failure\n"));
+    assert!(unit.contains("systemctl enable --now s5"));
+    assert!(unit.ends_with("[Install]\nWantedBy=multi-user.target\n"));
+
+    let mixed = command()
+        .args(["--help-systemd", "--listen", "127.0.0.1:2080"])
+        .output()
+        .unwrap();
+    assert!(!mixed.status.success());
+    assert!(mixed.stdout.is_empty());
+
+    let help = command().arg("--help").output().unwrap();
+    assert!(
+        String::from_utf8(help.stdout)
+            .unwrap()
+            .contains("--help-systemd")
+    );
+}

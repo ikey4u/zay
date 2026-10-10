@@ -122,7 +122,25 @@ S5_IMPORT_TOKEN='<saved-token>' ./target/release/s5 \
 `--import-token` is also available; tokens must contain 32–64 URL-safe letters,
 digits, hyphens, or underscores. Import URLs remain valid while `s5` is running.
 
+To run `s5` as a systemd service, `s5 --help-systemd` prints a unit whose
+`ExecStart=` uses the binary's current absolute path. It takes no other
+options; the unit's comments list the install steps and show where to add
+options and credentials:
+
+```sh
+./target/release/s5 --help-systemd | sudo tee /etc/systemd/system/s5.service >/dev/null
+sudo systemctl daemon-reload
+sudo systemctl enable --now s5
+journalctl -u s5 -f   # logs, including the import links
+```
+
 `--udp-timeout SECONDS` sets the UDP association idle timeout (default: 300).
+`--max-connections COUNT` caps concurrent SOCKS connections (default: 1024);
+further clients wait in the listen backlog. A connection uses up to four file
+descriptors, so raise the descriptor limit to match (`ulimit -n`, or
+`LimitNOFILE=` under systemd). Running out of descriptors delays new
+connections but does not stop the listener. If either listener stops
+unexpectedly, `s5` exits with an error so `Restart=on-failure` can restart it.
 UDP relay ports are allocated dynamically; clients must keep the SOCKS TCP
 control connection open while using a UDP association. Ctrl+C or SIGTERM on
 Unix stops the listener and closes active connections. This server requires

@@ -165,3 +165,94 @@ async fn stalled_handshake_and_idle_udp_sessions_close() {
     .await
     .expect("idle SOCKS sessions did not close");
 }
+
+#[tokio::test]
+async fn connection_limit_defers_clients_and_wait_supervises() {
+    timeout(Duration::from_secs(5), async {
+        let mut server = SocksServer::new(SocksServerOptions {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            max_connections: 1,
+            ..SocksServerOptions::default()
+        })
+        .unwrap();
+        // Supervision requires a running listener.
+        assert!(server.wait().await.is_err());
+        server.start().await.unwrap();
+        let address = server.local_addr().unwrap();
+        let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let destination: SocksAddr = target.local_addr().unwrap().into();
+
+        let mut first = TcpStream::connect(address).await.unwrap();
+        client_handshake(&mut first, &destination, None)
+            .await
+            .unwrap();
+        // The second client stays in the backlog until the first leaves.
+        let mut second = TcpStream::connect(address).await.unwrap();
+        assert!(
+            timeout(
+                Duration::from_millis(200),
+                client_handshake(&mut second, &destination, None),
+            )
+            .await
+            .is_err()
+        );
+        // The relay ends once both of its peers have closed.
+        drop(target.accept().await.unwrap());
+        drop(first);
+        drop(second);
+        let mut second = TcpStream::connect(address).await.unwrap();
+        client_handshake(&mut second, &destination, None)
+            .await
+            .unwrap();
+
+        // A running server keeps `wait` pending, and cancelling it is safe.
+        assert!(
+            timeout(Duration::from_millis(50), server.wait())
+                .await
+                .is_err()
+        );
+        server.close().await.unwrap();
+    })
+    .await
+    .expect("connection limit or supervision timed out");
+}
+
+#[tokio::test]
+async fn udp_association_survives_bad_datagrams_and_nat_addresses() {
+    timeout(Duration::from_secs(5), async {
+        let mut server = server().await;
+        let target = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let destination = target.local_addr().unwrap();
+        let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut control = TcpStream::connect(server.local_addr().unwrap())
+            .await
+            .unwrap();
+        // Clients behind NAT announce a private address the server never sees.
+        let announced: SocketAddr = "10.255.0.1:4321".parse().unwrap();
+        let relay = client_udp_associate(&mut control, &announced.into(), None)
+            .await
+            .unwrap();
+        let relay = relay.resolve().await.unwrap()[0];
+        // Fragments, garbage, and unresolvable names are dropped.
+        udp.send_to(&[0, 0, 1, 1, 127, 0, 0, 1, 0, 9, b'x'], relay)
+            .await
+            .unwrap();
+        udp.send_to(b"garbage", relay).await.unwrap();
+        let unresolvable = SocksAddr::new("unresolvable.invalid", 9);
+        udp.send_to(&encode_udp_packet(&unresolvable, b"x").unwrap(), relay)
+            .await
+            .unwrap();
+        let request = encode_udp_packet(&destination.into(), b"alive").unwrap();
+        udp.send_to(&request, relay).await.unwrap();
+        let mut packet = [0; 512];
+        let (size, source) = target.recv_from(&mut packet).await.unwrap();
+        assert_eq!(&packet[..size], b"alive");
+        target.send_to(b"reply", source).await.unwrap();
+        let (size, _) = udp.recv_from(&mut packet).await.unwrap();
+        let (_, payload) = decode_udp_packet(&packet[..size]).unwrap();
+        assert_eq!(payload, b"reply");
+        server.close().await.unwrap();
+    })
+    .await
+    .expect("UDP association did not survive bad datagrams");
+}

@@ -12,7 +12,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     task::JoinSet,
-    time::{Duration, timeout},
+    time::{Duration, sleep, timeout},
 };
 
 #[path = "formats.rs"]
@@ -77,13 +77,18 @@ impl ImportServer {
         print_qr(&self.links, format)
     }
 
-    pub async fn run(self) -> io::Result<()> {
+    pub async fn run(self) {
         let resources = Arc::new(self.resources);
         let mut requests = JoinSet::new();
         loop {
             tokio::select! {
                 connection = self.listener.accept(), if requests.len() < 64 => {
-                    let (socket, _) = connection?;
+                    // Accept failures such as descriptor exhaustion are
+                    // transient; stopping here would take the proxy down.
+                    let Ok((socket, _)) = connection else {
+                        sleep(Duration::from_millis(100)).await;
+                        continue;
+                    };
                     let resources = resources.clone();
                     requests.spawn(async move {
                         let _ = timeout(Duration::from_secs(5), serve_import(socket, &resources)).await;

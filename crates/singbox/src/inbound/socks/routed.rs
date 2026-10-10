@@ -234,6 +234,7 @@ async fn accept_loop(
     super::serve_listener(
         listener,
         cancellation,
+        usize::MAX,
         move |stream, local_ip, source| {
             let tag = tag.clone();
             let users = users.clone();
@@ -625,7 +626,10 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send,
 {
     let socket = UdpSocket::bind(SocketAddr::new(local_ip, 0)).await?;
+    // A dual-stack listener reports IPv4 clients as IPv4-mapped IPv6,
+    // which an IPv4 client cannot send datagrams to.
     let bound = socket.local_addr()?;
+    let bound = SocketAddr::new(bound.ip().to_canonical(), bound.port());
     write_reply_for_version(
         &mut control,
         SocksVersion::V5,
@@ -633,18 +637,13 @@ where
         Some(&bound.into()),
     )
     .await?;
-    let client_address = match requested_client {
-        crate::common::network::SocksAddr::Ip(address)
-            if !address.ip().is_unspecified() && address.port() != 0 =>
-        {
-            Some(address)
-        }
-        _ => None,
-    };
     let incoming: PacketStream = Box::new(SocksUdpAssociation {
         socket,
         source_ip: source.ip(),
-        client: Mutex::new(client_address),
+        client: Mutex::new(super::association_client(
+            &requested_client,
+            source,
+        )),
     });
     tokio::select! {
         result = proxy_packet_connection(

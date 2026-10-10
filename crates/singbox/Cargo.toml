@@ -14,7 +14,7 @@ path = "src/lib.rs"
 default = ["full"]
 # The default engine keeps the existing complete API and protocol registry.
 # Embedders can disable defaults and select socks for standalone forwarding.
-socks = []
+socks = ["dep:socket2"]
 full = [
     "socks",
     "tokio/fs", "tokio/process", "tokio/signal",
